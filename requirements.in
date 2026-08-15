@@ -1,0 +1,22 @@
+# Direct (top-level) Python deps for tsc-marl, layered on top of
+# torch/PyG/SUMO/CityFlow (which are installed separately in the Dockerfile
+# because they need custom package indexes / a source build).
+#
+# EDIT THIS FILE, then regenerate the locked requirements.txt with:
+#   uv pip compile requirements.in -o requirements.txt \
+#     --generate-hashes --python-version 3.10 --python-platform x86_64-unknown-linux-gnu
+#
+# numpy is held < 2.0 for the compiled-wheel (PyG/others) ABI.
+
+sumo-rl==1.4.5
+gymnasium==0.29.1
+pettingzoo==1.24.3
+numpy==1.26.4
+pandas==2.2.2
+scipy==1.13.1
+matplotlib==3.9.2
+networkx==3.3
+pyyaml==6.0.2
+tqdm==4.66.5
+pillow==10.4.0
+tensorboard==2.17.1

@@ -1,0 +1,25 @@
+# Optional convenience for local development (laptop + desktop).
+#   CPU:  docker compose run --rm dev
+#   GPU:  docker compose run --rm dev-gpu   (needs NVIDIA Container Toolkit)
+# Your code is bind-mounted at /workspace so edits are live (no rebuild).
+services:
+  dev:
+    build: .
+    image: tsc-marl:latest
+    volumes:
+      - ./:/workspace
+    environment:
+      - LIBSUMO_AS_TRACI=1     # ~8x faster headless SUMO (no GUI/parallel sims)
+    stdin_open: true
+    tty: true
+    command: bash
+
+  dev-gpu:
+    extends: dev
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
