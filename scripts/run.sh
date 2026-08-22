@@ -17,5 +17,15 @@ if [[ ! -f external/LibSignal/run.py ]]; then
   exit 1
 fi
 
+# Interpreter z .venv, a nie gołe `python` — inaczej trafiamy w systemowego/pyenv,
+# który nie ma zależności (a przy pyenv bez ustawionego `global` w ogóle nie istnieje).
+# Aktywowany venv albo jawny PYTHON=... mają pierwszeństwo.
+PYTHON="${PYTHON:-${VIRTUAL_ENV:+$VIRTUAL_ENV/bin/python}}"
+PYTHON="${PYTHON:-.venv/bin/python}"
+if [[ ! -x "$PYTHON" ]]; then
+  echo "Brak interpretera: $PYTHON. Uruchom najpierw:  make setup" >&2
+  exit 1
+fi
+
 export PYTHONHASHSEED=0
-exec python -m tsc_marl.run "$@"
+exec "$PYTHON" -m tsc_marl.run "$@"

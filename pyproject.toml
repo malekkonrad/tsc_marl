@@ -24,6 +24,7 @@ dependencies = [
     "gym==0.26.2",            # ich pin 0.21 ma zepsute metadane i nie instaluje się
     "pfrl==0.4.0",
     "packaging",
+    "lmdb",                   # importowane w dataset/onfly_dataset.py, czyli przy KAŻDYM runie
 
     # --- analiza wyników ---
     "pandas",
@@ -36,8 +37,8 @@ dependencies = [
 
 [project.optional-dependencies]
 # torch-scatter to koło budowane pod konkretną parę (torch, CUDA), więc żyje osobno.
-# CPU:  uv pip install -e ".[cpu]"  --find-links https://data.pyg.org/whl/torch-2.4.1+cpu.html
-# CUDA: uv pip install -e ".[gpu]"  --find-links https://data.pyg.org/whl/torch-2.4.1+cu121.html
+# CPU:  make setup       (torch+cpu  z download.pytorch.org/whl/cpu)
+# CUDA: make setup-gpu   (torch+cu121 z download.pytorch.org/whl/cu121)
 cpu = ["torch-scatter==2.1.2"]
 gpu = ["torch-scatter==2.1.2"]
 dev = ["ruff", "pytest"]
@@ -45,6 +46,11 @@ dev = ["ruff", "pytest"]
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+# CityFlow nie jest na PyPI, więc wisi jako referencja do gita (`cityflow @ git+...`).
+# Bez tej flagi hatchling odmawia zbudowania metadanych pakietu.
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tsc_marl"]
