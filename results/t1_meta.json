@@ -1,0 +1,39 @@
+{
+  "modes": {
+    "realistic": {
+      "generated": "2026-08-21T13:26:42",
+      "libsignal_dir": "LibSignal",
+      "protocol": {
+        "action_interval": 15,
+        "yellow_length": 5,
+        "steps": 3600,
+        "test_steps": 3600,
+        "episodes": 1,
+        "t_min": "",
+        "w1": "",
+        "obs_length": "",
+        "drop_always_green": ""
+      }
+    },
+    "benchmark": {
+      "generated": "2026-08-22T18:05:08",
+      "protocol": {
+        "action_interval": 15,
+        "yellow_length": 0,
+        "steps": 3600,
+        "test_steps": 3600,
+        "episodes": 1,
+        "t_min": "",
+        "w1": "",
+        "obs_length": "",
+        "drop_always_green": ""
+      }
+    }
+  },
+  "pythonhashseed": "0 (wymuszone — bez tego world_sumo niedeterministyczny)",
+  "note": "Δt z configs/tsc/thesis_protocol.yml; yellow_length nadpisywany trybem (--mode) przez tsc_marl.run --yellow",
+  "code_version": {
+    "tsc_marl": "4ff2b0e-dirty",
+    "LibSignal": "536dfe4"
+  }
+}

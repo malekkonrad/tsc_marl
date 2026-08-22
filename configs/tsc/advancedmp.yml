@@ -1,0 +1,32 @@
+includes:
+  - configs/tsc/base.yml
+  - configs/tsc/thesis_protocol.yml   # zamrożony protokół — musi być OSTATNI
+
+model:
+  name: advancedmp
+  t_min: 15   # = Δt; MP-owe metody decydują raz na action_interval
+  # W1 = 1.0 — default referencyjnej implementacji autorów (run_advanced_maxpressure.py: "W": 1).
+  # Optimum sweepu na JiNan w trybie realistycznym (yellow=5): 299,2 s przy W1=1,0.
+  w1: 1.0
+  # OBS_LENGTH=167 z referencyjnej implementacji (≈ V_max·Δt = 165 m z Def. 8).
+  # WSPÓLNE okno dla kolejki (pressure) i pojazdów jadących (demand) — autorzy liczą oba
+  # z tego samego wycinka pasa, papier tego nie mówi.
+  obs_length: 167
+  # Skręty w prawo są dozwolone w KAŻDEJ fazie → nie konkurują o zielone.
+  # W p(s) dają stałą addytywną (argmax bez zmian), ale w d(s) zawyżają demand
+  # i rozstrajają porównanie d·W1 > max p. Autorzy sumują tylko ruchy sterowane.
+  drop_always_green: true
+
+trainer:
+  episodes: 1   # metoda bez treningu
+  buffer_size: 0
+  learning_rate: 0
+  learning_start: 0
+  update_model_rate: 0
+  update_target_rate: 0
+
+logger:
+  save_rate: 0
+  train_model: False
+  test_model: True
+  load_model: False

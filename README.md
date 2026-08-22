@@ -1,286 +1,174 @@
-# tsc-marl — portable MARL Traffic Signal Control environment
+# tsc-marl
 
-A **build-once, run-everywhere** environment for multi-agent reinforcement
-learning on traffic signal control, for the thesis *"Utilizing a Multi-Agent
-Approach in the Traffic Signal Control Problem"*.
+Kod do pracy inżynierskiej **„Wykorzystanie podejścia wieloagentowego w problemie
+zarządzania sygnalizacją świetlną"** — wieloagentowe sterowanie sygnalizacją oparte
+na grafowej sieci neuronowej z kwantyfikacją niepewności.
 
-One Docker image is the single source of truth. It runs:
+Sieć drogowa jest traktowana jako graf, a agenci ważą informacje od sąsiadów przez
+mechanizm uwagi (GAT). Kontrybucja pracy leży w warstwie niepewności: polityka
+szacuje, **kiedy nie wie** — per krawędź grafu — i degraduje się łagodnie przy awarii
+sensorów, zamiast rozsypywać się jak metody SOTA.
 
-- **CPU-only on your laptop** (development, small scenarios) — same image, no GPU,
-- **GPU-accelerated on your desktop** (`--gpus all`) — full training runs,
-- **on Cyfronet HPC** (Ares / Athena / Helios) — converted to an Apptainer `.sif`
-  and launched under SLURM.
+> Status: Faza 0 (odtworzenie baseline'ów) zamknięta. Fazy 1–3 w toku.
 
-### What's inside the image
-| Component | Version / ref | Role |
+---
+
+## Spis treści
+1. [Co tu jest](#co-tu-jest) · 2. [Instalacja](#instalacja) · 3. [Uruchamianie](#uruchamianie)
+4. [Protokół eksperymentalny](#protokół-eksperymentalny) · 5. [Wyniki](#wyniki)
+6. [Relacja do LibSignala](#relacja-do-libsignala) · 7. [Pułapki](#pułapki)
+
+---
+
+## Co tu jest
+
+```
+tsc_marl/
+├── src/tsc_marl/           # KOD WŁASNY
+│   ├── run.py              #   entry point treningu/ewaluacji
+│   ├── bench.py            #   runner siatki {agent}×{sieć}×{seed} → tabele T1
+│   ├── libsignal.py        #   most do submodułu (ścieżki, sys.path, SUMO_HOME)
+│   ├── seeding.py          #   deterministyczne ziarnowanie
+│   └── agents/             #   agenci: Efficient-MP, Advanced-MP (własne implementacje)
+├── configs/
+│   ├── tsc/                #   configi metod + thesis_protocol.yml (protokół zamrożony)
+│   └── sim/                #   definicje sieci (JiNan 3×4, HangZhou 4×4)
+├── data/raw_data/          # sieci i potoki ruchu użyte w pracy (9,4 MB)
+├── results/                # liczby do pracy: CSV + wygenerowane tabele
+├── runs/                   # (gitignore) checkpointy, logi, replaye
+├── external/LibSignal/     # submoduł: fork LibSignala + patche silnika
+└── deploy/hpc/             # ścieżka zapasowa: Docker/Apptainer/SLURM na Cyfronet
+```
+
+Podział jest celowy: **`src/` to kod własny, `external/` to cudzy**. Wszystko, co
+zostało dołożone do LibSignala, widać jednym poleceniem — patrz
+[Relacja do LibSignala](#relacja-do-libsignala).
+
+## Instalacja
+
+Wymagania: Python 3.10, `uv`, `cmake` + `g++` (CityFlow kompiluje się ze źródeł).
+
+```bash
+git clone --recursive git@github.com:malekkonrad/tsc_marl.git
+cd tsc_marl
+make setup     # submoduł + venv + zależności
+make check     # ~15 s; powinno wypisać "Final Travel Time is 316.1114"
+```
+
+Na maszynie z GPU podmień koło `torch-scatter` na wariant CUDA:
+
+```bash
+uv pip install -e ".[gpu]" --find-links https://data.pyg.org/whl/torch-2.4.1+cu121.html
+```
+
+Jeśli klonowałeś bez `--recursive`: `git submodule update --init --recursive`.
+
+## Uruchamianie
+
+```bash
+scripts/run.sh -a efficientmp -n cityflow_jinan3x4_4ph --seed 0   # jeden run
+make bench                                                        # cała tabela T1
+python -m tsc_marl.bench -a colight -s 0 1 2 --timeout 86400      # trening
+```
+
+**Uruchamiaj przez `scripts/run.sh`, nie przez `python -m tsc_marl.run`.** Wrapper
+ustawia `PYTHONHASHSEED=0` przed startem interpretera; ustawiony z poziomu Pythona
+nie zadziała, a bez niego `world_sumo` daje różne wyniki dla tych samych argumentów.
+
+Dostępne metody: `fixedtime`, `sotl`, `maxpressure`, `efficientmp`, `advancedmp`,
+`presslight`, `colight`, `mplight`, `frap`, `dqn`.
+Sieci: `cityflow_jinan3x4{,_4ph}`, `cityflow_hangzhou4x4{,_4ph}`.
+
+## Protokół eksperymentalny
+
+Protokół jest **zamrożony** w [`configs/tsc/thesis_protocol.yml`](configs/tsc/thesis_protocol.yml)
+i współdzielony przez wszystkie metody. Powód jest metodologiczny: przy niespójnym
+protokole rankingi metod potrafią się odwrócić, więc porównanie przestaje cokolwiek
+znaczyć. Δt = 15 s, epizod 3600 s, `PYTHONHASHSEED=0`.
+
+Jedyny parametr celowo zmieniany to długość fazy przejściowej, bo **wyniki są
+raportowane w dwóch trybach**:
+
+| tryb | `yellow_length` | co znaczy |
 |---|---|---|
-| SUMO (`eclipse-sumo`, `libsumo`, `traci`, `sumolib`) | 1.27.1 | microscopic simulator + Python APIs |
-| CityFlow | commit `81ee0f4` | fast large/city-scale simulator for RL |
-| LibSignal (DaRL-LibSignal) | commit `127af9f` | cross-simulator MARL framework (SUMO **and** CityFlow) |
-| RESCO | commit `f1ed9a1` | standardized benchmark scenarios/baselines |
-| sumo-rl | 1.4.5 | Gymnasium/PettingZoo interface to SUMO |
-| PyTorch + torchvision | 2.3.1 / 0.18.1 (cu121) | deep learning (GPU or CPU) |
-| PyTorch Geometric | 2.6.1 (+ optional C++ ext) | GNN layers (for CoLight-style models) |
-| numpy | 1.26.4 (pinned <2.0) | pinned for the compiled-wheel ABI |
+| `realistic` | 5 s (żółte 3 + all-red 2) | fizycznie poprawny — nasz protokół |
+| `benchmark` | 0 s | tak liczą swoje wyniki implementacje referencyjne z papierów |
 
-> **Why this stack:** LibSignal runs the *same* agent code on both SUMO and
-> CityFlow with a calibrated conversion, so you can benchmark a GNN policy across
-> simulators. Use **CityFlow** for fast city-scale RL, **SUMO + sumo-rl/RESCO**
-> for microscopic realism and standardized benchmarks (Cologne, Ingolstadt,
-> grid4x4, arterial4x4), and **PyG** for the graph model.
+Rozjazd nie jest kosmetyczny: to **ok. 17% ATT**. Wyszedł przy odtwarzaniu
+baseline'ów — publikacje deklarują modelowanie fazy przejściowej, ale ich kod jej nie
+symuluje. Po wyłączeniu przejścia trafiamy w literaturę z dokładnością ~1%. Sama ta
+różnica jest wynikiem wspierającym narrację pracy o luce wdrożeniowej, więc oba tryby
+zostają, a każdy wiersz wyników niesie swój `yellow_length`.
 
----
+Tryb wybiera się flagą — `--yellow 0` lub `bench -m benchmark` — a nie osobną kopią
+konfiguracji.
 
-## 0. Prerequisites
+## Wyniki
 
-| Machine | Needs |
+`results/` zawiera przetworzone liczby, które idą do pracy:
+
+| plik | co to |
 |---|---|
-| Laptop (CPU) | Docker |
-| Desktop (GPU) | Docker + NVIDIA driver + **NVIDIA Container Toolkit** (see §2) |
-| Cyfronet HPC | a PLGrid account + grant; jobs use Apptainer + SLURM (see §3). You build the `.sif` on the desktop and copy it over. |
+| `t1_raw.csv` | jeden wiersz na run: metryki + pełne metadane protokołu i parametry agenta |
+| `t1_baseline.md` | nasze liczby obok literatury — GATE Fazy 0 |
+| `t1_table.md` | mean ± std po ziarnach |
+| `t1_meta.json` | protokół, wersje kodu (SHA obu repo), data |
 
-No Python/conda needed on the host — everything lives in the container.
+Checkpointy i logi trafiają do `runs/` i **nie są wersjonowane** — w sandboxie urosły
+do 642 MB. Kolumny `t_min`, `w1`, `obs_length`, `drop_always_green` w CSV nie są
+ozdobą: bez nich wiersz Advanced-MP nie jest odtwarzalny, bo te parametry zmieniają
+wynik o ~10%.
 
----
+## Relacja do LibSignala
 
-## 1. Quickstart (laptop / desktop)
-
-```bash
-make build          # build the image (first time: ~15–25 min, downloads a lot)
-make smoke          # health check (CPU): verifies SUMO, CityFlow, torch, PyG...
-make shell          # drop into an interactive shell with your code mounted
-```
-
-On the GPU desktop, confirm the GPU is visible inside the container:
+[LibSignal](https://github.com/DaRL-LibSignal/LibSignal) dostarcza środowisko i pętlę
+treningową. Jest podpięty jako submoduł wskazujący na fork z gałęzią `thesis`, więc
+**cały wkład w cudzy kod widać jednym poleceniem**:
 
 ```bash
-make smoke-gpu      # should report "CUDA available - 1 GPU(s): NVIDIA ..."
+git -C external/LibSignal diff master..thesis
 ```
 
-`make smoke` runs [`scripts/smoke_test.py`](scripts/smoke_test.py); a green run
-means the environment is healthy. Your project directory is bind-mounted at
-`/workspace`, so you edit code on the host and run it in the container without
-rebuilding.
+Na gałęzi `thesis` są wyłącznie patche silnika, których nie da się zrobić z zewnątrz:
 
----
+- `world_cityflow.py` — `yellow_length` czytane z configu zamiast zahardkodowanego 5
+  (bez tego CityFlow ignorował ten parametr, więc tryb `benchmark` był nieosiągalny),
+  plus opcjonalne logowanie ATT liczonego jak w `summary.py` linii Advanced-XLight.
+- `world_sumo.py` — `sumo-gui` startuje automatycznie i z regulowanym opóźnieniem.
 
-## 2. GPU desktop — NVIDIA Container Toolkit
+Wszystko inne — agenci, configi, protokół — mieszka w tym repo. Jest to możliwe, bo
+Registry LibSignala zapełnia się dekoratorami przy imporcie, a ścieżki configów są
+rozwiązywane względem CWD; uruchamiamy go więc z korzenia repo, żeby czytał nasze
+`configs/` i `data/`. Szczegóły: [`src/tsc_marl/libsignal.py`](src/tsc_marl/libsignal.py).
 
-Docker needs the toolkit to pass the GPU through. Install the **host NVIDIA
-driver** only (no CUDA toolkit on the host — the image brings CUDA), then:
+Baseline'y `fixedtime`, `sotl`, `presslight`, `colight`, `mplight`, `frap` pochodzą
+z LibSignala. `efficientmp` i `advancedmp` są **implementacjami własnymi** wg definicji
+z papierów — LibSignal nie ma żadnej z tych metod, a jego `maxpressure` liczy pressure
+z `lane_count` zamiast z kolejek, więc nie jest tym, co opisuje literatura.
 
-```bash
-# Add NVIDIA's repo (see docs.nvidia.com for your distro), then:
-sudo apt-get install -y nvidia-container-toolkit
-sudo nvidia-ctk runtime configure --runtime=docker
-sudo systemctl restart docker
+## Pułapki
 
-# Verify the GPU reaches a container:
-docker run --rm --gpus all nvidia/cuda:12.1.1-base-ubuntu22.04 nvidia-smi
-```
+Rzeczy, które kosztowały czas i nie są oczywiste z kodu:
 
-Then run anything with `--gpus all` (see the `*-gpu` Make targets).
+- **`update_target_rate` liczy się w decyzjach, nie w krokach symulacji.** Domyślne 10
+  z `base.yml` znaczyło aktualizację sieci target co 10 kroków zamiast standardowych
+  500–10000 — CoLight dochodził do ATT ~315 i rozpadał się do 1204. Dotyczy wszystkich
+  metod DQN-owych, dlatego poprawka siedzi w configach każdej z nich, a nie w jednej.
+- **ATT raportuje się jako średnią z 10 ostatnich epizodów testowych**, nie jako
+  pojedynczy test po treningu (protokół Advanced-CoLight 5.1). Przy niestabilnym
+  uczeniu różnica jest ogromna: 1204,5 (ostatni) vs 766,1 (średnia z 10) vs 314,6 (najlepszy).
+- **SUMO tylko z pipa.** `apt` na Ubuntu noble daje 1.18, a pipowe `libsumo` jest 1.27
+  i wersje muszą się zgadzać.
+- **`SUMO_HOME` jest wymagane nawet dla `-w cityflow`** — LibSignal importuje SUMO na
+  poziomie modułu.
+- **LibSignal nadpisuje `configs/sim/*.cfg` w trakcie biegu**, wstawiając świeże
+  ścieżki logów replaya. To nie są twoje zmiany; `restore_sim_configs()` cofa je po
+  każdym runie, żeby `git status` pokazywał tylko prawdziwe różnice.
+- **Każdy run idzie w osobnym podprocesie**, bo Registry jest globalne i nie da się go
+  czysto zresetować między konfiguracjami w jednym procesie.
 
-**Compatibility rule:** the container's CUDA (12.1) must be **≤** the CUDA
-version your host driver supports (`nvidia-smi` shows it, top-right). If the host
-driver is too old you'll get *"could not select device driver with capabilities:
-[[gpu]]"* or a silent fall-back to CPU — update the driver or lower the CUDA
-wheel (`CUDA_WHEEL`/base image) in the `Dockerfile`.
+## Infrastruktura HPC
 
----
-
-## 3. Cyfronet HPC (Ares / Athena / Helios)
-
-HPC clusters **forbid Docker** (it needs a root daemon) and use **Apptainer**.
-The flow is: build the image on your desktop → convert to `.sif` → copy to the
-cluster's `$SCRATCH` → submit a SLURM job.
-
-### 3.1 Get access (PLGrid)
-1. Log in to the **PLGrid Portal** (portal.plgrid.pl), create/join a team.
-2. Apply for a **pilot grant** to start (approved within ~1 hour: 1000 CPU-hours,
-   10 GB, 72 h max task) — enough to validate the pipeline.
-3. Request **service access** for the cluster you want:
-   - **Athena** — A100 GPUs, **GPU-only**.
-   - **Ares** — CPU partitions + a V100 GPU partition.
-4. For real experiments, move to a **proper grant** with a stated GPU-hour budget.
-
-Check what you have on the cluster:
-```bash
-hpc-grants        # your grants and their resource allocations
-hpc-fs            # your storage / quotas
-module spider apptainer   # confirm the exact container-runtime module name
-```
-
-### 3.2 Build the `.sif` and copy it over
-Recommended (registry) path — reproducible and avoids moving a big tarball:
-```bash
-# on the desktop, after `make build`:
-docker tag tsc-marl:latest ghcr.io/YOURUSER/tsc-marl:v1
-docker push ghcr.io/YOURUSER/tsc-marl:v1
-# then, from anywhere (even a cluster login node — pulling is allowed):
-REGISTRY_REF=ghcr.io/YOURUSER/tsc-marl:v1 ./scripts/build_sif.sh
-```
-Offline path — no registry:
-```bash
-make sif                                   # docker save + apptainer build -> tsc-marl.sif
-./scripts/sync_to_cyfronet.sh push-sif     # scp the .sif to $SCRATCH
-```
-> Build the `.sif` where you have Apptainer + privileges (the desktop, or a
-> compute node with `--fakeroot`). **Do not** build it on a login node.
-
-### 3.3 Sync your code and submit a job
-```bash
-# edit LOGIN/CLUSTER in scripts/sync_to_cyfronet.sh, then:
-./scripts/sync_to_cyfronet.sh push         # code -> $SCRATCH/tsc-marl
-
-# on the cluster, verify the image first:
-apptainer exec --nv $SCRATCH/tsc-marl.sif python /opt/smoke_test.py
-
-# then submit (edit the account line first — see the gotcha below):
-sbatch scripts/slurm/train_athena_a100.sh          # A100
-sbatch scripts/slurm/train_ares_v100.sh            # V100
-sbatch scripts/slurm/sweep_ares_cpu_array.sh       # 5 seeds in parallel (CPU)
-
-# pull results back:
-./scripts/sync_to_cyfronet.sh pull-results
-```
-
-### 3.4 Cyfronet gotchas (these bite everyone)
-- **Account suffix is mandatory.** `sbatch -A grantname` alone is **rejected**.
-  Append the partition suffix: `-gpu-a100` on Athena, `-gpu`/`-cpu` on Ares. The
-  SLURM scripts have the right suffix — just replace `plgYOURGRANT`.
-- **Athena is GPU-only** and **bills every job in GPU-hours**; don't run CPU-only
-  jobs there (risks account suspension).
-- **`$SCRATCH` auto-purges:** on Athena, job dirs older than 7 days and data
-  older than 30 days are deleted. Keep the `.sif` and datasets on `$SCRATCH` for
-  speed, but **pull results off promptly**. Never rely on `$HOME` for large data.
-- **Modules:** use `module spider <name>` (some clusters' `module avail` hides
-  things). Athena's login node lacks dev libraries — compile on a compute node.
-- **Helios** uses ARM (Grace-Hopper); an x86_64 `.sif` won't run there. Build a
-  separate arm64 image if you target Helios. Athena/Ares are x86_64 (this image).
-
----
-
-## 4. Running experiments
-
-The image installs the heavy, painful-to-build pieces. **Your agent/training
-code lives in `src/`** (mounted at `/workspace`), so iterate freely.
-
-Two ways to drive training:
-- **Your own entry point** — e.g. `python -m src.train --seed 1 ...`. The SLURM
-  scripts and `make train-gpu` call this shape; wire it to your GNN/MARL loop.
-- **LibSignal's runner** — it lives at `/opt/LibSignal` in the image with its own
-  YAML configs (`CoLight.yml`, `FRAP.yml`, `MPLight.yml`, ...). Switch simulator
-  (SUMO/CityFlow) and dataset in the config. Example inside the container:
-  ```bash
-  cd /opt/LibSignal && python run.py --thread_num 8
-  ```
-  Copy a LibSignal config into your repo and edit it there to keep runs tracked.
-
-**Speed:** set `LIBSUMO_AS_TRACI=1` (already set in the Make/SLURM/compose
-targets) for ~8× faster headless SUMO. Trade-off: no `sumo-gui` and no parallel
-SUMO instances in one process — unset it (and use TraCI) when you need the GUI to
-debug. CityFlow accepts `thread_num` for multithreaded speedups.
-
----
-
-## 5. Reproducibility
-
-- **Versions** are pinned in the `Dockerfile` (ARGs) and `requirements.txt`; the
-  image + these files fully define the environment.
-- **Seeds:** call `set_global_seed(seed)` from [`src/seeding.py`](src/seeding.py)
-  at the start of every run, and pass the *same* seed to the simulator
-  (SUMO: `--seed`; CityFlow: `"seed"` in the engine config). Run several seeds
-  (e.g. 1–5, see the array job) and report mean ± std.
-- **Determinism caveat:** PyTorch does not guarantee bit-identical results across
-  versions/hardware or CPU-vs-GPU. Rely on the pinned image + fixed seeds +
-  multi-seed reporting, not on bit-exactness.
-
----
-
-## 6. Project layout
-
-```
-tsc-marl/
-├── Dockerfile              # single source of truth (all pins here); installs via uv
-├── requirements.in         # human-edited direct deps (edit this)
-├── requirements.txt        # uv-generated, fully locked + hash-verified (don't hand-edit)
-├── apptainer.def           # records the Docker -> .sif conversion recipe
-├── docker-compose.yml      # local dev convenience (CPU + GPU services)
-├── Makefile                # build / smoke / shell / sif shortcuts
-├── scripts/
-│   ├── smoke_test.py        # environment health check (run this first)
-│   ├── build_sif.sh         # Docker image -> Apptainer .sif (registry/offline)
-│   ├── sync_to_cyfronet.sh  # rsync/scp code, image, and results
-│   └── slurm/
-│       ├── train_athena_a100.sh     # A100 GPU job
-│       ├── train_ares_v100.sh       # V100 GPU job
-│       └── sweep_ares_cpu_array.sh  # multi-seed CPU array job
-├── src/
-│   ├── seeding.py           # reproducible seeding utility
-│   └── __init__.py          # <- put your GNN/MARL agents + train.py here
-├── configs/                 # your experiment YAMLs
-└── nets/                    # your SUMO/CityFlow scenarios (see nets/README.md)
-```
-
----
-
-## 7. Changing versions (and the `uv` workflow)
-
-Python packages are installed with **`uv`** inside the image (fast, hash-verified).
-The dependency set is split by necessity:
-
-- **torch / torchvision / PyG** and **SUMO** are pinned as explicit `ARG`s in the
-  `Dockerfile` because they come from custom indexes (`download.pytorch.org`,
-  `data.pyg.org`) — each is a separate, isolated `uv pip install` step.
-- **Everything else** lives in `requirements.in` (direct deps) and is compiled
-  into a fully locked, hash-pinned `requirements.txt` (35 packages incl.
-  transitive) that `uv` installs and verifies.
-
-To change the app deps: edit `requirements.in`, then regenerate the lock:
-```bash
-make lock        # = uv pip compile requirements.in -o requirements.txt --generate-hashes ...
-make build
-```
-To change torch/PyG/SUMO: edit the `ARG`s at the top of the `Dockerfile`, then
-`make build`. If you bump `torch`, the optional PyG C++ extensions must match a
-wheel at `data.pyg.org/whl/torch-<TORCH>+<CUDA>.html` — if none exists, the build
-skips them (PyG still works) or you can switch the base image to the CUDA `devel`
-variant to compile them from source.
-
-> **Why `uv` and not plain pip?** Two wins that matter for a thesis: (1) much
-> faster image builds (parallel resolver + downloads), and (2) `requirements.txt`
-> is now transitively locked with SHA256 hashes, so a rebuild months later
-> resolves to the exact same bytes. The file is still a normal requirements file
-> — plain `pip install -r requirements.txt` works as a fallback. `uv` does **not**
-> replace the Dockerfile's orchestration of the git-cloned/compiled pieces
-> (CityFlow's source build, LibSignal/RESCO clones) — those aren't PyPI packages.
-> CityFlow is intentionally built with plain `pip` as the low-risk path for the
-> one package compiled from source.
->
-> Want to use `uv` on the **host** too (for editing/linting outside Docker)?
-> `uv venv && uv pip install -r requirements.txt` gives you a matching venv — but
-> the native bits (SUMO binaries, CityFlow's C++ engine) still want the container.
-
----
-
-## 8. Troubleshooting
-
-| Symptom | Fix |
-|---|---|
-| `make smoke-gpu` shows CPU-only on the desktop | Install NVIDIA Container Toolkit (§2); check host driver CUDA ≥ 12.1. |
-| `could not select device driver ... [[gpu]]` | Toolkit not configured / daemon not restarted; re-run `nvidia-ctk runtime configure` + `systemctl restart docker`. |
-| CityFlow build fails during `docker build` | Almost always a toolchain/Python mismatch; building inside this image (fixed GCC + Python 3.10) is the known-good path. Re-run `make build` from a clean context. |
-| `SUMO_HOME` errors at runtime | Handled by the image (symlink `/opt/sumo`); if you customized the base image, ensure `import sumo` resolves and `$SUMO_HOME/{bin,tools,data}` exist. |
-| Need the SUMO GUI but it won't open | You have `LIBSUMO_AS_TRACI=1` set — unset it and use TraCI; Libsumo has no GUI. |
-| `sbatch` rejected on Cyfronet | Add the account suffix (`-gpu-a100` / `-gpu` / `-cpu`); replace `plgYOURGRANT`. |
-| Results vanished on the cluster | `$SCRATCH` auto-purge — pull results after each job; don't leave them there. |
-| PyG optional ext missing after a torch bump | Expected if no matching wheel; PyG runs without them, or use the CUDA `devel` base to build from source. |
-| `uv` hash-mismatch / "hash does not match" on build | You hand-edited `requirements.txt`. Edit `requirements.in` instead and run `make lock` to regenerate the hashes. |
-
----
-
-*Performance claims (CityFlow >20× vs SUMO; Libsumo ~8× vs TraCI) come from the
-respective projects and depend on hardware/scenario — benchmark on your own
-machines. Verify the Apptainer module name and current partition limits on
-Cyfronet with `module spider` / `sinfo`, as cluster configs change over time.*
+`deploy/hpc/` zawiera obraz Dockera, definicję Apptainera i skrypty SLURM pod Cyfronet
+(Ares/Athena). To **ścieżka zapasowa** — treningi liczone są na lokalnej maszynie z GPU.
+Katalog jest utrzymywany na wypadek, gdyby zabrakło mocy obliczeniowej.

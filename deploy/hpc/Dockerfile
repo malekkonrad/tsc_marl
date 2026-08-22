@@ -108,7 +108,7 @@ ENV PYTHONPATH=/opt/LibSignal:${PYTHONPATH}
 # requirements.txt is a fully-locked, hash-verified file generated from
 # requirements.in with `uv pip compile ... --generate-hashes`. uv enforces the
 # hashes on install. Regenerate after editing requirements.in (see README / make lock).
-COPY requirements.txt /tmp/requirements.txt
+COPY deploy/hpc/requirements.txt /tmp/requirements.txt
 RUN uv pip install --system -r /tmp/requirements.txt
 
 # --- Environment hygiene -------------------------------------------------------
@@ -117,7 +117,7 @@ ENV CUBLAS_WORKSPACE_CONFIG=:4096:8
 # Set LIBSUMO_AS_TRACI=1 at RUN time for ~8x faster headless SUMO (no GUI/parallel).
 
 WORKDIR /workspace
-COPY scripts/smoke_test.py /opt/smoke_test.py
+COPY deploy/hpc/smoke_test.py /opt/smoke_test.py
 
 # Quick health check any time: `docker run --rm tsc-marl python /opt/smoke_test.py`
 CMD ["/bin/bash"]

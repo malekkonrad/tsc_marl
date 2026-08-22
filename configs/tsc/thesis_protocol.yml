@@ -1,0 +1,31 @@
+# ZAMROŻONY PROTOKÓŁ EKSPERYMENTALNY (praca inż. — BGAT/PPO/CTDE)
+#
+# Jeden config współdzielony przez WSZYSTKIE metody. Powód: Wu 2021 — przy
+# niespójnym protokole rankingi metod się odwracają. Wartości wg linii
+# Advanced-CoLight / Efficient-MP, żeby liczby były porównywalne z papierami.
+#
+# UWAGA: ten plik ma być OSTATNIM elementem `includes:` w configu agenta,
+# a sam config agenta NIE MOŻE nadpisywać tych pól (direct config wygrywa
+# nad include'ami — patrz utils/logger.py:load_config).
+#
+# Domyślne wartości LibSignal, które świadomie zmieniamy:
+#   action_interval: 10 (base) / 20 (magd, maddpg_v2) → 15
+#   saveReplay: True → False (replaye puchną; włączać ręcznie do zrzutów)
+
+trainer:
+  # Δt = min action duration = 15 s (Advanced-CoLight, Efficient-MP)
+  action_interval: 15
+  # 5 s przejścia = yellow 3 s + all-red 2 s. LibSignal/CityFlow modeluje to
+  # jednym parametrem (jedna faza przejściowa), więc 3+2 zapisujemy jako 5 —
+  # sumarycznie zgodne z protokołem i z całą linią CoLight/Advanced.
+  yellow_length: 5
+  # epizod = 60 min
+  steps: 3600
+  test_steps: 3600
+  # thread_num CityFlow. Zweryfikowane: przy 4 wątkach CityFlow daje wyniki
+  # bit-identyczne między uruchomieniami, więc zostaje 4 (szybciej).
+  thread: 4
+
+world:
+  seed: 0
+  saveReplay: False

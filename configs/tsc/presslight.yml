@@ -1,0 +1,26 @@
+includes:
+  - configs/tsc/base.yml
+  - configs/tsc/thesis_protocol.yml   # zamrożony protokół — musi być OSTATNI
+
+
+model:
+  name: presslight
+  train_model: True
+  d_dense: 20
+  epsilon: 0.1
+  epsilon_decay: 0.995
+  epsilon_min: 0.01
+  one_hot: True
+  phase: True
+
+
+
+trainer:
+  learning_start: 1000
+  episodes: 200
+  # Ten sam fix, co w colight.yml: update_target_rate liczy się w DECYZJACH, a default
+  # z base.yml (10) znaczy aktualizację sieci target co 10 kroków zamiast 500-10000.
+  # PressLight przeżywał go dzięki prostemu MLP, ale protokół musi być JEDEN dla
+  # wszystkich metod DQN-owych — inaczej porównujemy metody przy różnych ustawieniach.
+  buffer_size: 20000
+  update_target_rate: 500

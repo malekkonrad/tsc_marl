@@ -216,3 +216,22 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ── projekt ──────────────────────────────────────────────────────────────────
+# Wyniki uruchomień: checkpointy (.pt), logi, replaye.
+runs/
+
+# LibSignal nadpisuje configs/sim/*.cfg w trakcie biegu (świeże ścieżki logów replaya).
+# Nie ignorujemy ich — są potrzebne — ale tsc_marl.libsignal.restore_sim_configs()
+# cofa to zabrudzenie po każdym runie.
+
+# Duże sieci upstreamowe, gdyby ktoś je skopiował lokalnie; wersjonujemy tylko
+# jinan_3x4 i hangzhou_4x4_advanced (9,4 MB), których faktycznie używamy.
+data/output_data/
+data/raw_data/*
+!data/raw_data/jinan_3x4/
+!data/raw_data/hangzhou_4x4_advanced/
+
+# Apptainer / docker save
+*.sif
+*.tar

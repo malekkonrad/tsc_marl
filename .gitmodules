@@ -1,0 +1,4 @@
+[submodule "external/LibSignal"]
+	path = external/LibSignal
+	url = git@github.com:malekkonrad/LibSignal.git
+	branch = thesis
