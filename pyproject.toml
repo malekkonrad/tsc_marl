@@ -69,6 +69,14 @@ ignore = ["E402"]
 # Nazewnictwo z papierów: W1/L/M/N oraz `l`,`m` na ruch (l,m) w definicjach pressure.
 # Zmiana na czytelniejsze nazwy rozjechałaby kod z wzorami, które implementuje.
 "src/tsc_marl/agents/*" = ["N803", "N806", "E741"]
+# Testy nazywamy po polsku i asercje piszemy wprost — bez wymogów dla kodu produkcyjnego.
+"tests/*" = ["N802"]
+
+[tool.pytest.ini_options]
+# Testy nie potrzebują silnika (patrz tests/conftest.py), ale conftest ustawia
+# sys.path na submoduł — dlatego jeden wspólny rootdir i żadnych testów w external/.
+testpaths = ["tests"]
+addopts = "-q"
 
 [tool.pyright]
 # Bez tego LSP w edytorze nie widzi ANI zależności z venva, ANI modułów LibSignala.

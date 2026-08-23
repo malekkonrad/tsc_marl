@@ -1,6 +1,6 @@
 # Skróty do najczęstszych operacji. `make help` listuje cele.
 .DEFAULT_GOAL := help
-.PHONY: help setup setup-gpu check bench bench-paper table lint hpc-build
+.PHONY: help setup setup-gpu check test bench bench-paper table lint hpc-build
 
 help: ## Pokaż tę pomoc
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -30,6 +30,9 @@ setup-gpu: ## To samo, ale torch/torch-scatter w wariancie CUDA 12.1
 check: ## Szybki test zdrowia środowiska (~15 s, Efficient-MP na JiNan)
 	scripts/run.sh -a efficientmp -n cityflow_jinan3x4_4ph --seed 0
 
+test: ## Testy jednostkowe (bez silnika, ~2 s)
+	.venv/bin/python -m pytest
+
 bench: ## Tabela T1, tryb realistyczny (yellow=5) — baseline'y bez treningu
 	python -m tsc_marl.bench -m realistic
 
@@ -40,7 +43,7 @@ table: ## Przelicz tabele z istniejących CSV, bez uruchamiania symulacji
 	python -m tsc_marl.bench --table-only
 
 lint: ## ruff
-	ruff check src/ && ruff format --check src/
+	.venv/bin/ruff check src/ tests/ && .venv/bin/ruff format --check src/ tests/
 
 hpc-build: ## Obraz Apptainer pod Cyfronet (ścieżka zapasowa — patrz deploy/hpc/)
 	SIF=tsc-marl.sif IMAGE=tsc-marl:latest ./deploy/hpc/build_sif.sh

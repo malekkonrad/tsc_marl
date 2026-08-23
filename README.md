@@ -30,10 +30,12 @@ tsc_marl/
 │   ├── libsignal.py        #   most do submodułu (ścieżki, sys.path, SUMO_HOME)
 │   ├── seeding.py          #   deterministyczne ziarnowanie
 │   └── agents/             #   agenci: Efficient-MP, Advanced-MP (własne implementacje)
+│       └── ats.py          #     Advanced Traffic State — prymitywy wspólne dla MP i CoLight
 ├── configs/
 │   ├── tsc/                #   configi metod + thesis_protocol.yml (protokół zamrożony)
 │   └── sim/                #   definicje sieci (JiNan 3×4, HangZhou 4×4)
 ├── data/raw_data/          # sieci i potoki ruchu użyte w pracy (9,4 MB)
+├── tests/                  # `make test` — testy bez silnika (~2 s)
 ├── results/                # liczby do pracy: CSV + wygenerowane tabele
 ├── runs/                   # (gitignore) checkpointy, logi, replaye
 ├── external/LibSignal/     # submoduł: fork LibSignala + patche silnika
@@ -53,6 +55,7 @@ git clone --recursive git@github.com:malekkonrad/tsc_marl.git
 cd tsc_marl
 make setup     # submoduł + venv + zależności
 make check     # ~15 s; powinno wypisać "Final Travel Time is 316.1114"
+make test      # ~2 s; testy jednostkowe (nie potrzebują CityFlow)
 ```
 
 Na maszynie z GPU podmień koło `torch-scatter` na wariant CUDA:
