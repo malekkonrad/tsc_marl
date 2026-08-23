@@ -35,7 +35,7 @@ tsc_marl/
 │   ├── tsc/                #   configi metod + thesis_protocol.yml (protokół zamrożony)
 │   └── sim/                #   definicje sieci (JiNan 3×4, HangZhou 4×4)
 ├── data/raw_data/          # sieci i potoki ruchu użyte w pracy (9,4 MB)
-├── tests/                  # `make test` — testy bez silnika (~2 s)
+├── tests/                  # `make test` (szybkie) / `make test-slow` (z CityFlow)
 ├── results/                # liczby do pracy: CSV + wygenerowane tabele
 ├── runs/                   # (gitignore) checkpointy, logi, replaye
 ├── external/LibSignal/     # submoduł: fork LibSignala + patche silnika
@@ -56,6 +56,7 @@ cd tsc_marl
 make setup     # submoduł + venv + zależności
 make check     # ~15 s; powinno wypisać "Final Travel Time is 316.1114"
 make test      # ~2 s; testy jednostkowe (nie potrzebują CityFlow)
+make test-all  # + testy stawiające symulator (marker `slow`)
 ```
 
 Na maszynie z GPU podmień koło `torch-scatter` na wariant CUDA:
@@ -79,7 +80,7 @@ ustawia `PYTHONHASHSEED=0` przed startem interpretera; ustawiony z poziomu Pytho
 nie zadziała, a bez niego `world_sumo` daje różne wyniki dla tych samych argumentów.
 
 Dostępne metody: `fixedtime`, `sotl`, `maxpressure`, `efficientmp`, `advancedmp`,
-`presslight`, `colight`, `mplight`, `frap`, `dqn`.
+`advancedcolight`, `presslight`, `colight`, `mplight`, `frap`, `dqn`.
 Sieci: `cityflow_jinan3x4{,_4ph}`, `cityflow_hangzhou4x4{,_4ph}`.
 
 ## Protokół eksperymentalny
@@ -145,7 +146,8 @@ rozwiązywane względem CWD; uruchamiamy go więc z korzenia repo, żeby czytał
 `configs/` i `data/`. Szczegóły: [`src/tsc_marl/libsignal.py`](src/tsc_marl/libsignal.py).
 
 Baseline'y `fixedtime`, `sotl`, `presslight`, `colight`, `mplight`, `frap` pochodzą
-z LibSignala. `efficientmp` i `advancedmp` są **implementacjami własnymi** wg definicji
+z LibSignala. `efficientmp`, `advancedmp` i `advancedcolight` są **implementacjami
+własnymi** wg definicji
 z papierów — LibSignal nie ma żadnej z tych metod, a jego `maxpressure` liczy pressure
 z `lane_count` zamiast z kolejek, więc nie jest tym, co opisuje literatura.
 

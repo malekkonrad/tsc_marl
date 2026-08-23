@@ -1,6 +1,6 @@
 # Skróty do najczęstszych operacji. `make help` listuje cele.
 .DEFAULT_GOAL := help
-.PHONY: help setup setup-gpu check test bench bench-paper table lint hpc-build
+.PHONY: help setup setup-gpu check test test-slow test-all bench bench-paper table lint hpc-build
 
 help: ## Pokaż tę pomoc
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -32,6 +32,12 @@ check: ## Szybki test zdrowia środowiska (~15 s, Efficient-MP na JiNan)
 
 test: ## Testy jednostkowe (bez silnika, ~2 s)
 	.venv/bin/python -m pytest
+
+test-slow: ## Same testy wymagające CityFlow (stawia świat, ~30 s)
+	.venv/bin/python -m pytest -m slow
+
+test-all: ## Wszystkie testy naraz
+	.venv/bin/python -m pytest -m ''
 
 bench: ## Tabela T1, tryb realistyczny (yellow=5) — baseline'y bez treningu
 	python -m tsc_marl.bench -m realistic

@@ -214,6 +214,7 @@ LITERATURE = {
         "advancedmp": 253.61,
         "colight": 272.06,
         "mplight": 297.46,
+        "advancedcolight": 245.73,
     },
     "cityflow_hangzhou4x4_4ph": {
         "fixedtime": 495.57,
@@ -222,6 +223,7 @@ LITERATURE = {
         "advancedmp": 279.47,
         "colight": 297.02,
         "mplight": 314.60,
+        "advancedcolight": 270.45,
     },
 }
 
@@ -260,6 +262,7 @@ def build_baseline_report(rows):
             "advancedmp",
             "presslight",
             "colight",
+            "advancedcolight",
         ):
             b = idx.get((net, agent, "0"))
             r5 = idx.get((net, agent, "5"))

@@ -76,7 +76,14 @@ ignore = ["E402"]
 # Testy nie potrzebują silnika (patrz tests/conftest.py), ale conftest ustawia
 # sys.path na submoduł — dlatego jeden wspólny rootdir i żadnych testów w external/.
 testpaths = ["tests"]
-addopts = "-q"
+# `-m "not slow"` w addopts = domyślnie lecą TYLKO szybkie. Argument z linii poleceń
+# nadpisuje tę wartość (pytest bierze ostatnie `-m`), więc `pytest -m slow` uruchamia
+# same wolne, a `pytest -m ""` — wszystkie. Bez rejestracji markera w `markers`
+# pytest sypie ostrzeżeniem przy każdym uruchomieniu.
+addopts = "-q -m 'not slow'"
+markers = [
+  "slow: wymaga postawionego symulatora CityFlow (~15 s na sesję zamiast ~2 s)",
+]
 
 [tool.pyright]
 # Bez tego LSP w edytorze nie widzi ANI zależności z venva, ANI modułów LibSignala.

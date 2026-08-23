@@ -1,0 +1,17 @@
+includes:
+  - configs/tsc/colight.yml            # architektura GAT i poprawki stabilności — bez zmian
+  - configs/tsc/thesis_protocol.yml    # zamrożony protokół — musi być OSTATNI
+
+model:
+  name: advancedcolight
+  # OBS_LENGTH=167 z referencyjnej implementacji (≈ V_max·Δt = 165 m z Def. 8).
+  # WSPÓLNE okno dla kolejki (pressure) i pojazdów jadących (demand) — tak samo
+  # jak w advancedmp.yml, żeby obie metody widziały ten sam wycinek pasa.
+  obs_length: 167
+  # Skręty w prawo mają zielone w KAŻDEJ fazie → nie są ruchami sterowanymi
+  # i nie wchodzą do ATS (inaczej wektor stanu ma 12 ruchów zamiast 8).
+  drop_always_green: true
+  # UWAGA: ATS NIE jest normalizowane. `vehicle_max` dzieli obserwację w CoLightcie,
+  # ale przy vehicle_max=1 to no-op, a dla pressure — które jest RÓŻNICĄ i bywa
+  # ujemne — dzielenie przez "maksymalną liczbę pojazdów na pasie" nie ma
+  # interpretacji. Stan idzie do sieci surowy, jak w papierze.
