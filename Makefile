@@ -1,6 +1,6 @@
 # Skróty do najczęstszych operacji. `make help` listuje cele.
 .DEFAULT_GOAL := help
-.PHONY: help setup setup-gpu check test test-slow test-all bench bench-paper table lint hpc-build
+.PHONY: help setup setup-gpu check test test-slow test-all bench bench-paper table runs plot lint hpc-build
 
 help: ## Pokaż tę pomoc
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -45,8 +45,17 @@ bench: ## Tabela T1, tryb realistyczny (yellow=5) — baseline'y bez treningu
 bench-paper: ## Tabela T1, tryb benchmark (yellow=0) — jak liczą papiery
 	python -m tsc_marl.bench -m benchmark
 
-table: ## Przelicz tabele z istniejących CSV, bez uruchamiania symulacji
+table: ## Przelicz tabele z zapisanych biegów, bez uruchamiania symulacji
 	python -m tsc_marl.bench --table-only
+
+runs: ## Wypisz policzone biegi (runs/t1) — status, parametry, ATT
+	.venv/bin/python -c "from tsc_marl.experiment import experiment; \
+	 import pandas as pd; pd.set_option('display.width', 200); \
+	 print(experiment().results().to_string(index=False))"
+
+plot: ## Krzywe uczenia z runs/ → runs/plots/ (działa też dla biegu w toku)
+	.venv/bin/python -m tsc_marl.plot
+	.venv/bin/python -m tsc_marl.plot --split train
 
 lint: ## ruff
 	.venv/bin/ruff check src/ tests/ && .venv/bin/ruff format --check src/ tests/

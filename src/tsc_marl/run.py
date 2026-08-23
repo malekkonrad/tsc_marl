@@ -53,6 +53,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "z configs/tsc/thesis_protocol.yml), 0 = tryb benchmark jak w papierach",
     )
     p.add_argument("--episodes", type=int, default=None, help="nadpisz liczbę epizodów")
+    p.add_argument(
+        "--run-id",
+        default=None,
+        help="nadpisz identyfikator biegu (domyślnie {agent}__{sieć}__s{seed}_y{yellow})",
+    )
+    p.add_argument(
+        "--replace",
+        action="store_true",
+        help="policz ponownie bieg, który już się udał (domyślnie to błąd)",
+    )
     return p.parse_args(argv)
 
 
@@ -72,16 +82,25 @@ def main(argv: list[str] | None = None) -> None:
     import trainer  # noqa: F401
     from common import interface
     from common.registry import Registry
-    from utils.logger import build_config, setup_logging
+    from utils.logger import setup_logging
 
     import tsc_marl.agents  # noqa: F401 - rejestruje NASZYCH agentów
+    from tsc_marl import experiment
 
-    config, _ = build_config(args)
+    config = experiment.resolve_config(args)
 
-    if args.yellow is not None:
-        config["trainer"]["yellow_length"] = args.yellow
-    if args.episodes is not None:
-        config["trainer"]["episodes"] = args.episodes
+    # --- rejestracja biegu w runlog (PRZED interfejsami: root_dir musi być ustawiony,
+    #     zanim LibSignal policzy sobie ścieżki wyjściowe) ---
+    exp = experiment.experiment()
+    params = experiment.build_params(args, config)
+    rid = args.run_id or experiment.run_id(
+        args.agent, args.network, args.seed, config["trainer"]["yellow_length"]
+    )
+    run = exp.start(rid, params, config=config, repos=experiment.repos(), replace=args.replace)
+    # artefakty silnika (checkpointy, logi, replaye) lądują WEWNĄTRZ katalogu biegu,
+    # dzięki czemu „jeden bieg = jeden katalog" jest prawdą, a data/ zostaje katalogiem
+    # wejściowym. Działa dzięki patchowi get_output_file_path w submodule.
+    config["logger"]["root_dir"] = str(run.engine_dir)
 
     # kolejność wywołań jak w run.py LibSignala — zależności między interfejsami
     interface.Command_Setting_Interface(config)
@@ -104,11 +123,15 @@ def main(argv: list[str] | None = None) -> None:
     task_name = Registry.mapping["command_mapping"]["setting"].param["task"]
     runner = Registry.mapping["trainer_mapping"][task_name](logger)
     started = time.time()
-    try:
-        Registry.mapping["task_mapping"][task_name](runner).run()
-    finally:
-        libsignal.restore_sim_configs()
-    logger.info(f"Total time taken: {time.time() - started}")
+    with run:  # wyjątek → status "failed" + traceback w meta.json, i leci dalej
+        try:
+            Registry.mapping["task_mapping"][task_name](runner).run()
+        finally:
+            libsignal.restore_sim_configs()
+        logger.info(f"Total time taken: {time.time() - started}")
+        # logi silnika → metryki per epizod + skalary raportowe (w tym att_last10)
+        experiment.ingest(run, experiment.engine_log_dir(run, args))
+    print(f"runlog: {run.path}")
 
 
 if __name__ == "__main__":

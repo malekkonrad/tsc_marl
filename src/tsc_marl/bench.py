@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
-"""
-Runner tabeli T1 — jeden config → jeden wynik, z zapisem na dysk.
+"""Runner tabeli T1 — siatka {agent} × {sieć} × {seed}, jeden punkt = jeden bieg.
 
-Uruchamia siatkę {agent} × {sieć} × {seed}, parsuje metryki z logu LibSignal
-i zapisuje:
-  results/t1_raw.csv       — jeden wiersz na run (surowe liczby + metadane)
-  results/t1_table.md      — tabela mean±std, gotowa do pracy
-  results/t1_meta.json     — protokół, wersje, data (żeby wynik dało się odtworzyć)
-
-Wyniki są DOPISYWANE do t1_raw.csv, więc kolejne wywołania rozszerzają tabelę
-(np. baseline'y dziś, CoLight jutro po treningu).
+Cienki z założenia: przechowywanie, wyszukiwanie i agregacja wyników to zadanie
+`runlog` (`src/runlog/`). Tutaj zostaje to, co dziedzinowe — jakie punkty siatki
+policzyć, jak odpalić proces i jak zrenderować tabele do pracy.
 
 Każdy run leci w osobnym podprocesie (`python -m tsc_marl.run`), bo LibSignal trzyma
 stan w globalnym Registry i nie da się go czysto zresetować między konfiguracjami.
+Wynik czytamy z `result.json` biegu, a nie z regexa na stdout — log jest artefaktem,
+stdout bywa uciętym buforem.
 
 Użycie (z korzenia repo):
     python -m tsc_marl.bench                             # baseline'y bez treningu
@@ -20,137 +16,27 @@ Użycie (z korzenia repo):
     python -m tsc_marl.bench -n cityflow_jinan3x4 -s 0 1 2
     python -m tsc_marl.bench -m benchmark                # tryb papierów (yellow=0)
     python -m tsc_marl.bench -a colight -s 0 --timeout 86400   # trening
-    python -m tsc_marl.bench --table-only                # przelicz tabelę z CSV
+    python -m tsc_marl.bench --table-only                # przelicz tabele z runs/
+    python -m tsc_marl.bench -a colight --replace        # policz ponownie mimo wyniku
 """
 
 import argparse
-import csv
 import json
-import os
-import re
 import subprocess
 import sys
 import time
 from datetime import datetime
-from statistics import mean, pstdev
 
-from tsc_marl import libsignal
-from tsc_marl.libsignal import LIBSIGNAL, REPO_ROOT, RESULTS, RUNS
+from tsc_marl import experiment, libsignal
+from tsc_marl.libsignal import REPO_ROOT, RESULTS
 
-# Dwa tryby raportowania to teraz jedna wartość yellow_length podawana flagą, a nie
+# Dwa tryby raportowania to jedna wartość yellow_length podawana flagą, a nie
 # dwa drzewa configów jak w sandboxie (patrz tsc_marl/run.py, --yellow).
 YELLOW_BY_MODE = {"realistic": 5, "benchmark": 0}
-MODE = "realistic"
-
-# Parsowana linia LibSignala, np.:
-#   "Final Travel Time is 514.1358, mean rewards: -723.7992, queue: 34.9205,
-#    delay: 3.5311, throughput: 5768"
-FINAL_RE = re.compile(
-    r"Final Travel Time is ([\d.]+), mean rewards: (-?[\d.]+), queue: ([\d.]+), "
-    r"delay: ([\d.]+), throughput: (\d+)"
-)
-FIELDS = [
-    "timestamp",
-    "agent",
-    "world",
-    "network",
-    "seed",
-    "att",
-    "att_last10",
-    "att_best",
-    "reward",
-    "queue",
-    "delay",
-    "throughput",
-    "action_interval",
-    "yellow_length",
-    "episodes",
-    "runtime_s",
-    "status",
-    # parametry agenta — bez nich wiersz NIE jest odtwarzalny (Advanced-MP zmienia
-    # wynik o 10% w zależności od w1/obs_length/drop_always_green)
-    "t_min",
-    "w1",
-    "obs_length",
-    "drop_always_green",
-]
-
-# parametry z sekcji `model`, które trafiają do CSV (reszta to hiperparametry sieci)
-MODEL_FIELDS = ["t_min", "w1", "obs_length", "drop_always_green"]
 
 
-def git_sha(repo):
-    """Krótki SHA + znacznik `-dirty`, jeśli w drzewie są niezacommitowane zmiany."""
-    try:
-        sha = subprocess.run(
-            ["git", "-C", str(repo), "rev-parse", "--short", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
-        dirty = subprocess.run(
-            ["git", "-C", str(repo), "status", "--porcelain"],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
-        return f"{sha}-dirty" if dirty else sha
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return "unknown"
-
-
-def att_from_training_log(agent, world, network):
-    """Protokół papieru (Advanced-CoLight 5.1): raport = ŚREDNIA Z OSTATNICH 10
-    epizodów testowych, nie pojedynczy test po treningu. Przy niestabilnym uczeniu
-    (CoLight) różnica jest ogromna: 1204,5 (ostatni) vs 766,1 (średnia z 10)
-    vs 314,6 (najlepszy). Zwraca (mean_last10, best) albo (None, None)."""
-    # _DTL = metody uczone (wiersze TRAIN/TEST per epizod); metody bez treningu
-    # zostawiają tylko _BRF z jedną liczbą — dla nich last10 == att i liczy je caller
-    logdir = RUNS / "tsc" / f"{world}_{agent}" / network / "test/logger"
-    logs = (
-        sorted(logdir.glob("*_DTL.log"), key=lambda p: p.stat().st_mtime) if logdir.is_dir() else []
-    )
-    if not logs:
-        return None, None
-    vals = []
-    for line in logs[-1].read_text().splitlines():
-        parts = line.split("\t")
-        if len(parts) > 3 and parts[1] == "TEST":
-            try:
-                vals.append(float(parts[3]))
-            except ValueError:
-                pass
-    if not vals:
-        return None, None
-    last10 = vals[-10:]
-    return sum(last10) / len(last10), min(vals)
-
-
-def protocol_params(agent):
-    """Wyciąga zamrożony protokół + parametry agenta z połączonych configów —
-    to samo, co zobaczy run.py."""
-    sys.path.insert(0, str(LIBSIGNAL))
-    cwd = os.getcwd()
-    os.chdir(REPO_ROOT)
-    try:
-        from utils.logger import load_config
-
-        cfg, _ = load_config(f"./configs/tsc/{agent}.yml")
-        t = cfg["trainer"]
-        out = {
-            k: t[k] for k in ("action_interval", "yellow_length", "steps", "test_steps", "episodes")
-        }
-        # tryb nadpisuje protokół tą samą drogą, co run.py — CSV ma zapisać to,
-        # co REALNIE poszło do symulatora, nie to, co stoi w pliku
-        out["yellow_length"] = YELLOW_BY_MODE[MODE]
-        out.update({k: cfg["model"].get(k, "") for k in MODEL_FIELDS})
-        return out
-    finally:
-        os.chdir(cwd)
-
-
-def run_one(agent, world, network, seed, timeout):
-    env = libsignal.child_env()
+def run_one(agent, world, network, seed, yellow, timeout, replace=False):
+    """Odpala jeden bieg w podprocesie. Zwraca (status, sekundy)."""
     cmd = [
         sys.executable,
         "-m",
@@ -164,43 +50,27 @@ def run_one(agent, world, network, seed, timeout):
         "--seed",
         str(seed),
         "--yellow",
-        str(YELLOW_BY_MODE[MODE]),
+        str(yellow),
     ]
+    if replace:
+        cmd.append("--replace")
     t0 = time.time()
     try:
         p = subprocess.run(
-            cmd, cwd=REPO_ROOT, env=env, timeout=timeout, capture_output=True, text=True
+            cmd,
+            cwd=REPO_ROOT,
+            env=libsignal.child_env(),
+            timeout=timeout,
+            capture_output=True,
+            text=True,
         )
-        out = p.stdout + p.stderr
     except subprocess.TimeoutExpired:
-        return None, time.time() - t0, "timeout"
-    hits = FINAL_RE.findall(out)
-    if not hits:
-        tail = "\n".join(out.strip().splitlines()[-3:])
-        print(f"    ! brak wyniku:\n      {tail}", file=sys.stderr)
-        return None, time.time() - t0, "no-result"
-    att, rew, q, d, thr = hits[-1]
-    return (
-        dict(
-            att=float(att), reward=float(rew), queue=float(q), delay=float(d), throughput=int(thr)
-        ),
-        time.time() - t0,
-        "ok",
-    )
-
-
-def append_rows(rows, tag=""):
-    RESULTS.mkdir(exist_ok=True)
-    # osobny CSV na równoległe przebiegi (treningi lecą po 4 naraz) — build_table
-    # i tak scala wszystkie t1_raw*.csv, a nie ma wyścigu o dopisanie do jednego pliku
-    path = RESULTS / (f"t1_raw_{tag}.csv" if tag else "t1_raw.csv")
-    new = not path.exists()
-    with open(path, "a", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=FIELDS)
-        if new:
-            w.writeheader()
-        w.writerows(rows)
-    return path
+        return "timeout", time.time() - t0
+    if p.returncode != 0:
+        tail = "\n".join((p.stdout + p.stderr).strip().splitlines()[-3:])
+        print(f"    ! bieg nieudany:\n      {tail}", file=sys.stderr)
+        return "failed", time.time() - t0
+    return "ok", time.time() - t0
 
 
 # Liczby z literatury dla TEGO protokołu (4 fazy, Δt=15): Zhang 2022 (Advanced-XLight),
@@ -233,7 +103,8 @@ def build_baseline_report(rows):
     To jest punkt odniesienia całej pracy — GATE Fazy 0."""
     idx = {}
     for r in rows:
-        idx[(r["network"], r["agent"], r.get("yellow_length", "?"))] = r
+        # yellow_length jest liczbą (parametry biegu mają typy, w odróżnieniu od CSV)
+        idx[(r["network"], r["agent"], r.get("yellow_length"))] = r
     out = [
         "# T1-baseline — punkt odniesienia pracy",
         "",
@@ -264,8 +135,8 @@ def build_baseline_report(rows):
             "colight",
             "advancedcolight",
         ):
-            b = idx.get((net, agent, "0"))
-            r5 = idx.get((net, agent, "5"))
+            b = idx.get((net, agent, 0))
+            r5 = idx.get((net, agent, 5))
             if not b and not r5:
                 continue
 
@@ -304,42 +175,55 @@ def build_baseline_report(rows):
     print("\n".join(out))
 
 
-def build_table():
+def _records(exp):
+    """Wiersze do tabel: udane biegi jako słowniki (params + result)."""
+    df = exp.results(status="ok")
+    return [] if df.empty else df.to_dict("records")
+
+
+def build_table(exp):
     """Tabela mean±std po seedach. std=0 przy metodach bez treningu jest OCZEKIWANE:
     symulacja jest deterministyczna, seed rusza tylko inicjalizację sieci/eksplorację."""
-    paths = sorted(RESULTS.glob("t1_raw*.csv"))
-    if not paths:
-        print("Brak results/t1_raw*.csv — najpierw odpal runy.", file=sys.stderr)
+    df = exp.results(status="ok")
+    if df.empty:
+        print("Brak policzonych biegów w runs/ — najpierw odpal runy.", file=sys.stderr)
         return
-    rows = [r for p in paths for r in csv.DictReader(open(p)) if r["status"] == "ok"]
-    groups = {}
-    for r in rows:
-        # tryb (yellow_length) MUSI być częścią klucza — inaczej tabela uśrednia
-        # realistyczny i benchmarkowy razem, co daje liczby bez sensu
-        agent = r["agent"]
-        if r.get("w1") and agent == "advancedmp":
-            agent = f"{agent} (W1={r['w1']})"
-        groups.setdefault((r["network"], agent, r.get("yellow_length", "?")), []).append(r)
+
+    # `advancedmp` przy różnych W1 to różne metody, nie ten sam agent z rozrzutem
+    df["label"] = df.apply(
+        lambda r: (
+            f"{r['agent']} (W1={r['w1']})"
+            if r["agent"] == "advancedmp" and r.get("w1")
+            else r["agent"]
+        ),
+        axis=1,
+    )
+    # tryb (yellow_length) MUSI być w kluczu — inaczej tabela uśrednia realistyczny
+    # i benchmarkowy razem, co daje liczby bez sensu
+    agg = exp.aggregate(
+        by=["network", "label", "yellow_length"],
+        over="seed",
+        metrics=["att", "att_last10", "throughput", "queue"],
+        df=df,  # kolumna `label` jest pochodna, nie ma jej w zapisanych parametrach
+    ).sort_values(["network", "label", "yellow_length"])
 
     lines = [
         "| sieć | agent | yellow | ATT (10 ost. testów) | ATT (ostatni) | throughput | queue | n |",
         "|---|---|---|---|---|---|---|---|",
     ]
-    for net, agent, yl in sorted(groups):
-        g = groups[(net, agent, yl)]
-        att = [float(r["att"]) for r in g]
-        thr = [float(r["throughput"]) for r in g]
-        q = [float(r["queue"]) for r in g]
-        l10 = [float(r["att_last10"]) for r in g if r.get("att_last10")]
-        sd = f" ± {pstdev(att):.1f}" if len(att) > 1 else ""
-        # ATT wg protokołu papieru; dla metod bez treningu (1 epizod) obie kolumny są równe
-        main = f"{mean(l10):.1f}" if l10 else "—"
-        lines.append(
-            f"| {net} | {agent} | {yl} | {main} | {mean(att):.1f}{sd} | {mean(thr):.0f} | "
-            f"{mean(q):.1f} | {len(att)} |"
+    for r in agg.to_dict("records"):
+        sd = f" ± {r['att_std']:.1f}" if r["n"] > 1 and r["att_std"] == r["att_std"] else ""
+        main = (
+            f"{r['att_last10_mean']:.1f}" if r["att_last10_mean"] == r["att_last10_mean"] else "—"
         )
-    build_baseline_report(rows)
+        lines.append(
+            f"| {r['network']} | {r['label']} | {r['yellow_length']} | {main} | "
+            f"{r['att_mean']:.1f}{sd} | {r['throughput_mean']:.0f} | {r['queue_mean']:.1f} | "
+            f"{int(r['n'])} |"
+        )
+    build_baseline_report(_records(exp))
     table = "\n".join(lines)
+    RESULTS.mkdir(exist_ok=True)
     (RESULTS / "t1_table.md").write_text(
         f"# T1 — baseline'y na czystym benchmarku\n\n"
         f"Wygenerowane: {datetime.now():%Y-%m-%d %H:%M}\n\n{table}\n"
@@ -357,7 +241,11 @@ def main():
     ap.add_argument("-s", "--seeds", nargs="+", type=int, default=[0])
     ap.add_argument("--timeout", type=int, default=3600, help="sekundy na jeden run")
     ap.add_argument("--table-only", action="store_true")
-    ap.add_argument("--tag", default="", help="sufiks pliku CSV — do przebiegów równoległych")
+    ap.add_argument(
+        "--replace",
+        action="store_true",
+        help="policz ponownie także te punkty siatki, które już mają wynik",
+    )
     ap.add_argument(
         "-m",
         "--mode",
@@ -367,70 +255,46 @@ def main():
     )
     args = ap.parse_args()
 
-    global MODE
-    MODE = args.mode
     libsignal.check_ready()
+    libsignal.bootstrap()  # potrzebne do czytania configów przy planowaniu siatki
+    exp = experiment.experiment()
 
     if args.table_only:
-        build_table()
+        build_table(exp)
         return
 
-    rows = []
+    yellow = YELLOW_BY_MODE[args.mode]
+    done = skipped = 0
     for net in args.networks:
         for agent in args.agents:
-            proto = protocol_params(agent)
             for seed in args.seeds:
-                print(f"  {net:22s} {agent:12s} seed={seed} ...", end=" ", flush=True)
-                res, dt, status = run_one(agent, args.world, net, seed, args.timeout)
-                print(
-                    f"{status} ATT={res['att']:.2f} ({dt:.0f}s)" if res else f"{status} ({dt:.0f}s)"
+                _, params, rid = experiment.plan(agent, args.world, net, seed, yellow)
+                # skip-if-done po ODCISKU PARAMETRÓW, nie po samej nazwie: zmiana
+                # czegokolwiek w configu metody unieważnia poprzedni wynik
+                if not args.replace and exp.is_done(rid, params):
+                    print(f"  {net:22s} {agent:14s} seed={seed}  pomijam (jest wynik)")
+                    skipped += 1
+                    continue
+                print(f"  {net:22s} {agent:14s} seed={seed} ...", end=" ", flush=True)
+                status, dt = run_one(
+                    agent, args.world, net, seed, yellow, args.timeout, args.replace
                 )
-                last10, best = (
-                    att_from_training_log(agent, args.world, net) if res else (None, None)
-                )
-                if res and last10 is None:  # metoda bez treningu — jeden przebieg
-                    last10 = best = res["att"]
-                rows.append(
-                    dict(
-                        timestamp=datetime.now().isoformat(timespec="seconds"),
-                        agent=agent,
-                        world=args.world,
-                        network=net,
-                        seed=seed,
-                        att=res["att"] if res else "",
-                        att_last10=round(last10, 2) if last10 is not None else "",
-                        att_best=round(best, 2) if best is not None else "",
-                        reward=res["reward"] if res else "",
-                        queue=res["queue"] if res else "",
-                        delay=res["delay"] if res else "",
-                        throughput=res["throughput"] if res else "",
-                        action_interval=proto["action_interval"],
-                        yellow_length=proto["yellow_length"],
-                        episodes=proto["episodes"],
-                        runtime_s=round(dt, 1),
-                        status=status,
-                        **{k: proto[k] for k in MODEL_FIELDS},
-                    )
-                )
+                print(f"{status} ({dt:.0f}s)")
+                done += 1
 
-    print(f"\nZapisano: {append_rows(rows, args.tag)}")
+    print(f"\nPoliczone: {done}, pominięte: {skipped}. Biegi: {exp.path}")
+
     # meta trzyma OBA tryby obok siebie — inaczej drugi przebieg kasuje protokół pierwszego
     meta_path = RESULTS / "t1_meta.json"
+    RESULTS.mkdir(exist_ok=True)
     meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
     meta.setdefault("modes", {})[args.mode] = {
         "generated": datetime.now().isoformat(timespec="seconds"),
-        "protocol": protocol_params(args.agents[0]),
+        "yellow_length": yellow,
+        "runs_root": str(exp.path),
     }
-    # Bez wersji kodu wiersz w CSV nie jest odtwarzalny: te same argumenty na innym
-    # commicie potrafią dać inną liczbę (patrz fix update_target_rate).
-    meta["code_version"] = {"tsc_marl": git_sha(REPO_ROOT), "LibSignal": git_sha(LIBSIGNAL)}
-    meta["pythonhashseed"] = "0 (wymuszone — bez tego world_sumo niedeterministyczny)"
-    meta["note"] = (
-        "Δt z configs/tsc/thesis_protocol.yml; yellow_length nadpisywany "
-        "trybem (--mode) przez tsc_marl.run --yellow"
-    )
     meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False))
-    build_table()
+    build_table(exp)
 
 
 if __name__ == "__main__":

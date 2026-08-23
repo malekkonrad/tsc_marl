@@ -53,7 +53,9 @@ build-backend = "hatchling.build"
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/tsc_marl"]
+# runlog jest osobnym pakietem, nie podpakietem tsc_marl — nie importuje z niego
+# niczego i ma dać się wyjąć do własnego repo jednym `git mv`.
+packages = ["src/tsc_marl", "src/runlog"]
 
 [tool.ruff]
 line-length = 100
@@ -71,6 +73,7 @@ ignore = ["E402"]
 "src/tsc_marl/agents/*" = ["N803", "N806", "E741"]
 # Testy nazywamy po polsku i asercje piszemy wprost — bez wymogów dla kodu produkcyjnego.
 "tests/*" = ["N802"]
+# runlog to narzędzie ogólnego przeznaczenia — bez wyjątków nazewniczych z papierów.
 
 [tool.pytest.ini_options]
 # Testy nie potrzebują silnika (patrz tests/conftest.py), ale conftest ustawia

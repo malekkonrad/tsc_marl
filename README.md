@@ -29,15 +29,20 @@ tsc_marl/
 │   ├── bench.py            #   runner siatki {agent}×{sieć}×{seed} → tabele T1
 │   ├── libsignal.py        #   most do submodułu (ścieżki, sys.path, SUMO_HOME)
 │   ├── seeding.py          #   deterministyczne ziarnowanie
-│   └── agents/             #   agenci: Efficient-MP, Advanced-MP (własne implementacje)
+│   ├── experiment.py       #   adapter LibSignal ↔ runlog (id biegu, parsowanie logów)
+│   ├── evaluate.py         #   ewaluacja zamrożonej polityki z checkpointu
+│   ├── plot.py             #   krzywe uczenia (działa też dla biegu w toku)
+│   └── agents/             #   agenci: Efficient-MP, Advanced-MP, Advanced-CoLight
 │       └── ats.py          #     Advanced Traffic State — prymitywy wspólne dla MP i CoLight
+├── src/runlog/             # NARZĘDZIE (niezależne od dziedziny): przechowywanie,
+│                           # odpytywanie i agregacja wyników eksperymentów
 ├── configs/
 │   ├── tsc/                #   configi metod + thesis_protocol.yml (protokół zamrożony)
 │   └── sim/                #   definicje sieci (JiNan 3×4, HangZhou 4×4)
 ├── data/raw_data/          # sieci i potoki ruchu użyte w pracy (9,4 MB)
 ├── tests/                  # `make test` (szybkie) / `make test-slow` (z CityFlow)
 ├── results/                # liczby do pracy: CSV + wygenerowane tabele
-├── runs/                   # (gitignore) checkpointy, logi, replaye
+├── runs/                   # (gitignore) biegi: meta, config, metryki, checkpointy
 ├── external/LibSignal/     # submoduł: fork LibSignala + patche silnika
 └── deploy/hpc/             # ścieżka zapasowa: Docker/Apptainer/SLURM na Cyfronet
 ```
@@ -73,7 +78,15 @@ Jeśli klonowałeś bez `--recursive`: `git submodule update --init --recursive`
 scripts/run.sh -a efficientmp -n cityflow_jinan3x4_4ph --seed 0   # jeden run
 make bench                                                        # cała tabela T1
 python -m tsc_marl.bench -a colight -s 0 1 2 --timeout 86400      # trening
+make runs                                                         # co już policzone
+make plot                                                         # krzywe uczenia
+scripts/eval.sh --load-run runs/t1/colight__cityflow_jinan3x4_4ph__s0_y5 \
+                --checkpoint best --tag drop25                    # zamrożona polityka
 ```
+
+Powtórzenie `bench` **pomija punkty siatki, które już mają wynik** — porównanie idzie
+po odcisku parametrów, więc zmiana czegokolwiek w configu metody unieważnia poprzedni
+bieg i policzy się on ponownie. `--replace` wymusza przeliczenie mimo wszystko.
 
 **Uruchamiaj przez `scripts/run.sh`, nie przez `python -m tsc_marl.run`.** Wrapper
 ustawia `PYTHONHASHSEED=0` przed startem interpretera; ustawiony z poziomu Pythona
@@ -82,6 +95,37 @@ nie zadziała, a bez niego `world_sumo` daje różne wyniki dla tych samych argu
 Dostępne metody: `fixedtime`, `sotl`, `maxpressure`, `efficientmp`, `advancedmp`,
 `advancedcolight`, `presslight`, `colight`, `mplight`, `frap`, `dqn`.
 Sieci: `cityflow_jinan3x4{,_4ph}`, `cityflow_hangzhou4x4{,_4ph}`.
+
+## Wyniki: `runs/` i `runlog`
+
+Jeden bieg = jeden katalog. Nie ma centralnego pliku z wynikami, bo biegi bywają
+odpalane równolegle w osobnych procesach — indeks jest wyliczany przez skan katalogów.
+
+```
+runs/t1/<agent>__<sieć>__s<seed>_y<yellow>/
+    meta.json            # parametry, odcisk configu, proweniencja (SHA repo I submodułu), status
+    config.resolved.yml  # config po scaleniu includes i nadpisaniach z CLI
+    metrics.csv          # step,split,metric,value — per epizod
+    result.json          # ATT, att_last10, throughput, queue, delay
+    engine/              # artefakty LibSignala: checkpointy, logi, replaye
+```
+
+`make plot` rysuje krzywe do `runs/plots/`. Działa **także dla biegu w toku**:
+`metrics.csv` powstaje dopiero na końcu (metryki wczytujemy z logu silnika po fakcie),
+więc dla biegów o statusie `running` wykres czyta wprost `engine/.../_DTL.log`.
+`--band` rysuje mean±std po seedach — liczony tylko na epizodach, które ma każdy bieg
+w grupie, żeby ogon najdłuższego nie udawał średniej.
+
+Obsługuje to [`src/runlog/`](src/runlog/README.md) — **osobne narzędzie, niezależne od
+tej pracy**: nie importuje niczego z `tsc_marl` i nie wie nic o ruchu drogowym.
+Tłumaczenie między nim a LibSignalem siedzi w
+[`src/tsc_marl/experiment.py`](src/tsc_marl/experiment.py).
+
+Trzy niezmienniki, które `runlog` egzekwuje, bo każdy z nich odpowiada błędowi, który
+już się w tym projekcie zdarzył: **status biegu** (przerwany trening nie liczy się jako
+policzony), **odmowa cichego nadpisania** (ten sam identyfikator z innymi parametrami to
+błąd, nie nadpisanie) i **snapshot configu** (wiersz wyniku nie może odsyłać do pliku,
+który ktoś potem zmienił).
 
 ## Protokół eksperymentalny
 
@@ -139,6 +183,15 @@ Na gałęzi `thesis` są wyłącznie patche silnika, których nie da się zrobi�
   (bez tego CityFlow ignorował ten parametr, więc tryb `benchmark` był nieosiągalny),
   plus opcjonalne logowanie ATT liczonego jak w `summary.py` linii Advanced-XLight.
 - `world_sumo.py` — `sumo-gui` startuje automatycznie i z regulowanym opóźnieniem.
+- `utils/logger.py` — `get_output_file_path` honoruje `logger.root_dir`. Bez tego
+  ten parametr był martwym zapisem, a artefakty treningu lądowały w `data/output_data/`,
+  czyli w katalogu wejściowych, wersjonowanych sieci.
+- `agent/colight.py`, `agent/dqn.py` — `save_model` zapisuje sieć **online**
+  (`self.model`), a nie `target_model`. Decyzje podejmuje online, więc to ona
+  wyprodukowała liczby w krzywej uczenia; target to jej kopia sprzed nawet dwóch
+  epizodów. Bez tego checkpoint jest INNĄ siecią niż zmierzona, a Faza 3 ewaluuje
+  właśnie checkpoint. Reszta LibSignala (`presslight`, `frap`, `dqn_torch_agent`,
+  `colight_pytorch_agent`) zapisuje `self.model` — patch usuwa niespójność.
 
 Wszystko inne — agenci, configi, protokół — mieszka w tym repo. Jest to możliwe, bo
 Registry LibSignala zapełnia się dekoratorami przy imporcie, a ścieżki configów są
