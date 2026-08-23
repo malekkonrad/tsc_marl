@@ -1,6 +1,6 @@
 # T1-baseline — punkt odniesienia pracy
 
-Wygenerowane: 2026-08-22 18:05. Protokół: `configs/tsc/thesis_protocol.yml` (Δt=15 s, epizod 3600 s, `PYTHONHASHSEED=0`), sieci w wariancie 4-fazowym — jak protokół papierów.
+Wygenerowane: 2026-08-23 18:33. Protokół: `configs/tsc/thesis_protocol.yml` (Δt=15 s, epizod 3600 s, `PYTHONHASHSEED=0`), sieci w wariancie 4-fazowym — jak protokół papierów.
 
 ATT = średnia z 10 ostatnich epizodów testowych (metody bez treningu: jeden przebieg).
 Δ liczone względem literatury w trybie **benchmark**, bo w nim liczą swoje wyniki papiery.
@@ -10,7 +10,7 @@ ATT = średnia z 10 ostatnich epizodów testowych (metody bez treningu: jeden pr
 | agent | benchmark (yellow=0) | realistyczny (yellow=5) | literatura | Δ benchmark |
 |---|---|---|---|---|
 | fixedtime | 424.7 | 507.0 | 428.11 | -0.8% |
-| maxpressure | 316.8 | 361.1 | 273.96 | +15.6% |
+| maxpressure | 316.8 | 361.0 | 273.96 | +15.6% |
 | sotl | 318.7 | 352.9 | — | — |
 | efficientmp | 272.2 | 316.1 | 269.87 | +0.9% |
 | advancedmp | 274.3 | 299.2 | 253.61 | +8.2% |

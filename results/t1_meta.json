@@ -1,33 +1,14 @@
 {
   "modes": {
     "realistic": {
-      "generated": "2026-08-21T13:26:42",
-      "libsignal_dir": "LibSignal",
-      "protocol": {
-        "action_interval": 15,
-        "yellow_length": 5,
-        "steps": 3600,
-        "test_steps": 3600,
-        "episodes": 1,
-        "t_min": "",
-        "w1": "",
-        "obs_length": "",
-        "drop_always_green": ""
-      }
+      "generated": "2026-08-23T18:29:29",
+      "yellow_length": 5,
+      "runs_root": "/home/konrad/Projects/thesis/tsc_marl/runs/t1"
     },
     "benchmark": {
-      "generated": "2026-08-22T18:05:08",
-      "protocol": {
-        "action_interval": 15,
-        "yellow_length": 0,
-        "steps": 3600,
-        "test_steps": 3600,
-        "episodes": 1,
-        "t_min": "",
-        "w1": "",
-        "obs_length": "",
-        "drop_always_green": ""
-      }
+      "generated": "2026-08-23T18:33:03",
+      "yellow_length": 0,
+      "runs_root": "/home/konrad/Projects/thesis/tsc_marl/runs/t1"
     }
   },
   "pythonhashseed": "0 (wymuszone — bez tego world_sumo niedeterministyczny)",

@@ -175,16 +175,28 @@ def build_baseline_report(rows):
     print("\n".join(out))
 
 
-def _records(exp):
-    """Wiersze do tabel: udane biegi jako słowniki (params + result)."""
+def training_results(exp):
+    """Udane biegi TRENINGOWE/pomiarowe — bez ewaluacji zamrożonych polityk.
+
+    Biegi z `tsc_marl.evaluate` mają w parametrach `parent_run` i opisują scenariusz
+    (np. awarię sensorów), a nie metodę. Wpuszczone do tabeli T1 udawałyby dodatkowe
+    seedy tej samej metody i zaniżałyby albo zawyżały jej średnią."""
     df = exp.results(status="ok")
+    if df.empty or "parent_run" not in df.columns:
+        return df
+    return df[df["parent_run"].isna()]
+
+
+def _records(exp):
+    """Wiersze do tabel jako słowniki (params + result)."""
+    df = training_results(exp)
     return [] if df.empty else df.to_dict("records")
 
 
 def build_table(exp):
     """Tabela mean±std po seedach. std=0 przy metodach bez treningu jest OCZEKIWANE:
     symulacja jest deterministyczna, seed rusza tylko inicjalizację sieci/eksplorację."""
-    df = exp.results(status="ok")
+    df = training_results(exp)
     if df.empty:
         print("Brak policzonych biegów w runs/ — najpierw odpal runy.", file=sys.stderr)
         return

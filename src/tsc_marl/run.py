@@ -103,31 +103,32 @@ def main(argv: list[str] | None = None) -> None:
     config["logger"]["root_dir"] = str(run.engine_dir)
 
     # kolejność wywołań jak w run.py LibSignala — zależności między interfejsami
-    interface.Command_Setting_Interface(config)
-    interface.Logger_param_Interface(config)
-    interface.World_param_Interface(config)
-    if config["model"].get("graphic", False):
-        param = Registry.mapping["world_mapping"]["setting"].param
-        roadnet = (
-            param["dir"] + param["roadnetFile"]
-            if config["command"]["world"] in ("cityflow", "sumo")
-            else param["road_file_addr"]
-        )
-        interface.Graph_World_Interface(roadnet)
-    interface.Logger_path_Interface(config)
-    os.makedirs(Registry.mapping["logger_mapping"]["path"].path, exist_ok=True)
-    interface.Trainer_param_Interface(config)
-    interface.ModelAgent_param_Interface(config)
+    # WSZYSTKO poniżej pod `with run:` — łącznie z budową świata i runnera. Budowa
+    # świata potrafi paść (zły roadnet, brakujący plik), a bieg jest już wtedy
+    # zarejestrowany: gdyby to leciało poza blokiem, katalog zostawałby na wieki
+    # w statusie `running` i blokował ponowne uruchomienie.
+    with run, libsignal.sim_configs_untouched():
+        interface.Command_Setting_Interface(config)
+        interface.Logger_param_Interface(config)
+        interface.World_param_Interface(config)
+        if config["model"].get("graphic", False):
+            param = Registry.mapping["world_mapping"]["setting"].param
+            roadnet = (
+                param["dir"] + param["roadnetFile"]
+                if config["command"]["world"] in ("cityflow", "sumo")
+                else param["road_file_addr"]
+            )
+            interface.Graph_World_Interface(roadnet)
+        interface.Logger_path_Interface(config)
+        os.makedirs(Registry.mapping["logger_mapping"]["path"].path, exist_ok=True)
+        interface.Trainer_param_Interface(config)
+        interface.ModelAgent_param_Interface(config)
 
-    logger = setup_logging(logging.DEBUG if args.debug else logging.INFO)
-    task_name = Registry.mapping["command_mapping"]["setting"].param["task"]
-    runner = Registry.mapping["trainer_mapping"][task_name](logger)
-    started = time.time()
-    with run:  # wyjątek → status "failed" + traceback w meta.json, i leci dalej
-        try:
-            Registry.mapping["task_mapping"][task_name](runner).run()
-        finally:
-            libsignal.restore_sim_configs()
+        logger = setup_logging(logging.DEBUG if args.debug else logging.INFO)
+        task_name = Registry.mapping["command_mapping"]["setting"].param["task"]
+        started = time.time()
+        runner = Registry.mapping["trainer_mapping"][task_name](logger)
+        Registry.mapping["task_mapping"][task_name](runner).run()
         logger.info(f"Total time taken: {time.time() - started}")
         # logi silnika → metryki per epizod + skalary raportowe (w tym att_last10)
         experiment.ingest(run, experiment.engine_log_dir(run, args))

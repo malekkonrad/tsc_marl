@@ -208,6 +208,12 @@ z `lane_count` zamiast z kolejek, więc nie jest tym, co opisuje literatura.
 
 Rzeczy, które kosztowały czas i nie są oczywiste z kodu:
 
+- **`configs/sim/*.cfg` są nadpisywane przez LibSignal przy każdym biegu**
+  (świeże ścieżki logów replaya). Cofa to `libsignal.sim_configs_untouched()` —
+  przez MIGAWKĘ BAJTÓW zdjętą przed biegiem, nie przez `git checkout -- configs/sim`.
+  Ta pierwsza wersja kasowała również prawdziwe, niezacommitowane poprawki w tych
+  plikach: poprawiasz ścieżkę do roadnetu, odpalasz bieg, poprawka znika bez śladu.
+
 - **`update_target_rate` liczy się w decyzjach, nie w krokach symulacji.** Domyślne 10
   z `base.yml` znaczyło aktualizację sieci target co 10 kroków zamiast standardowych
   500–10000 — CoLight dochodził do ATT ~315 i rozpadał się do 1204. Dotyczy wszystkich

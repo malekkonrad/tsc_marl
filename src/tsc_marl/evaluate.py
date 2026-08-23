@@ -158,27 +158,26 @@ def main(argv: list[str] | None = None) -> None:
 
     logger = setup_logging(logging.INFO)
     task_name = Registry.mapping["command_mapping"]["setting"].param["task"]
-    runner = Registry.mapping["trainer_mapping"][task_name](logger)
 
-    with run:
-        try:
-            # świat, agenci i metryki powstają już w BaseTrainer.__init__ (woła self.create()),
-            # więc runner jest gotowy — ponowne create_* zbudowałoby drugi silnik CityFlow
-            model_dir = (
-                engine_run_dir(src, p["world"], p["agent"], p["network"], run_args.prefix) / "model"
-            )
-            saved = available_checkpoints(model_dir)
-            episode = pick_episode(args.checkpoint, saved, src)
-            for ag in runner.agents:
-                weights = model_dir / f"{episode}_{ag.rank}.pt"
-                state = torch.load(weights, map_location="cpu")
-                ag.model.load_state_dict(state)
-                ag.target_model.load_state_dict(state)
-            logger.info(f"Wczytano epizod {episode} z {model_dir}")
+    # budowa runnera TEŻ pod blokiem — pad przy stawianiu świata ma dać status `failed`,
+    # a nie zostawić bieg na wieki w `running` (patrz komentarz w run.py)
+    with run, libsignal.sim_configs_untouched():
+        runner = Registry.mapping["trainer_mapping"][task_name](logger)
+        # świat, agenci i metryki powstają już w BaseTrainer.__init__ (woła self.create()),
+        # więc runner jest gotowy — ponowne create_* zbudowałoby drugi silnik CityFlow
+        model_dir = (
+            engine_run_dir(src, p["world"], p["agent"], p["network"], run_args.prefix) / "model"
+        )
+        saved = available_checkpoints(model_dir)
+        episode = pick_episode(args.checkpoint, saved, src)
+        for ag in runner.agents:
+            weights = model_dir / f"{episode}_{ag.rank}.pt"
+            state = torch.load(weights, map_location="cpu")
+            ag.model.load_state_dict(state)
+            ag.target_model.load_state_dict(state)
+        logger.info(f"Wczytano epizod {episode} z {model_dir}")
 
-            runner.test(drop_load=True)  # wagi już wczytane ręcznie — niech ich nie nadpisze
-        finally:
-            libsignal.restore_sim_configs()
+        runner.test(drop_load=True)  # wagi już wczytane ręcznie — niech ich nie nadpisze
         result = experiment.ingest(run, experiment.engine_log_dir(run, run_args))
         run.result(loaded_episode=episode, loaded_from=str(src))
     print(f"runlog: {run.path}  ATT={result.get('att')}")

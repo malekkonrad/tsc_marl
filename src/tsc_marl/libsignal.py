@@ -11,14 +11,14 @@ wkład w cudzy kod).
 Konsekwencja, o której łatwo zapomnieć: LibSignal **nadpisuje** `configs/sim/*.cfg`
 przy każdym uruchomieniu (wstawia świeże ścieżki `roadnetLogFile`/`replayLogFile`),
 więc te pliki po każdym biegu wychodzą zabrudzone w `git status`. To nie jest twoja
-zmiana — patrz `restore_sim_configs()`.
+zmiana — patrz `sim_configs_untouched()`.
 """
 
 from __future__ import annotations
 
 import os
-import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -77,13 +77,23 @@ def child_env(**extra: str) -> dict[str, str]:
     return env
 
 
-def restore_sim_configs() -> None:
+@contextmanager
+def sim_configs_untouched():
     """Cofnij zabrudzenia, które LibSignal wpisuje do `configs/sim/*.cfg` w trakcie
-    biegu (ścieżki logów replaya ze znacznikiem czasu). Wołane po każdym runie, żeby
-    `git status` pokazywał tylko prawdziwe zmiany."""
-    subprocess.run(
-        ["git", "checkout", "--", "configs/sim"],
-        cwd=REPO_ROOT,
-        check=False,
-        capture_output=True,
-    )
+    biegu (ścieżki logów replaya ze znacznikiem czasu), żeby `git status` pokazywał
+    tylko prawdziwe zmiany.
+
+    Działa na MIGAWCE BAJTÓW zdjętej przed biegiem, nie na `git checkout -- configs/sim`.
+    Powód jest bolesny: tamta wersja kasowała również PRAWDZIWE, niezacommitowane zmiany
+    w tych plikach — poprawiasz ścieżkę do roadnetu, odpalasz bieg, poprawka znika, i nie
+    ma po niej śladu ani w gicie, ani w logu. Migawka przywraca dokładnie to, co było,
+    niezależnie od tego, czy jest zacommitowane.
+    """
+    sim = CONFIGS / "sim"
+    snapshot = {p: p.read_bytes() for p in sim.glob("*.cfg")}
+    try:
+        yield
+    finally:
+        for path, data in snapshot.items():
+            if path.exists() and path.read_bytes() != data:
+                path.write_bytes(data)

@@ -40,13 +40,13 @@ test-all: ## Wszystkie testy naraz
 	.venv/bin/python -m pytest -m ''
 
 bench: ## Tabela T1, tryb realistyczny (yellow=5) — baseline'y bez treningu
-	python -m tsc_marl.bench -m realistic
+	.venv/bin/python -m tsc_marl.bench -m realistic
 
 bench-paper: ## Tabela T1, tryb benchmark (yellow=0) — jak liczą papiery
-	python -m tsc_marl.bench -m benchmark
+	.venv/bin/python -m tsc_marl.bench -m benchmark
 
 table: ## Przelicz tabele z zapisanych biegów, bez uruchamiania symulacji
-	python -m tsc_marl.bench --table-only
+	.venv/bin/python -m tsc_marl.bench --table-only
 
 runs: ## Wypisz policzone biegi (runs/t1) — status, parametry, ATT
 	.venv/bin/python -c "from tsc_marl.experiment import experiment; \

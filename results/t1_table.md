@@ -1,17 +1,17 @@
 # T1 — baseline'y na czystym benchmarku
 
-Wygenerowane: 2026-08-22 18:05
+Wygenerowane: 2026-08-23 18:33
 
 | sieć | agent | yellow | ATT (10 ost. testów) | ATT (ostatni) | throughput | queue | n |
 |---|---|---|---|---|---|---|---|
 | cityflow_hangzhou4x4 | advancedmp (W1=1.0) | 0 | 311.3 | 311.3 | 2931 | 1.3 | 1 |
-| cityflow_hangzhou4x4 | advancedmp (W1=1.0) | 5 | 321.1 | 321.0 | 2932 | 1.4 | 1 |
+| cityflow_hangzhou4x4 | advancedmp (W1=1.0) | 5 | 321.0 | 321.0 | 2932 | 1.4 | 1 |
 | cityflow_hangzhou4x4 | efficientmp | 0 | 311.2 | 311.2 | 2931 | 1.3 | 1 |
 | cityflow_hangzhou4x4 | efficientmp | 5 | 327.9 | 327.9 | 2929 | 1.6 | 1 |
 | cityflow_hangzhou4x4 | fixedtime | 0 | 517.3 | 517.3 | 2750 | 11.0 | 1 |
 | cityflow_hangzhou4x4 | fixedtime | 5 | 575.6 | 575.6 | 2645 | 12.5 | 1 |
 | cityflow_hangzhou4x4 | maxpressure | 0 | 347.7 | 347.7 | 2926 | 3.2 | 1 |
-| cityflow_hangzhou4x4 | maxpressure | 5 | 360.9 | 360.8 | 2925 | 3.5 | 1 |
+| cityflow_hangzhou4x4 | maxpressure | 5 | 360.8 | 360.8 | 2925 | 3.5 | 1 |
 | cityflow_hangzhou4x4 | sotl | 0 | 352.8 | 352.8 | 2915 | 3.3 | 1 |
 | cityflow_hangzhou4x4 | sotl | 5 | 375.6 | 375.6 | 2918 | 4.0 | 1 |
 | cityflow_hangzhou4x4_4ph | advancedmp (W1=1.0) | 0 | 314.7 | 314.7 | 2930 | 1.5 | 1 |
@@ -41,6 +41,6 @@ Wygenerowane: 2026-08-22 18:05
 | cityflow_jinan3x4_4ph | fixedtime | 0 | 424.7 | 424.7 | 5940 | 25.5 | 1 |
 | cityflow_jinan3x4_4ph | fixedtime | 5 | 507.0 | 507.0 | 5740 | 33.8 | 1 |
 | cityflow_jinan3x4_4ph | maxpressure | 0 | 316.8 | 316.8 | 6152 | 12.8 | 1 |
-| cityflow_jinan3x4_4ph | maxpressure | 5 | 361.1 | 361.0 | 6133 | 17.8 | 1 |
+| cityflow_jinan3x4_4ph | maxpressure | 5 | 361.0 | 361.0 | 6133 | 17.8 | 1 |
 | cityflow_jinan3x4_4ph | sotl | 0 | 318.7 | 318.7 | 6157 | 12.2 | 1 |
 | cityflow_jinan3x4_4ph | sotl | 5 | 352.9 | 352.9 | 6139 | 15.8 | 1 |
