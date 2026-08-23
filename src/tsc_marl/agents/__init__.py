@@ -13,6 +13,7 @@ TODO (baseline'y z planu, jeszcze nie zaimplementowane):
   advancedcolight — Advanced-CoLight (Zhang i in. 2022), linia SOTA
   bgat            — kontrybucja pracy (Faza 2)
 """
+
 from tsc_marl.agents.advanced_mp import (  # noqa: F401 - import dla efektu rejestracji
     AdvancedMaxPressureAgent,
     EfficientMaxPressureAgent,

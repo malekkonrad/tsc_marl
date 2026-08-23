@@ -14,6 +14,7 @@ library versions, hardware, or CPU-vs-GPU. The container pins versions; combine
 that with fixed seeds and report mean +/- std over several seeds (e.g. 1..5)
 rather than relying on a single "reproducible" number.
 """
+
 from __future__ import annotations
 
 import os
@@ -27,12 +28,14 @@ def set_global_seed(seed: int, deterministic: bool = True) -> int:
 
     try:
         import numpy as np
+
         np.random.seed(seed)
     except ImportError:
         pass
 
     try:
         import torch
+
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
         if deterministic:

@@ -23,7 +23,14 @@ Użycie (z korzenia repo):
     python -m tsc_marl.bench --table-only                # przelicz tabelę z CSV
 """
 
-import argparse, csv, json, os, re, subprocess, sys, time
+import argparse
+import csv
+import json
+import os
+import re
+import subprocess
+import sys
+import time
 from datetime import datetime
 from statistics import mean, pstdev
 
@@ -35,7 +42,9 @@ from tsc_marl.libsignal import LIBSIGNAL, REPO_ROOT, RESULTS, RUNS
 YELLOW_BY_MODE = {"realistic": 5, "benchmark": 0}
 MODE = "realistic"
 
-# "Final Travel Time is 514.1358, mean rewards: -723.7992, queue: 34.9205, delay: 3.5311, throughput: 5768"
+# Parsowana linia LibSignala, np.:
+#   "Final Travel Time is 514.1358, mean rewards: -723.7992, queue: 34.9205,
+#    delay: 3.5311, throughput: 5768"
 FINAL_RE = re.compile(
     r"Final Travel Time is ([\d.]+), mean rewards: (-?[\d.]+), queue: ([\d.]+), "
     r"delay: ([\d.]+), throughput: (\d+)"
@@ -226,11 +235,14 @@ def build_baseline_report(rows):
     out = [
         "# T1-baseline — punkt odniesienia pracy",
         "",
-        f"Wygenerowane: {datetime.now():%Y-%m-%d %H:%M}. Protokół: `configs/tsc/thesis_protocol.yml` "
-        "(Δt=15 s, epizod 3600 s, `PYTHONHASHSEED=0`), sieci w wariancie 4-fazowym — jak protokół papierów.",
+        f"Wygenerowane: {datetime.now():%Y-%m-%d %H:%M}. "
+        "Protokół: `configs/tsc/thesis_protocol.yml` "
+        "(Δt=15 s, epizod 3600 s, `PYTHONHASHSEED=0`), sieci w wariancie 4-fazowym "
+        "— jak protokół papierów.",
         "",
         "ATT = średnia z 10 ostatnich epizodów testowych (metody bez treningu: jeden przebieg).",
-        "Δ liczone względem literatury w trybie **benchmark**, bo w nim liczą swoje wyniki papiery.",
+        "Δ liczone względem literatury w trybie **benchmark**, bo w nim liczą swoje "
+        "wyniki papiery.",
         "",
     ]
     for net, lit in LITERATURE.items():
@@ -253,7 +265,10 @@ def build_baseline_report(rows):
             r5 = idx.get((net, agent, "5"))
             if not b and not r5:
                 continue
-            val = lambda x: f"{float(x['att_last10'] or x['att']):.1f}" if x else "—"
+
+            def val(x):
+                return f"{float(x['att_last10'] or x['att']):.1f}" if x else "—"
+
             ref = lit.get(agent)
             d = "—"
             if b and ref:

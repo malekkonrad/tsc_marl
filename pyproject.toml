@@ -66,4 +66,20 @@ select = ["E", "F", "W", "I", "UP", "B"]
 ignore = ["E402"]
 
 [tool.ruff.lint.per-file-ignores]
-"src/tsc_marl/agents/*" = ["N803", "N806"]  # nazwy z papierów (W1, L, M, N)
+# Nazewnictwo z papierów: W1/L/M/N oraz `l`,`m` na ruch (l,m) w definicjach pressure.
+# Zmiana na czytelniejsze nazwy rozjechałaby kod z wzorami, które implementuje.
+"src/tsc_marl/agents/*" = ["N803", "N806", "E741"]
+
+[tool.pyright]
+# Bez tego LSP w edytorze nie widzi ANI zależności z venva, ANI modułów LibSignala.
+# Powód dla LibSignala jest strukturalny: `external/LibSignal` trafia na sys.path
+# dopiero w runtime, w tsc_marl.libsignal.bootstrap() — analiza statyczna nie ma
+# jak się tego domyślić, więc trzeba jej to powiedzieć wprost.
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.10"
+extraPaths = ["src", "external/LibSignal"]
+
+# Cudzy kod analizujemy tylko na tyle, żeby rozwiązywać importy — nie chcemy jego
+# błędów w naszym oknie diagnostyki.
+exclude = ["external", ".venv", "runs", "data", "deploy"]

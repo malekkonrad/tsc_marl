@@ -16,6 +16,7 @@ Różnice względem oryginału, i po co one są:
 Uruchamiaj przez `scripts/run.sh`, żeby PYTHONHASHSEED był ustawiony przed startem
 interpretera — bez tego `world_sumo` jest niedeterministyczny.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -62,9 +63,12 @@ def main(argv: list[str] | None = None) -> None:
     set_global_seed(args.seed)
 
     # importy PO bootstrapie — dopiero wtedy submoduł jest na sys.path
-    import agent  # noqa: F401 - rejestruje agentów LibSignala
+    # Wszystkie cztery są importowane WYŁĄCZNIE dla efektu ubocznego: dekoratory
+    # zapełniają Registry. Nie usuwaj ich jako "nieużywanych" — bez `task` i `trainer`
+    # poniższe Registry.mapping[...] leci KeyError.
+    import agent  # noqa: F401
     import dataset  # noqa: F401
-    import task
+    import task  # noqa: F401
     import trainer  # noqa: F401
     from common import interface
     from common.registry import Registry

@@ -11,11 +11,12 @@ Def 9  effective running:   r(l,m) = Σ r_e(l'),  l' ∈ l
 Def 10 phase demand:        d(s)   = Σ r(l,m), (l,m) ∈ s
 Alg. 1 Advanced-MP:  jeśli d(a_cur)·W1 > max p(s) → utrzymaj fazę, inaczej argmax p(s)
 """
-from agent import BaseAgent  # z submodułu external/LibSignal (patrz tsc_marl.libsignal)
+
+import gym.spaces  # NIE `import gym`: gym ma py.typed, a jego __init__ nie re-eksportuje
+import numpy as np  # podmodułu `spaces`, więc statycznie `gym.spaces` nie istnieje
+from agent import BaseAgent
 from common.registry import Registry
-from generator import LaneVehicleGenerator, IntersectionPhaseGenerator
-import numpy as np
-import gym
+from generator import IntersectionPhaseGenerator, LaneVehicleGenerator
 
 WAITING_SPEED = 0.1  # próg "stoi" — ten sam, którego używa world_cityflow
 
@@ -28,32 +29,45 @@ class _PressureBase(BaseAgent):
         self.world = world
         self.rank = rank
         self.model = None
-        param = Registry.mapping['model_mapping']['setting'].param
+        param = Registry.mapping["model_mapping"]["setting"].param
         # pomijaj ruchy zielone w KAŻDEJ fazie (skręty w prawo) — patrz _controlled_lanelinks
-        self.drop_always_green = param.get('drop_always_green', False)
-        self.obs_length = param.get('obs_length', None)
+        self.drop_always_green = param.get("drop_always_green", False)
+        self.obs_length = param.get("obs_length", None)
         self._build_generators()
         self.action_space = gym.spaces.Discrete(len(self.inter_obj.phases))
-        self.t_min = Registry.mapping['model_mapping']['setting'].param['t_min']
+        self.t_min = Registry.mapping["model_mapping"]["setting"].param["t_min"]
         self._movements = self._phase_movements()
 
     def _build_generators(self):
         inter_id = self.world.intersection_ids[self.rank]
         self.inter_obj = self.world.id2intersection[inter_id]
-        self.ob_generator = LaneVehicleGenerator(self.world, self.inter_obj, ['lane_count'],
-                                                 in_only=True, average=None)
-        self.phase_generator = IntersectionPhaseGenerator(self.world, self.inter_obj, ["phase"],
-                                                          targets=["cur_phase"], negative=False)
-        self.reward_generator = LaneVehicleGenerator(self.world, self.inter_obj, ["lane_count"],
-                                                     in_only=True, average='all', negative=True)
-        self.queue = LaneVehicleGenerator(self.world, self.inter_obj, ["lane_waiting_count"],
-                                          in_only=True, negative=False)
-        self.delay = LaneVehicleGenerator(self.world, self.inter_obj, ["lane_delay"],
-                                          in_only=True, negative=False)
+        self.ob_generator = LaneVehicleGenerator(
+            self.world, self.inter_obj, ["lane_count"], in_only=True, average=None
+        )
+        # pyright widzi tu `fns: str` / `targets: str`, bo IntersectionPhaseGenerator ma
+        # w LibSignalu domyślne `("phase")` i `("cur_phase")` — to nie krotki, tylko stringi
+        # w nawiasach (brak przecinka). Listy są tym, czego ten kod naprawdę oczekuje;
+        # domyślna wartość jest niedziałająca i nikt jej nie używa.
+        self.phase_generator = IntersectionPhaseGenerator(
+            self.world,
+            self.inter_obj,
+            ["phase"],  # pyright: ignore[reportArgumentType]
+            targets=["cur_phase"],  # pyright: ignore[reportArgumentType]
+            negative=False,
+        )
+        self.reward_generator = LaneVehicleGenerator(
+            self.world, self.inter_obj, ["lane_count"], in_only=True, average="all", negative=True
+        )
+        self.queue = LaneVehicleGenerator(
+            self.world, self.inter_obj, ["lane_waiting_count"], in_only=True, negative=False
+        )
+        self.delay = LaneVehicleGenerator(
+            self.world, self.inter_obj, ["lane_delay"], in_only=True, negative=False
+        )
 
     @staticmethod
     def _road_of(lane):
-        return lane.rsplit('_', 1)[0]
+        return lane.rsplit("_", 1)[0]
 
     def _controlled_lanelinks(self):
         """Lanelinki STEROWANE sygnałem = te, których NIE ma we wszystkich fazach.
@@ -114,17 +128,20 @@ class _PressureBase(BaseAgent):
     def _effective_running(self, lane_vehicles, distances, speeds, unlimited=False):
         """r_e(l') dla pasów wjazdowych — Def 8 + Def 9. Liczy tylko pojazdy JADĄCE
         i będące w zasięgu L = V_max·Δt od skrzyżowania."""
-        t_duration = Registry.mapping['trainer_mapping']['setting'].param['action_interval']
+        t_duration = Registry.mapping["trainer_mapping"]["setting"].param["action_interval"]
         in_lanes = {l for moves in self._movements for ins, _ in moves for l in ins}
         counts = {}
         for lane in in_lanes:
-            L = (self.obs_length if self.obs_length is not None
-                 else self.world.all_lanes_speed.get(lane, 11.11) * t_duration)
+            L = (
+                self.obs_length
+                if self.obs_length is not None
+                else self.world.all_lanes_speed.get(lane, 11.11) * t_duration
+            )
             length = self.world.lane_length.get(lane, 0.0)
             n = 0
             for vid in lane_vehicles.get(lane, []):
                 if speeds.get(vid, 0.0) < WAITING_SPEED:
-                    continue                        # stoi → to kolejka, nie "demand"
+                    continue  # stoi → to kolejka, nie "demand"
                 if unlimited or length - distances.get(vid, 0.0) <= L:
                     n += 1
             counts[lane] = n
@@ -156,12 +173,12 @@ class _PressureBase(BaseAgent):
         return sum(self.delay.generate())
 
 
-@Registry.register_model('efficientmp')
+@Registry.register_model("efficientmp")
 class EfficientMaxPressureAgent(_PressureBase):
     """Wybiera fazę o największym efficient pressure (Wu 2021)."""
 
     def __repr__(self):
-        return 'Efficient-MP Agent has no Network model'
+        return "Efficient-MP Agent has no Network model"
 
     def get_action(self, ob, phase, test=True):
         if self.inter_obj.current_phase_time < self.t_min:
@@ -170,17 +187,17 @@ class EfficientMaxPressureAgent(_PressureBase):
         return int(np.argmax(self._phase_pressure(q)))
 
 
-@Registry.register_model('advancedmp')
+@Registry.register_model("advancedmp")
 class AdvancedMaxPressureAgent(_PressureBase):
     """Advanced-MP (Zhang 2022, Algorytm 1): bieżąca faza broni się swoim demand
     (d·W1), reszta konkuruje efficient pressure."""
 
     def __init__(self, world, rank):
         super().__init__(world, rank)
-        self.w1 = Registry.mapping['model_mapping']['setting'].param['w1']
+        self.w1 = Registry.mapping["model_mapping"]["setting"].param["w1"]
 
     def __repr__(self):
-        return 'Advanced-MP Agent has no Network model'
+        return "Advanced-MP Agent has no Network model"
 
     def get_action(self, ob, phase, test=True):
         if self.inter_obj.current_phase_time < self.t_min:
