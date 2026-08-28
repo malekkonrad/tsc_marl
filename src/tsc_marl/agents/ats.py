@@ -96,8 +96,20 @@ def all_lanes(movements: Sequence[Movement]) -> set[str]:
     return {lane for ins, outs in movements for lane in (*ins, *outs)}
 
 
-def movement_pressure(movements: Sequence[Movement], q: Mapping[str, float]) -> list[float]:
-    """e(l,m) dla każdego ruchu — Def. 4, BEZ sumowania po fazie (to robi Def. 5)."""
+def movement_pressure(
+    movements: Sequence[Movement], q: Mapping[str, float], normalize: bool = True
+) -> list[float]:
+    """e(l,m) dla każdego ruchu — Def. 4, BEZ sumowania po fazie (to robi Def. 5).
+
+    `normalize=False` daje KLASYCZNY pressure (Varaiya/MaxPressure): różnicę SUM
+    zamiast różnicy średnich. To jest dokładnie ten krok, który Wu i in. 2021
+    nazwali "efficient" — jedyna różnica między pressure a EP. Trzymamy oba tutaj,
+    żeby ablacja stanu (1.6) porównywała definicje z jednego źródła, a nie dwie
+    osobne implementacje."""
+    if not normalize:
+        return [
+            sum(q[lane] for lane in ins) - sum(q[lane] for lane in outs) for ins, outs in movements
+        ]
     return [
         sum(q[lane] for lane in ins) / len(ins) - sum(q[lane] for lane in outs) / len(outs)
         for ins, outs in movements
