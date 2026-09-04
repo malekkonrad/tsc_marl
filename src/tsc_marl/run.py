@@ -54,6 +54,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--episodes", type=int, default=None, help="nadpisz liczbę epizodów")
     p.add_argument(
+        "--steps",
+        type=int,
+        default=None,
+        metavar="S",
+        help="nadpisz długość epizodu (treningowego I testowego) w sekundach symulacji. "
+        "TYLKO do smoke-testów i debugowania — protokół pracy to 3600",
+    )
+    p.add_argument(
         "--run-id",
         default=None,
         help="nadpisz identyfikator biegu (domyślnie {agent}__{sieć}__s{seed}_y{yellow})",

@@ -1,0 +1,45 @@
+# Rdzeń Fazy 1: GAT + PPO + CTDE. Wejście: `src/tsc_marl/run_core.py`.
+#
+# Dziedziczy po `advancedcolight.yml`, czyli po TEJ SAMEJ reprezentacji stanu
+# (ATS, obs_length 167, drop_always_green) i TEJ SAMEJ architekturze GAT
+# (NODE_EMB_DIM/INPUT_DIM/OUTPUT_DIM/NUM_HEADS z colight.yml, czytane przez
+# `GATEncoder.registry_kwargs`). Jedyną zamierzoną różnicą wobec baseline'u
+# jest algorytm uczenia — i tylko dzięki temu GATE Fazy 1 mierzy to, co ma.
+#
+# Hiperparametry PPO SIEDZĄ TUTAJ, a nie w kodzie: `experiment.build_params`
+# liczy odcisk sekcji `model` + `trainer`, więc zmiana `clip_range` unieważnia
+# skip-if-done. Wartość żyjąca tylko w Pythonie przepuściłaby bieg z innymi
+# ustawieniami jako „już policzony".
+includes:
+  - configs/tsc/advancedcolight.yml   # stan ATS + architektura GAT
+  - configs/tsc/thesis_protocol.yml   # zamrożony protokół — musi być OSTATNI
+
+model:
+  name: gatppo
+  graphic: True          # rdzeń zawsze potrzebuje grafu (Graph_World_Interface)
+  train_model: True
+
+  # --- wariant stanu i nagrody (przełączniki ablacji 1.6) ---
+  state: ats             # queue | pressure | ep | ats
+  reward: queue          # queue | pressure
+
+  # --- PPO (pola PPOConfig; komentarze przy nietypowych wartościach) ---
+  # gamma liczy się w DECYZJACH: przy Δt=15 s epizod ma ich 240, więc 0.95 to
+  # horyzont ~20 decyzji = 5 minut ruchu. Ta sama wartość co w base.yml, żeby
+  # dyskonto było wspólną osią z CoLightem i Advanced-CoLightem (MAPPO bierze 0.99).
+  gamma: 0.95
+  gae_lambda: 0.95
+  clip_range: 0.2
+  value_clip_range: 0.2
+  epochs: 10
+  n_minibatches: 4
+  actor_lr: 0.0003
+  critic_lr: 0.001
+  entropy_coef: 0.01
+  value_coef: 0.5
+  # konwencja PPO. `grad_clip: 5.0` z base.yml to ustawienie DQN-a i przy PPO
+  # praktycznie nie tnie — dlatego osobne pole, nie nadpisanie tamtego.
+  max_grad_norm: 0.5
+  normalize_advantage: True
+  normalize_values: True
+  target_kl: null        # clip wystarcza; hamulec awaryjny włączamy świadomie

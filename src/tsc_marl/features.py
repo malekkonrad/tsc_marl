@@ -91,6 +91,12 @@ class StateBuilder:
             raise ValueError(f"reward={reward!r}, dozwolone: {REWARD_VARIANTS}")
 
         self.world = world
+        # `get_info` czyta cache odświeżany w `World._update_infos`, a ten liczy
+        # TYLKO zasubskrybowane funkcje. LibSignalowe agenty subskrybują to przy
+        # okazji, budując `LaneVehicleGenerator` — my generatorów nie mamy, więc
+        # bez tej linii `rewards()` leci `KeyError: 'lane_waiting_count'` przy
+        # pierwszym kroku rdzenia. Subskrypcja jest idempotentna.
+        world.subscribe("lane_waiting_count")
         self.intersections = list(intersections)
         self.state = state
         self.reward = reward

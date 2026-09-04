@@ -17,10 +17,15 @@ Reward zostaje CoLightowy (−Σ kolejek) — Advanced-XLight zmienia tylko stan
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from agent.base import Registry
 from agent.colight import CoLightAgent
 
-from tsc_marl.features import StateBuilder, Structs
+if TYPE_CHECKING:  # `features` importuje `tsc_marl.agents` po `ats`, więc import
+    # tych nazw na górze zamykałby cykl: features -> agents/__init__ -> tutaj ->
+    # features. W runtime bierzemy je leniwie, w `_builder()`.
+    from tsc_marl.features import StateBuilder, Structs
 
 
 @Registry.register_model("advancedcolight")
@@ -45,6 +50,8 @@ class AdvancedCoLight(CoLightAgent):
         na roadnetach CityFlow obie są dziś identyczne (patrz `graph.py`).
         """
         if self._features is None:
+            from tsc_marl.features import StateBuilder  # noqa: PLC0415 - cykl importów
+
             # state/reward na sztywno: Advanced-CoLight JEST zdefiniowany przez ATS,
             # więc nie podlega przełącznikowi ablacyjnemu — ten należy do rdzenia.
             self._features = StateBuilder.from_registry(

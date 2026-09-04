@@ -9,6 +9,10 @@
 # Użycie:
 #   scripts/run.sh -a efficientmp -n cityflow_jinan3x4_4ph --seed 0
 #   scripts/run.sh -a colight -n cityflow_jinan3x4_4ph --seed 0 --yellow 0
+#   scripts/run_core.sh -n cityflow_jinan3x4_4ph --seed 0        # rdzeń GAT+PPO+CTDE
+#
+# MODULE wybiera wejście: `tsc_marl.run` (agenty LibSignala) albo `tsc_marl.run_core`
+# (rdzeń Fazy 1, własna pętla PPO). Ustawianie PYTHONHASHSEED zostaje w JEDNYM miejscu.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -28,4 +32,4 @@ if [[ ! -x "$PYTHON" ]]; then
 fi
 
 export PYTHONHASHSEED=0
-exec "$PYTHON" -m tsc_marl.run "$@"
+exec "$PYTHON" -m "${MODULE:-tsc_marl.run}" "$@"

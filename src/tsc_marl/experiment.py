@@ -59,6 +59,10 @@ def resolve_config(args) -> dict[str, Any]:
         config["trainer"]["yellow_length"] = args.yellow
     if args.episodes is not None:
         config["trainer"]["episodes"] = args.episodes
+    if getattr(args, "steps", None) is not None:
+        # oba naraz: krótki trening z pełnym testem (albo odwrotnie) dawałby liczby,
+        # których nie da się zestawić z niczym
+        config["trainer"]["steps"] = config["trainer"]["test_steps"] = args.steps
     return config
 
 
