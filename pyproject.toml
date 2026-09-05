@@ -26,6 +26,11 @@ dependencies = [
     "packaging",
     "lmdb",                   # importowane w dataset/onfly_dataset.py, czyli przy KAŻDYM runie
 
+    # --- CLI ---
+    # Jedno wejście `tsc` z podkomendami. Pure-python (typer + click), nie dotyka
+    # numeryki, więc nie zmienia odtwarzalności wyników.
+    "typer",
+
     # --- analiza wyników ---
     "pandas",
     "scipy",
@@ -42,6 +47,11 @@ dependencies = [
 cpu = ["torch-scatter==2.1.2"]
 gpu = ["torch-scatter==2.1.2"]
 dev = ["ruff", "pytest"]
+
+[project.scripts]
+# `tsc` ląduje w .venv/bin po `uv pip install -e .`. Do tego czasu działa
+# równoważne `python -m tsc_marl`.
+tsc = "tsc_marl.cli:app"
 
 [build-system]
 requires = ["hatchling"]
@@ -98,6 +108,28 @@ venv = ".venv"
 pythonVersion = "3.10"
 extraPaths = ["src", "external/LibSignal"]
 
+# Podpowiedzi auto-importu w edytorze. `autoImportCompletions` jest domyślnie włączone,
+# ale `indexing` NIE (domyślnie false) — a bez indeksu pyright podpowiada tylko symbole
+# z plików, które już sparsował, i z top-levelu pakietów. Z indeksem widzi podmoduły,
+# czyli np. `torch.nn.functional` czy warstwy z `torch_geometric.nn`, bez wcześniejszego
+# zaimportowania ich w pliku. Kosztuje kilka sekund i trochę RAM-u przy starcie LSP.
+# `indexing` nie jest opisane w README pyrighta, ale parser configu je obsługuje.
+indexing = true
+autoImportCompletions = true
+useLibraryCodeForTypes = true
+
 # Cudzy kod analizujemy tylko na tyle, żeby rozwiązywać importy — nie chcemy jego
 # błędów w naszym oknie diagnostyki.
 exclude = ["external", ".venv", "runs", "data", "deploy"]
+
+[tool.uv]
+# Środowisko budujemy `make setup` (uv venv + uv pip install z indeksem torcha
+# CPU albo CUDA), a NIE `uv sync`. Bez tej flagi `uv run` domyślnie synchronizuje
+# .venv z samego pyproject.toml — czyli podmienia `torch 2.4.1+cpu` na build CUDA
+# (~2,5 GB wheeli nvidia-*), KASUJE `torch-scatter` (żyje w extra `cpu`/`gpu`)
+# i wyrzuca ruff/pytest. Jeden `uv run` niszczyłby wtedy środowisko, w którym
+# powstały wyniki. `managed = false` wyłącza tę synchronizację: `uv run` po prostu
+# używa .venv, a `uv sync` odmawia z czytelnym komunikatem.
+#
+# `uv venv` i `uv pip` działają bez zmian — one nie chodzą przez tryb projektowy.
+managed = false

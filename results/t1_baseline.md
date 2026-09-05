@@ -1,6 +1,6 @@
 # T1-baseline — punkt odniesienia pracy
 
-Wygenerowane: 2026-08-23 18:33. Protokół: `configs/tsc/thesis_protocol.yml` (Δt=15 s, epizod 3600 s, `PYTHONHASHSEED=0`), sieci w wariancie 4-fazowym — jak protokół papierów.
+Wygenerowane: 2026-09-05 09:51. Protokół: `configs/tsc/thesis_protocol.yml` (Δt=15 s, epizod 3600 s, `PYTHONHASHSEED=0`), sieci w wariancie 4-fazowym — jak protokół papierów.
 
 ATT = średnia z 10 ostatnich epizodów testowych (metody bez treningu: jeden przebieg).
 Δ liczone względem literatury w trybie **benchmark**, bo w nim liczą swoje wyniki papiery.

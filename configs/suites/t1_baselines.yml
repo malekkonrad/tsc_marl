@@ -1,0 +1,11 @@
+# T1 — punkt odniesienia pracy: metody bez uczenia i bez treningu.
+# Bez `overrides`, więc trafia w te same run_id co uruchomienia ręczne i widzi
+# wyniki policzone wcześniej jako gotowe (nie przelicza ich od nowa).
+entry: tsc
+mode: realistic          # yellow_length 5 — protokół pracy
+timeout: 3600
+
+grid:
+  agent: [fixedtime, maxpressure, sotl, efficientmp, advancedmp]
+  network: [cityflow_jinan3x4_4ph, cityflow_hangzhou4x4_4ph]
+  seed: [0]

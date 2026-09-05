@@ -1,0 +1,11 @@
+# Punkt odniesienia GATE-a Fazy 1: Advanced-CoLight na tych samych sieciach
+# i seedach co rdzeń. Bez tego „w granicach kilku procent" nie ma do czego się
+# odnieść na NASZYM protokole (liczby z papieru są dla yellow=0).
+entry: tsc
+mode: realistic
+timeout: 86400
+
+grid:
+  agent: [advancedcolight]
+  network: [cityflow_jinan3x4_4ph, cityflow_hangzhou4x4_4ph]
+  seed: [0, 1, 2]

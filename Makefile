@@ -1,6 +1,6 @@
 # Skróty do najczęstszych operacji. `make help` listuje cele.
 .DEFAULT_GOAL := help
-.PHONY: help setup setup-gpu check test test-slow test-all bench bench-paper table runs plot lint hpc-build
+.PHONY: help setup setup-gpu check test test-slow test-all bench bench-paper gate table runs plot lint hpc-build
 
 help: ## Pokaż tę pomoc
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -28,7 +28,8 @@ setup-gpu: ## To samo, ale torch/torch-scatter w wariancie CUDA 12.1
 	@echo "Gotowe. Sprawdź: make check"
 
 check: ## Szybki test zdrowia środowiska (~15 s, Efficient-MP na JiNan)
-	scripts/run.sh -a efficientmp -n cityflow_jinan3x4_4ph --seed 0
+	.venv/bin/tsc doctor
+	.venv/bin/tsc train -a efficientmp -n cityflow_jinan3x4_4ph --seed 0 --replace
 
 test: ## Testy jednostkowe (bez silnika, ~2 s)
 	.venv/bin/python -m pytest
@@ -39,23 +40,28 @@ test-slow: ## Same testy wymagające CityFlow (stawia świat, ~30 s)
 test-all: ## Wszystkie testy naraz
 	.venv/bin/python -m pytest -m ''
 
-bench: ## Tabela T1, tryb realistyczny (yellow=5) — baseline'y bez treningu
-	.venv/bin/python -m tsc_marl.bench -m realistic
+bench: ## Siatka T1, tryb realistyczny (yellow=5) — baseline'y bez treningu
+	.venv/bin/tsc suite run t1_baselines
+	.venv/bin/tsc table
 
-bench-paper: ## Tabela T1, tryb benchmark (yellow=0) — jak liczą papiery
-	.venv/bin/python -m tsc_marl.bench -m benchmark
+bench-paper: ## Siatka T1, tryb benchmark (yellow=0) — jak liczą papiery
+	.venv/bin/tsc suite run t1_paper
+	.venv/bin/tsc table
 
 table: ## Przelicz tabele z zapisanych biegów, bez uruchamiania symulacji
-	.venv/bin/python -m tsc_marl.bench --table-only
+	.venv/bin/tsc table
 
 runs: ## Wypisz policzone biegi (runs/t1) — status, parametry, ATT
-	.venv/bin/python -c "from tsc_marl.experiment import experiment; \
-	 import pandas as pd; pd.set_option('display.width', 200); \
-	 print(experiment().results().to_string(index=False))"
+	.venv/bin/tsc runs
 
 plot: ## Krzywe uczenia z runs/ → runs/plots/ (działa też dla biegu w toku)
-	.venv/bin/python -m tsc_marl.plot
-	.venv/bin/python -m tsc_marl.plot --split train
+	.venv/bin/tsc plot
+	.venv/bin/tsc plot --split train
+
+gate: ## GATE Fazy 1 — rdzeń vs Advanced-CoLight na tych samych sieciach i seedach
+	.venv/bin/tsc suite run p1_reference
+	.venv/bin/tsc suite run p1_gate
+	.venv/bin/tsc suite status p1_gate
 
 lint: ## ruff
 	.venv/bin/ruff check src/ tests/ && .venv/bin/ruff format --check src/ tests/

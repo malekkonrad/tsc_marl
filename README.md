@@ -18,6 +18,8 @@ sensorów, zamiast rozsypywać się jak metody SOTA.
 4. [Protokół eksperymentalny](#protokół-eksperymentalny) · 5. [Wyniki](#wyniki)
 6. [Relacja do LibSignala](#relacja-do-libsignala) · 7. [Pułapki](#pułapki)
 
+Ściąga z komendami na co dzień: **[URUCHAMIANIE.md](URUCHAMIANIE.md)**.
+
 ---
 
 ## Co tu jest
@@ -74,23 +76,55 @@ Jeśli klonowałeś bez `--recursive`: `git submodule update --init --recursive`
 
 ## Uruchamianie
 
+> Ściąga z gotowymi komendami (wariant `uv run`): **[URUCHAMIANIE.md](URUCHAMIANIE.md)**.
+
+Wszystko idzie przez jedno wejście `tsc` (`python -m tsc_marl`, gdyby console script
+nie był jeszcze zainstalowany):
+
 ```bash
-scripts/run.sh -a efficientmp -n cityflow_jinan3x4_4ph --seed 0   # jeden run
-make bench                                                        # cała tabela T1
-python -m tsc_marl.bench -a colight -s 0 1 2 --timeout 86400      # trening
-make runs                                                         # co już policzone
-make plot                                                         # krzywe uczenia
-scripts/eval.sh --load-run runs/t1/colight__cityflow_jinan3x4_4ph__s0_y5 \
-                --checkpoint best --tag drop25                    # zamrożona polityka
+tsc doctor                                                    # środowisko OK?
+tsc train -a efficientmp -n cityflow_jinan3x4_4ph --seed 0    # jeden bieg
+tsc core -n cityflow_jinan3x4_4ph --seed 0                    # rdzeń GAT+PPO+CTDE
+tsc suite list                                                # jakie są siatki
+tsc suite run t1_baselines                                    # policz siatkę
+tsc suite status p1_gate                                      # co już jest, czego brak
+tsc runs / tsc table / tsc plot                               # wyniki, tabele, krzywe
+tsc eval --load-run runs/t1/colight__cityflow_jinan3x4_4ph__s0_y5 \
+         --checkpoint best --tag drop25                       # zamrożona polityka
 ```
 
-Powtórzenie `bench` **pomija punkty siatki, które już mają wynik** — porównanie idzie
-po odcisku parametrów, więc zmiana czegokolwiek w configu metody unieważnia poprzedni
-bieg i policzy się on ponownie. `--replace` wymusza przeliczenie mimo wszystko.
+`tsc train --help`, `tsc core --help` i `tsc eval --help` wypisują pełne listy flag
+(argumenty lecą wprost do parserów tych modułów).
 
-**Uruchamiaj przez `scripts/run.sh`, nie przez `python -m tsc_marl.run`.** Wrapper
-ustawia `PYTHONHASHSEED=0` przed startem interpretera; ustawiony z poziomu Pythona
-nie zadziała, a bez niego `world_sumo` daje różne wyniki dla tych samych argumentów.
+Działa też `uv run tsc ...`. Projekt jest oznaczony `[tool.uv] managed = false`,
+bo środowisko budujemy `make setup` (torch z indeksu CPU albo CUDA + `torch-scatter`
+z extra), a nie `uv sync` — bez tej flagi `uv run` zsynchronizowałby `.venv` z samego
+`pyproject.toml` i podmienił build torcha oraz skasował `torch-scatter`.
+
+### Siatki eksperymentów
+
+„Co policzyć" jest plikiem w `configs/suites/*.yml`, a nie linią w historii powłoki:
+
+```yaml
+entry: core                 # core → tsc_marl.run_core, tsc → tsc_marl.run
+mode: realistic             # realistic = yellow 5 (protokół pracy), benchmark = 0
+grid:
+  network: [cityflow_jinan3x4_4ph, cityflow_hangzhou4x4_4ph]
+  seed: [0, 1, 2]
+overrides:                  # opcjonalne nadpisania configu agenta
+  model: {NUM_HEADS: [8, 8]}
+```
+
+`tsc suite run` **pomija punkty, które już mają wynik** — porównanie idzie po odcisku
+parametrów, więc zmiana czegokolwiek w configu metody (albo w `overrides`) unieważnia
+poprzedni bieg. `--replace` wymusza przeliczenie. Suite z `overrides` dokleja swoją
+nazwę do `run_id`, żeby dwa różne configi nie biły się o jeden katalog; suite bez
+nadpisań trafia w te same identyfikatory co uruchomienia ręczne.
+
+**Nie wołaj `python -m tsc_marl.run` bezpośrednio.** `PYTHONHASHSEED=0` musi być
+ustawiony przed startem interpretera — z poziomu Pythona nie zadziała, a bez niego
+`world_sumo` daje różne wyniki dla tych samych argumentów. CLI załatwia to,
+restartując interpreter (`cli.ensure_hashseed`).
 
 Dostępne metody: `fixedtime`, `sotl`, `maxpressure`, `efficientmp`, `advancedmp`,
 `advancedcolight`, `presslight`, `colight`, `mplight`, `frap`, `dqn`.

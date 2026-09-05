@@ -1,0 +1,10 @@
+# Ten sam zestaw w trybie papierów (yellow_length 0). Różnica między trybami jest
+# samodzielnym wynikiem pracy — patrz results/t1_w1_sweep.md.
+entry: tsc
+mode: benchmark
+timeout: 3600
+
+grid:
+  agent: [fixedtime, maxpressure, sotl, efficientmp, advancedmp]
+  network: [cityflow_jinan3x4_4ph, cityflow_hangzhou4x4_4ph]
+  seed: [0]

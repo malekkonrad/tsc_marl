@@ -13,19 +13,22 @@ Różnice względem oryginału, i po co one są:
 
 3. **Wyniki lądują w `runs/`**, nie w `data/output_data` submodułu.
 
-Uruchamiaj przez `scripts/run.sh`, żeby PYTHONHASHSEED był ustawiony przed startem
-interpretera — bez tego `world_sumo` jest niedeterministyczny.
+Przygotowanie procesu (bootstrap, seed, sekwencja interfejsów Registry, rejestracja
+biegu w `runlog`) siedzi w `tsc_marl/session.py` — wspólne dla tego wejścia,
+`run_core.py` i `evaluate.py`. Tutaj zostaje wyłącznie to, co robi LibSignal:
+`TSCTask(runner).run()`.
+
+Uruchamiaj przez `tsc train` — CLI ustawia PYTHONHASHSEED przed startem interpretera
+(restartuje się, patrz `cli.ensure_hashseed`). Bez tego `world_sumo` jest
+niedeterministyczny.
 """
 
 from __future__ import annotations
 
 import argparse
-import logging
-import os
 import time
 
-from tsc_marl import libsignal
-from tsc_marl.seeding import set_global_seed
+from tsc_marl import experiment, session
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -62,6 +65,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "TYLKO do smoke-testów i debugowania — protokół pracy to 3600",
     )
     p.add_argument(
+        "--suite",
+        default=None,
+        metavar="PLIK",
+        help="plik suite'a (configs/suites/*.yml albo sama nazwa) — jego blok `overrides` "
+        "wchodzi do configu PRZED odciskiem biegu. Tak runner siatki przekazuje "
+        "nadpisania do podprocesu: ścieżką, a nie serializacją słownika w argv",
+    )
+    p.add_argument(
         "--run-id",
         default=None,
         help="nadpisz identyfikator biegu (domyślnie {agent}__{sieć}__s{seed}_y{yellow})",
@@ -76,71 +87,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    libsignal.bootstrap()
-    os.environ["CUDA_VISIBLE_DEVICES"] = args.ngpu
-    set_global_seed(args.seed)
+    with session.session(args) as s:
+        from common.registry import Registry
 
-    # importy PO bootstrapie — dopiero wtedy submoduł jest na sys.path
-    # Wszystkie cztery są importowane WYŁĄCZNIE dla efektu ubocznego: dekoratory
-    # zapełniają Registry. Nie usuwaj ich jako "nieużywanych" — bez `task` i `trainer`
-    # poniższe Registry.mapping[...] leci KeyError.
-    import agent  # noqa: F401
-    import dataset  # noqa: F401
-    import task  # noqa: F401
-    import trainer  # noqa: F401
-    from common import interface
-    from common.registry import Registry
-    from utils.logger import setup_logging
-
-    import tsc_marl.agents  # noqa: F401 - rejestruje NASZYCH agentów
-    from tsc_marl import experiment
-
-    config = experiment.resolve_config(args)
-
-    # --- rejestracja biegu w runlog (PRZED interfejsami: root_dir musi być ustawiony,
-    #     zanim LibSignal policzy sobie ścieżki wyjściowe) ---
-    exp = experiment.experiment()
-    params = experiment.build_params(args, config)
-    rid = args.run_id or experiment.run_id(
-        args.agent, args.network, args.seed, config["trainer"]["yellow_length"]
-    )
-    run = exp.start(rid, params, config=config, repos=experiment.repos(), replace=args.replace)
-    # artefakty silnika (checkpointy, logi, replaye) lądują WEWNĄTRZ katalogu biegu,
-    # dzięki czemu „jeden bieg = jeden katalog" jest prawdą, a data/ zostaje katalogiem
-    # wejściowym. Działa dzięki patchowi get_output_file_path w submodule.
-    config["logger"]["root_dir"] = str(run.engine_dir)
-
-    # kolejność wywołań jak w run.py LibSignala — zależności między interfejsami
-    # WSZYSTKO poniżej pod `with run:` — łącznie z budową świata i runnera. Budowa
-    # świata potrafi paść (zły roadnet, brakujący plik), a bieg jest już wtedy
-    # zarejestrowany: gdyby to leciało poza blokiem, katalog zostawałby na wieki
-    # w statusie `running` i blokował ponowne uruchomienie.
-    with run, libsignal.sim_configs_untouched():
-        interface.Command_Setting_Interface(config)
-        interface.Logger_param_Interface(config)
-        interface.World_param_Interface(config)
-        if config["model"].get("graphic", False):
-            param = Registry.mapping["world_mapping"]["setting"].param
-            roadnet = (
-                param["dir"] + param["roadnetFile"]
-                if config["command"]["world"] in ("cityflow", "sumo")
-                else param["road_file_addr"]
-            )
-            interface.Graph_World_Interface(roadnet)
-        interface.Logger_path_Interface(config)
-        os.makedirs(Registry.mapping["logger_mapping"]["path"].path, exist_ok=True)
-        interface.Trainer_param_Interface(config)
-        interface.ModelAgent_param_Interface(config)
-
-        logger = setup_logging(logging.DEBUG if args.debug else logging.INFO)
         task_name = Registry.mapping["command_mapping"]["setting"].param["task"]
         started = time.time()
-        runner = Registry.mapping["trainer_mapping"][task_name](logger)
+        runner = Registry.mapping["trainer_mapping"][task_name](s.logger)
         Registry.mapping["task_mapping"][task_name](runner).run()
-        logger.info(f"Total time taken: {time.time() - started}")
+        s.logger.info(f"Total time taken: {time.time() - started}")
         # logi silnika → metryki per epizod + skalary raportowe (w tym att_last10)
-        experiment.ingest(run, experiment.engine_log_dir(run, args))
-    print(f"runlog: {run.path}")
+        experiment.ingest(s.run, experiment.engine_log_dir(s.run, args))
+    print(f"runlog: {s.run.path}")
 
 
 if __name__ == "__main__":

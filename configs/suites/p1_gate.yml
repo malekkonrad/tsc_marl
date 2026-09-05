@@ -1,0 +1,12 @@
+# GATE Fazy 1: rdzeń (GAT + PPO + CTDE) ma dojść do ATT Advanced-CoLighta
+# w granicach kilku procent. 2 sieci × 3 seedy = 6 biegów po ~kilka godzin.
+#
+# `entry: core` wybiera `tsc_marl.run_core` (własna pętla PPO) zamiast ścieżki
+# taskowej LibSignala — domyślny agent to wtedy `gatppo`.
+entry: core
+mode: realistic
+timeout: 86400           # trening, nie baseline
+
+grid:
+  network: [cityflow_jinan3x4_4ph, cityflow_hangzhou4x4_4ph]
+  seed: [0, 1, 2]

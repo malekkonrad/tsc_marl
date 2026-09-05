@@ -1,6 +1,6 @@
 # T1 — baseline'y na czystym benchmarku
 
-Wygenerowane: 2026-08-23 18:33
+Wygenerowane: 2026-09-05 09:51
 
 | sieć | agent | yellow | ATT (10 ost. testów) | ATT (ostatni) | throughput | queue | n |
 |---|---|---|---|---|---|---|---|
@@ -24,6 +24,7 @@ Wygenerowane: 2026-08-23 18:33
 | cityflow_hangzhou4x4_4ph | maxpressure | 5 | 392.7 | 392.7 | 2920 | 5.3 | 1 |
 | cityflow_hangzhou4x4_4ph | sotl | 0 | 344.9 | 344.9 | 2924 | 2.9 | 1 |
 | cityflow_hangzhou4x4_4ph | sotl | 5 | 367.2 | 367.2 | 2926 | 3.5 | 1 |
+| cityflow_jinan3x4 | advancedcolight | 0 | 265.8 | 264.7 | 6186 | 5.0 | 1 |
 | cityflow_jinan3x4 | advancedmp (W1=1.0) | 0 | 271.7 | 271.7 | 6180 | 6.0 | 1 |
 | cityflow_jinan3x4 | advancedmp (W1=1.0) | 5 | 296.0 | 296.0 | 6162 | 8.0 | 1 |
 | cityflow_jinan3x4 | efficientmp | 0 | 270.0 | 270.0 | 6186 | 5.7 | 1 |

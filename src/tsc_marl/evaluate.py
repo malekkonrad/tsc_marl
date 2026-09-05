@@ -9,18 +9,17 @@ Wagi ładujemy z CUDZEGO katalogu biegu, a wynik zapisujemy do WŁASNEGO: inacze
 ewaluacja nadpisałaby logi treningu, a Faza 3 nie mogłaby trzymać N ewaluacji
 jednej polityki obok siebie.
 
-    scripts/run.sh --eval --load-run runs/t1/colight__jinan__s0_y5 --checkpoint best
+    tsc eval --load-run runs/t1/colight__jinan__s0_y5 --checkpoint best
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
-import os
 import re
 from pathlib import Path
 
-from tsc_marl import libsignal
+from tsc_marl import libsignal, session
 
 CKPT_RE = re.compile(r"^(\d+)_(\d+)\.pt$")
 
@@ -36,6 +35,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--tag", default="eval", help="sufiks run_id — nazwa scenariusza ewaluacji")
     p.add_argument("--seed", type=int, default=None, help="domyślnie seed biegu źródłowego")
     p.add_argument("--yellow", type=int, default=None, help="domyślnie jak w biegu źródłowym")
+    p.add_argument("--ngpu", default="-1", help="-1 = CPU; jak w `run.py`")
     return p.parse_args(argv)
 
 
@@ -88,19 +88,8 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     libsignal.bootstrap()
 
-    import agent  # noqa: F401, PLC0415
-    import dataset  # noqa: F401, PLC0415
-    import task  # noqa: F401, PLC0415
-    import torch  # noqa: PLC0415
-    import trainer  # noqa: F401, PLC0415
-    from common import interface  # noqa: PLC0415
-    from common.registry import Registry  # noqa: PLC0415
-    from utils.logger import setup_logging  # noqa: PLC0415
-
-    import tsc_marl.agents  # noqa: F401, PLC0415
-    from tsc_marl import experiment  # noqa: PLC0415
-    from tsc_marl.run import parse_args as run_parse_args  # noqa: PLC0415
-    from tsc_marl.seeding import set_global_seed  # noqa: PLC0415
+    from tsc_marl import experiment
+    from tsc_marl.run import parse_args as run_parse_args
 
     src = Path(args.load_run).resolve()
     exp = experiment.experiment()
@@ -124,63 +113,54 @@ def main(argv: list[str] | None = None) -> None:
             str(seed),
             "--yellow",
             str(yellow),
+            "--ngpu",
+            args.ngpu,
             # liczba epizodów z biegu ŹRÓDŁOWEGO: ewaluacja niczego nie trenuje, ale
             # gdyby wiersz wyniku pokazywał domyślne 200, sugerowałby trening, którego nie było
             "--episodes",
             str(p["episodes"]),
         ]
     )
-    set_global_seed(seed)
-    config = experiment.resolve_config(run_args)
-    # tylko ewaluacja: bez tego LibSignal przetrenowałby model od zera
-    config["model"]["train_model"] = False
-    config["model"]["test_model"] = True
 
-    params = experiment.build_params(run_args, config) | {
-        "parent_run": parent.id,
-        "checkpoint": args.checkpoint,
-        "scenario": args.tag,
-    }
-    rid = experiment.run_id(p["agent"], p["network"], seed, yellow, suffix=args.tag)
-    run = exp.start(rid, params, config=config, repos=experiment.repos())
-    config["logger"]["root_dir"] = str(run.engine_dir)
+    # Wybór checkpointu PRZED rejestracją biegu: literówka w `--checkpoint` ma się
+    # skończyć komunikatem, a nie katalogiem biegu ze statusem `failed` w `runs/`.
+    # Nic z tego nie potrzebuje Registry — wystarczy katalog biegu źródłowego.
+    model_dir = engine_run_dir(src, p["world"], p["agent"], p["network"], run_args.prefix) / "model"
+    saved = available_checkpoints(model_dir)
+    episode = pick_episode(args.checkpoint, saved, src)
 
-    interface.Command_Setting_Interface(config)
-    interface.Logger_param_Interface(config)
-    interface.World_param_Interface(config)
-    if config["model"].get("graphic", False):
-        wp = Registry.mapping["world_mapping"]["setting"].param
-        interface.Graph_World_Interface(wp["dir"] + wp["roadnetFile"])
-    interface.Logger_path_Interface(config)
-    os.makedirs(Registry.mapping["logger_mapping"]["path"].path, exist_ok=True)
-    interface.Trainer_param_Interface(config)
-    interface.ModelAgent_param_Interface(config)
+    with session.session(
+        run_args,
+        # PRZED build_params: `train_model` siedzi w sekcji `model`, która wchodzi do
+        # `config_hash`. Bez tego LibSignal przetrenowałby model od zera, a odcisk
+        # biegu i tak twierdziłby, że to ten sam config co trening.
+        config_patch={"model": {"train_model": False, "test_model": True}},
+        params_extra={
+            "parent_run": parent.id,
+            "checkpoint": args.checkpoint,
+            "scenario": args.tag,
+        },
+        run_id=experiment.run_id(p["agent"], p["network"], seed, yellow, suffix=args.tag),
+        log_level=logging.INFO,
+    ) as s:
+        import torch
+        from common.registry import Registry
 
-    logger = setup_logging(logging.INFO)
-    task_name = Registry.mapping["command_mapping"]["setting"].param["task"]
-
-    # budowa runnera TEŻ pod blokiem — pad przy stawianiu świata ma dać status `failed`,
-    # a nie zostawić bieg na wieki w `running` (patrz komentarz w run.py)
-    with run, libsignal.sim_configs_untouched():
-        runner = Registry.mapping["trainer_mapping"][task_name](logger)
+        task_name = Registry.mapping["command_mapping"]["setting"].param["task"]
+        runner = Registry.mapping["trainer_mapping"][task_name](s.logger)
         # świat, agenci i metryki powstają już w BaseTrainer.__init__ (woła self.create()),
         # więc runner jest gotowy — ponowne create_* zbudowałoby drugi silnik CityFlow
-        model_dir = (
-            engine_run_dir(src, p["world"], p["agent"], p["network"], run_args.prefix) / "model"
-        )
-        saved = available_checkpoints(model_dir)
-        episode = pick_episode(args.checkpoint, saved, src)
         for ag in runner.agents:
             weights = model_dir / f"{episode}_{ag.rank}.pt"
             state = torch.load(weights, map_location="cpu")
             ag.model.load_state_dict(state)
             ag.target_model.load_state_dict(state)
-        logger.info(f"Wczytano epizod {episode} z {model_dir}")
+        s.logger.info(f"Wczytano epizod {episode} z {model_dir}")
 
         runner.test(drop_load=True)  # wagi już wczytane ręcznie — niech ich nie nadpisze
-        result = experiment.ingest(run, experiment.engine_log_dir(run, run_args))
-        run.result(loaded_episode=episode, loaded_from=str(src))
-    print(f"runlog: {run.path}  ATT={result.get('att')}")
+        result = experiment.ingest(s.run, experiment.engine_log_dir(s.run, run_args))
+        s.run.result(loaded_episode=episode, loaded_from=str(src))
+    print(f"runlog: {s.run.path}  ATT={result.get('att')}")
 
 
 if __name__ == "__main__":

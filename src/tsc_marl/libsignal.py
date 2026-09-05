@@ -54,7 +54,8 @@ def bootstrap(pythonhashseed: str = "0") -> None:
 
     PYTHONHASHSEED musi być ustawiony PRZED startem interpretera, żeby zadziałał
     (`world_sumo` jest bez niego niedeterministyczny) — tutaj ustawiamy go tylko
-    dla procesów potomnych; wejście przez `scripts/run.sh` robi to poprawnie.
+    dla procesów potomnych — wejście przez `tsc` restartuje interpreter i robi to
+    poprawnie (patrz `cli.ensure_hashseed`).
     """
     check_ready()
     os.environ.setdefault("SUMO_HOME", str(sumo_home()))
