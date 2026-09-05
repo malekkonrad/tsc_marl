@@ -189,3 +189,77 @@ def test_nieznany_tryb_i_nieznane_wejscie_padaja(tmp_path):
 def test_nieistniejacy_suite_wypisuje_dostepne():
     with pytest.raises(SystemExit, match="Dostępne"):
         suite.load("nie_ma_takiego")
+
+
+# ----------------------------------------------------------------- urządzenie
+
+
+def test_ngpu_leci_flaga_do_dziecka(tmp_path):
+    """`ngpu` z YAML-a musi trafić do argv podprocesu — inaczej suite liczyłby
+    na CPU niezależnie od tego, co deklaruje siatka (tak było do Fazy 1)."""
+    p = zapisz(
+        tmp_path,
+        """
+        entry: core
+        ngpu: "2"
+        grid:
+          network: [cityflow_jinan3x4_4ph]
+          seed: [0]
+        """,
+    )
+    s = suite.load(p)
+    argv = s.argv(s.points()[0])
+    assert argv[argv.index("--ngpu") + 1] == "2"
+
+
+def test_domyslnie_cpu(tmp_path):
+    """Brak `ngpu` w YAML-u = CPU. Maszyna deweloperska nie ma karty, a siatka
+    bez tego pola ma działać tak jak przed dodaniem obsługi GPU."""
+    p = zapisz(
+        tmp_path,
+        """
+        grid:
+          agent: [efficientmp]
+          network: [cityflow_jinan3x4_4ph]
+          seed: [0]
+        """,
+    )
+    s = suite.load(p)
+    argv = s.argv(s.points()[0])
+    assert argv[argv.index("--ngpu") + 1] == "-1"
+
+
+@pytest.mark.slow
+def test_ngpu_nie_wchodzi_do_odcisku(tmp_path):
+    """NAJWAŻNIEJSZY test tej sekcji: ten sam bieg na CPU i na GPU to JEDEN
+    eksperyment, nie dwa.
+
+    `ngpu` opisuje maszynę, nie treść naukową biegu, więc ląduje w sekcji
+    `command` — jedynej, której `build_params` nie bierze do odcisku. Gdyby
+    wpadło do `model`/`trainer`, przeniesienie siatki na mocniejszą maszynę
+    unieważniłoby wszystko, co już policzone, i kazało liczyć od zera.
+    """
+    from runlog import params_hash
+
+    libsignal.bootstrap()
+    p = zapisz(
+        tmp_path,
+        """
+        entry: core
+        grid:
+          network: [cityflow_jinan3x4_4ph]
+          seed: [0]
+        """,
+    )
+    s = suite.load(p)
+    punkt = s.points()[0]
+
+    odciski, identyfikatory = set(), set()
+    for ngpu in ("-1", "0", "3"):
+        s.ngpu = ngpu
+        _, params, rid = suite.plan(s, punkt)
+        odciski.add(params_hash(params))
+        identyfikatory.add(rid)
+
+    assert len(odciski) == 1, f"ngpu zmienia odcisk parametrów: {odciski}"
+    assert len(identyfikatory) == 1, f"ngpu zmienia run_id: {identyfikatory}"

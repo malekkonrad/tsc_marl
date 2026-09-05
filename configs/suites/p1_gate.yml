@@ -1,11 +1,17 @@
 # GATE Fazy 1: rdzeń (GAT + PPO + CTDE) ma dojść do ATT Advanced-CoLighta
 # w granicach kilku procent. 2 sieci × 3 seedy = 6 biegów po ~kilka godzin.
 #
-# `entry: core` wybiera `tsc_marl.run_core` (własna pętla PPO) zamiast ścieżki
+# `entry: core` wybiera `tsc_marl.runner.train_core` (własna pętla PPO) zamiast ścieżki
 # taskowej LibSignala — domyślny agent to wtedy `gatppo`.
 entry: core
 mode: realistic
 timeout: 86400           # trening, nie baseline
+
+# Karta, na której liczy każdy punkt. "-1" = CPU. Na maszynie bez CUDA schodzi
+# do CPU z ostrzeżeniem w logu biegu — nie wywala siatki. `ngpu` opisuje MASZYNĘ,
+# nie eksperyment: ląduje w sekcji `command`, której `build_params` nie bierze do
+# odcisku, więc przeniesienie siatki na GPU nie unieważnia wyników z CPU.
+ngpu: "0"
 
 grid:
   network: [cityflow_jinan3x4_4ph, cityflow_hangzhou4x4_4ph]

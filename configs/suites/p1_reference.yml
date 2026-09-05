@@ -5,6 +5,14 @@ entry: tsc
 mode: realistic
 timeout: 86400
 
+# CPU ŚWIADOMIE, a nie z zapomnienia. Advanced-CoLight dziedziczy po
+# `agent/colight.py` z submodułu, a tamten kod nie ma ANI JEDNEGO `.cuda()`
+# ani `torch.device` — model i tensory powstają na urządzeniu domyślnym, czyli
+# CPU. `ngpu: "0"` nic by tu nie zmieniło, tylko sugerowało nieprawdę.
+# Przeniesienie tej połówki GATE-a na GPU wymaga patcha w submodule (i zmieni
+# arytmetykę baseline'u) — patrz README, „Relacja do LibSignala".
+ngpu: "-1"
+
 grid:
   agent: [advancedcolight]
   network: [cityflow_jinan3x4_4ph, cityflow_hangzhou4x4_4ph]

@@ -319,10 +319,18 @@ class RolloutBuffer:
     def minibatches(
         self, n_minibatches: int, generator: torch.Generator | None = None
     ) -> Iterator[Minibatch]:
-        """Losowy podział KROKÓW CZASU na minibatche (pułapka 2)."""
+        """Losowy podział KROKÓW CZASU na minibatche (pułapka 2).
+
+        Permutacja powstaje na CPU i dopiero potem jedzie na urządzenie bufora —
+        celowo, z dwóch powodów. Po pierwsze `generator` bywa CPU-owy (tak robią
+        testy), a `randperm(generator=cpu_gen, device='cuda')` to twardy błąd.
+        Po drugie: dzięki temu ten sam seed daje TĘ SAMĄ kolejność minibatchy na
+        CPU i na GPU, więc różnice między urządzeniami zostają w arytmetyce
+        zmiennoprzecinkowej, a nie w tym, które próbki wylądowały razem.
+        """
         if not self._ready:
             raise RuntimeError("najpierw compute_returns() — inaczej przewagi to zera")
-        order = torch.randperm(self.pos, generator=generator, device=self.device)
+        order = torch.randperm(self.pos, generator=generator).to(self.device)
         size = max(1, math.ceil(self.pos / n_minibatches))
         for start in range(0, self.pos, size):
             idx = order[start : start + size]
@@ -356,7 +364,14 @@ class PPO:
     def __post_init__(self) -> None:
         self.actor_opt = torch.optim.Adam(self.ac.actor.parameters(), lr=self.config.actor_lr)
         self.critic_opt = torch.optim.Adam(self.ac.critic.parameters(), lr=self.config.critic_lr)
-        self.value_norm = ValueNorm() if self.config.normalize_values else None
+        # `ValueNorm` trzyma statystyki w buforach, więc musi stać tam, gdzie sieć —
+        # inaczej `denormalize` dostaje tensory z dwóch urządzeń. Urządzenie
+        # CZYTAMY z `ac`, nie przyjmujemy osobnym polem: dwa źródła prawdy o tym,
+        # gdzie liczy PPO, to gwarantowany rozjazd. Optymalizatory powstają PO
+        # przeniesieniu sieci (robi to `CoreTrainer.from_world`), więc ich stan
+        # rodzi się od razu na właściwym urządzeniu.
+        self.device = next(self.ac.parameters()).device
+        self.value_norm = ValueNorm().to(self.device) if self.config.normalize_values else None
 
     # ------------------------------------------------------------------ rollout
 

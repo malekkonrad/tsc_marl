@@ -232,7 +232,11 @@ class CoreTrainer:
         # Bieg trwa godzinami — bez linii na epizod nie widać, czy uczenie żyje.
         # `run.log` pisze do CSV, ten logger na konsolę i do logu biegu.
         self.logger = logger
-        self.edge_index = env.graph.edge_index
+        # Urządzenie CZYTAMY z sieci — `from_world` przeniósł ją tam przed
+        # zbudowaniem PPO. `edge_index` jest stały przez cały bieg, więc jedzie
+        # na urządzenie raz, a nie co decyzję.
+        self.device = next(ppo.ac.parameters()).device
+        self.edge_index = env.graph.edge_index.to(self.device)
         self.history: list[dict[str, float]] = []
 
     # --------------------------------------------------------------- budowanie
@@ -246,6 +250,7 @@ class CoreTrainer:
         loop_config: LoopConfig | None = None,
         run: Run | None = None,
         logger: logging.Logger | None = None,
+        device: torch.device | str = "cpu",
         **feature_overrides: Any,
     ) -> CoreTrainer:
         """Składa graf, cechy, sieci i PPO z żywego `world` + Registry.
@@ -253,6 +258,11 @@ class CoreTrainer:
         Kolejność skrzyżowań idzie WYŁĄCZNIE przez `graph.order_intersections`,
         czyli przez kontrakt z `graph.py`. To jedyne wejście do świata przy
         budowie obserwacji, nagród i akcji.
+
+        `device` domyślnie CPU, bo rdzeń ma się dać zbudować i przetestować bez
+        karty. Rozwiązuje je `runner/train_core.py` z `--ngpu` (patrz
+        `libsignal/session.py:torch_device`) — rdzeń go NIE zgaduje ani nie czyta
+        z Registry, żeby dało się go uruchomić poza procesem LibSignala.
         """
         graph = RoadNetGraph.from_registry()
         features = StateBuilder.from_registry(
@@ -260,7 +270,11 @@ class CoreTrainer:
         )
         cfg = loop_config or LoopConfig.from_registry()
         env = TrafficEnv(world, graph, features, cfg.action_interval)
-        ac = ActorCritic.from_registry(features.ob_length, features.n_phases)
+        # KOLEJNOŚĆ JEST ISTOTNA: sieć na urządzenie, dopiero potem `PPO`.
+        # `PPO.__post_init__` tworzy optymalizatory Adama z parametrów `ac` —
+        # zbudowane przed przeniesieniem trzymałyby stan (`exp_avg`) na CPU,
+        # a parametry na GPU, i pierwszy `step()` by się wywalił.
+        ac = ActorCritic.from_registry(features.ob_length, features.n_phases).to(device)
         return cls(env, PPO(ac, ppo_config or PPOConfig()), cfg, run, logger)
 
     # ---------------------------------------------------------------- epizody
@@ -269,14 +283,18 @@ class CoreTrainer:
         """Jeden epizod treningowy: polityka PRÓBKUJE (eksploracja PPO)."""
         cfg = self.config
         buffer = RolloutBuffer(
-            cfg.decisions, self.env.graph.n_nodes, self.env.features.ob_length, self.edge_index
+            cfg.decisions,
+            self.env.graph.n_nodes,
+            self.env.features.ob_length,
+            self.edge_index,
+            device=self.device,
         )
-        obs = torch.from_numpy(self.env.reset())
+        obs = self._obs(self.env.reset())
         for _ in range(cfg.decisions):
             actions, log_probs, values = self.ppo.act(obs, self.edge_index)
-            next_obs, rewards, _ = self.env.step(actions.numpy())
-            buffer.add(obs, actions, log_probs, values, torch.from_numpy(rewards))
-            obs = torch.from_numpy(next_obs)
+            next_obs, rewards, _ = self.env.step(self._actions(actions))
+            buffer.add(obs, actions, log_probs, values, self._obs(rewards))
+            obs = self._obs(next_obs)
         buffer.compute_returns(self.ppo.value_of(obs, self.edge_index), self.ppo.config)
         return buffer, self.env.metrics()
 
@@ -287,12 +305,26 @@ class CoreTrainer:
         Krytyk nie jest wołany — to jest ta „inferencja = tylko actor" z planu,
         i tak samo będzie wyglądać wdrożenie na Pi w Fazie 5.
         """
-        obs = torch.from_numpy(self.env.reset())
+        obs = self._obs(self.env.reset())
         for _ in range(self.config.test_decisions):
             actions = self.ppo.ac.actor(obs, self.edge_index).argmax(-1)
-            next_obs, _, _ = self.env.step(actions.numpy())
-            obs = torch.from_numpy(next_obs)
+            next_obs, _, _ = self.env.step(self._actions(actions))
+            obs = self._obs(next_obs)
         return self.env.metrics()
+
+    # ------------------------------------------------------ granica numpy ↔ torch
+
+    def _obs(self, array: np.ndarray) -> torch.Tensor:
+        """Symulator mówi wyłącznie numpy, czyli CPU. To jedno z dwóch miejsc,
+        w których dane przekraczają granicę urządzenia — trzymamy je razem, żeby
+        nie trzeba było ich szukać po pętli."""
+        return torch.from_numpy(array).to(self.device)
+
+    def _actions(self, actions: torch.Tensor) -> np.ndarray:
+        """Druga strona granicy. `.cpu()` MUSI tu być: `Tensor.numpy()` na
+        tensorze CUDA rzuca wyjątkiem, a na CPU jest no-opem — więc ta wersja
+        działa identycznie w obu trybach."""
+        return actions.cpu().numpy()
 
     # ----------------------------------------------------------------- trening
 

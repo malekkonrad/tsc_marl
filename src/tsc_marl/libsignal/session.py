@@ -54,6 +54,28 @@ class Session:
     config: dict[str, Any]
     logger: logging.Logger
     args: Any
+    device: Any = "cpu"  # torch.device — rozwiązane z `--ngpu`, patrz `torch_device`
+
+
+def torch_device(ngpu: str):
+    """`--ngpu` → `torch.device`. JEDYNE miejsce, które tłumaczy jedno na drugie.
+
+    Pułapka, dla której ta funkcja istnieje osobno: `session()` ustawia
+    `CUDA_VISIBLE_DEVICES=<ngpu>` PRZED pierwszym dotknięciem CUDA przez torcha.
+    Po tym remapowaniu wybrana karta jest dla torcha ZAWSZE indeksem 0 — więc
+    `--ngpu 2` daje `cuda:0`, a nie `cuda:2`. Zbudowanie `cuda:2` wywaliłoby się
+    na „invalid device ordinal", bo torch widzi wtedy dokładnie jedną kartę.
+
+    Brak karty przy jawnie zażądanym GPU NIE jest błędem twardym (bieg na CPU
+    policzy się poprawnie, tylko wolniej), ale musi być głośny: cicha degradacja
+    30-godzinnej siatki do CPU to najgorszy możliwy wariant. Ostrzeżenie wypisuje
+    `session()`, gdy ma już logger biegu.
+    """
+    import torch  # noqa: PLC0415 - ciężki import, tylko gdy naprawdę potrzebny
+
+    if str(ngpu) == "-1" or not torch.cuda.is_available():
+        return torch.device("cpu")
+    return torch.device("cuda:0")
 
 
 def register_engine_components() -> None:
@@ -211,4 +233,11 @@ def session(
 
     with run, libsignal.sim_configs_untouched():
         build_interfaces(config)
-        yield Session(run=run, config=config, logger=setup_logging(log_level), args=args)
+        logger = setup_logging(log_level)
+        device = torch_device(args.ngpu)
+        if args.ngpu != "-1" and device.type == "cpu":
+            logger.warning(
+                f"--ngpu {args.ngpu} zażądane, ale torch nie widzi CUDA — bieg leci na CPU. "
+                "Na maszynie z kartą sprawdź `make setup-gpu` (torch z indeksu cu121)."
+            )
+        yield Session(run=run, config=config, logger=logger, args=args, device=device)

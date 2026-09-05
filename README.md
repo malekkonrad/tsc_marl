@@ -139,6 +139,14 @@ overrides:                  # opcjonalne nadpisania configu agenta
   model: {NUM_HEADS: [8, 8]}
 ```
 
+Pole `ngpu` opisuje **maszynę, nie eksperyment**: `"0"` liczy na pierwszej karcie,
+`"-1"` (domyślnie) na CPU, a brak CUDA schodzi do CPU z ostrzeżeniem w logu biegu
+zamiast wywalać siatkę. Trafia do sekcji `command` configu — jedynej, której odcisk
+parametrów NIE obejmuje — więc ten sam punkt policzony na CPU i na GPU ma ten sam
+`params_hash` i jest jednym eksperymentem, nie dwoma. Działa dla `entry: core`
+(rdzeń); `entry: tsc` zostaje na CPU, bo `agent/colight.py` w submodule nie ma
+żadnej obsługi urządzenia.
+
 `tsc suite run` **pomija punkty, które już mają wynik** — porównanie idzie po odcisku
 parametrów, więc zmiana czegokolwiek w configu metody (albo w `overrides`) unieważnia
 poprzedni bieg. `--replace` wymusza przeliczenie. Suite z `overrides` dokleja swoją

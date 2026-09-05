@@ -175,3 +175,49 @@ def test_ewaluacja_nie_dotyka_krytyka_i_jest_powtarzalna(trainer):
 
     assert pierwsze["att"] == pytest.approx(drugie["att"], rel=1e-9)
     assert pierwsze["throughput"] == drugie["throughput"]
+
+
+# ----------------------------------------------------------------- urządzenie
+
+
+@pytest.mark.slow
+def test_rdzen_domyslnie_na_cpu(trainer):
+    """Rdzeń bez jawnego `device` stoi na CPU — sieć, bufor i ValueNorm razem.
+
+    Rozjazd między nimi nie jest hipotetyczny: `ValueNorm` trzyma statystyki
+    w buforach i gdyby został na CPU przy sieci na GPU, `denormalize` dostałoby
+    tensory z dwóch urządzeń dopiero przy PIERWSZYM update'cie — czyli po
+    kilkudziesięciu sekundach zbierania epizodu, nie przy starcie.
+    """
+    core = trainer
+
+    assert core.device.type == "cpu"
+    assert next(core.ppo.ac.parameters()).device == core.device
+    assert core.edge_index.device == core.device
+    assert core.ppo.value_norm.mean.device == core.device
+
+
+@pytest.mark.slow
+def test_edge_index_jedzie_na_urzadzenie_raz(trainer):
+    """`edge_index` jest stały przez cały bieg, więc `CoreTrainer` trzyma własną
+    kopię już przeniesioną — pętla decyzyjna nie może go przenosić co krok."""
+    core = trainer
+
+    assert core.edge_index.device == core.device
+    assert torch.equal(core.edge_index, core.env.graph.edge_index)
+
+
+@pytest.mark.slow
+def test_granica_numpy_dziala_w_obie_strony(trainer):
+    """`_obs`/`_actions` to jedyne dwa miejsca, w których dane przekraczają
+    granicę urządzenia. `.cpu()` w `_actions` jest no-opem na CPU i warunkiem
+    działania na CUDA — test pilnuje, że nie zniknie jako „zbędny"."""
+    core = trainer
+
+    obs = core._obs(core.env.reset())
+    assert obs.device == core.device
+
+    akcje = core.ppo.ac.actor(obs, core.edge_index).argmax(-1)
+    numpy_akcje = core._actions(akcje)
+    assert isinstance(numpy_akcje, np.ndarray)
+    assert numpy_akcje.shape == (core.env.graph.n_nodes,)

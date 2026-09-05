@@ -61,6 +61,13 @@ class Suite:
     entry: str = "tsc"
     mode: str = "realistic"
     timeout: int = 3600
+    # Karta, na której ma liczyć KAŻDY punkt siatki. "-1" = CPU (domyślnie, bo
+    # tak wygląda maszyna deweloperska). To pole opisuje MASZYNĘ, nie eksperyment,
+    # więc leci flagą do dziecka i ląduje w sekcji `command` configu — jedynej,
+    # której `experiment.build_params` NIE bierze do odcisku. Dzięki temu ten sam
+    # bieg policzony na CPU i na GPU ma ten sam `params_hash`, czyli skip-if-done
+    # widzi go jako jeden eksperyment, a nie dwa.
+    ngpu: str = "-1"
     grid: dict[str, list[Any]] = field(default_factory=dict)
     defaults: dict[str, Any] = field(default_factory=dict)
     overrides: dict[str, Any] = field(default_factory=dict)
@@ -113,6 +120,7 @@ class Suite:
             "-n", point.network,
             "--seed", str(point.seed),
             "--yellow", str(self.yellow),
+            "--ngpu", str(self.ngpu),
             "--suite", str(self.path),
         ]  # fmt: skip
         if replace:

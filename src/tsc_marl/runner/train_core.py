@@ -68,9 +68,16 @@ def main(argv: list[str] | None = None) -> None:
         )
 
         core = CoreTrainer.from_world(
-            world, ppo_config=PPOConfig.from_registry(), run=s.run, logger=s.logger
+            world,
+            ppo_config=PPOConfig.from_registry(),
+            run=s.run,
+            logger=s.logger,
+            device=s.device,
         )
-        s.logger.info(f"rdzeń: {core.env.graph} | ob_length {core.env.features.ob_length}")
+        s.logger.info(
+            f"rdzeń: {core.env.graph} | ob_length {core.env.features.ob_length} "
+            f"| device {core.device}"
+        )
         result = core.train()
         core.save(s.run.engine_dir / "core.pt")
         s.logger.info(f"Total time taken: {time.time() - started:.1f}s | {result}")

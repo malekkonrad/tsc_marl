@@ -213,3 +213,36 @@ def test_merge_nie_kasuje_reszty_sekcji():
     session.merge(base, {"model": {"reward": "delay"}})
     assert base["model"] == {"state": "ats", "reward": "delay"}
     assert base["trainer"] == {"episodes": 200}
+
+
+# ----------------------------------------------------------------- urządzenie
+
+
+def test_ngpu_minus_jeden_to_cpu():
+    """`-1` = CPU, niezależnie od tego, czy karta jest w maszynie."""
+    assert session.torch_device("-1").type == "cpu"
+
+
+def test_brak_cuda_schodzi_do_cpu(monkeypatch):
+    """Zażądane GPU na maszynie bez CUDA nie może wywalić biegu — 30-godzinna
+    siatka ma się policzyć na CPU. Głośność tej degradacji zapewnia `session()`,
+    które loguje ostrzeżenie; tutaj sprawdzamy samo rozwiązanie urządzenia."""
+    import torch
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    assert session.torch_device("0").type == "cpu"
+
+
+def test_karta_jest_zawsze_zerem(monkeypatch):
+    """SEDNO: `--ngpu 3` daje `cuda:0`, a NIE `cuda:3`.
+
+    `session()` ustawia `CUDA_VISIBLE_DEVICES=3` przed pierwszym dotknięciem CUDA,
+    więc torch widzi dokładnie jedną kartę i numeruje ją od zera. `cuda:3`
+    wywaliłoby się na „invalid device ordinal" — i to dopiero przy pierwszym
+    tensorze, czyli po zbudowaniu świata, kilkanaście sekund w bieg.
+    """
+    import torch
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    for ngpu in ("0", "1", "3"):
+        assert session.torch_device(ngpu) == torch.device("cuda:0")
