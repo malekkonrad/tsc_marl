@@ -26,32 +26,56 @@ sensorów, zamiast rozsypywać się jak metody SOTA.
 
 ```
 tsc_marl/
-├── src/tsc_marl/           # KOD WŁASNY
-│   ├── run.py              #   entry point treningu/ewaluacji
-│   ├── bench.py            #   runner siatki {agent}×{sieć}×{seed} → tabele T1
-│   ├── libsignal.py        #   most do submodułu (ścieżki, sys.path, SUMO_HOME)
+├── src/tsc_marl/           # KOD WŁASNY — warstwy od najniższej
+│   ├── paths.py            #   layout repo (REPO_ROOT, CONFIGS, RUNS, RESULTS)
 │   ├── seeding.py          #   deterministyczne ziarnowanie
-│   ├── experiment.py       #   adapter LibSignal ↔ runlog (id biegu, parsowanie logów)
-│   ├── evaluate.py         #   ewaluacja zamrożonej polityki z checkpointu
-│   ├── plot.py             #   krzywe uczenia (działa też dla biegu w toku)
-│   └── agents/             #   agenci: Efficient-MP, Advanced-MP, Advanced-CoLight
-│       └── ats.py          #     Advanced Traffic State — prymitywy wspólne dla MP i CoLight
+│   ├── domain/             #   DZIEDZINA: wzory z papierów, bez frameworków
+│   │   └── ats.py          #     Advanced Traffic State — wspólne dla MP i CoLight
+│   ├── core/               #   RDZEŃ FAZY 1: GAT + PPO + CTDE, nasza implementacja
+│   │   ├── graph.py        #     topologia sieci drogowej
+│   │   ├── features.py     #     stan i nagroda (warianty)
+│   │   ├── nets.py         #     enkoder GAT + actor-critic
+│   │   ├── ppo.py          #     MAPPO
+│   │   └── loop.py         #     spięcie z symulatorem
+│   ├── libsignal/          #   MOST do submodułu — cała styczność z cudzym kodem
+│   │   ├── bridge.py       #     sys.path, SUMO_HOME, CWD, środowisko podprocesów
+│   │   ├── session.py      #     proces LibSignala pod zarejestrowanym biegiem
+│   │   ├── experiment.py   #     adapter LibSignal ↔ runlog (id biegu, parsowanie logów)
+│   │   └── agents/         #     wtyczki do ICH Registry: Efficient-MP, Advanced-MP,
+│   │                       #     Advanced-CoLight
+│   ├── runner/             #   URUCHAMIANIE: wejścia procesu i orkiestracja
+│   │   ├── cli.py          #     `tsc <komenda>` (cienkie, rozdziela ruch)
+│   │   ├── train.py        #     trening/pomiar agenta LibSignala
+│   │   ├── train_core.py   #     trening rdzenia Fazy 1
+│   │   ├── evaluate.py     #     ewaluacja zamrożonej polityki z checkpointu
+│   │   └── suite.py        #     deklaratywne siatki biegów
+│   └── analysis/           #   WYNIKI: czyta zapisane biegi, nic nie uruchamia
+│       ├── plot.py         #     krzywe uczenia (działa też dla biegu w toku)
+│       └── report.py       #     tabele T1 do pracy
 ├── src/runlog/             # NARZĘDZIE (niezależne od dziedziny): przechowywanie,
 │                           # odpytywanie i agregacja wyników eksperymentów
 ├── configs/
 │   ├── tsc/                #   configi metod + thesis_protocol.yml (protokół zamrożony)
-│   └── sim/                #   definicje sieci (JiNan 3×4, HangZhou 4×4)
+│   ├── sim/                #   definicje sieci (JiNan 3×4, HangZhou 4×4)
+│   └── suites/             #   siatki biegów (co policzyć)
 ├── data/raw_data/          # sieci i potoki ruchu użyte w pracy (9,4 MB)
-├── tests/                  # `make test` (szybkie) / `make test-slow` (z CityFlow)
+├── tests/                  # lustro src/: core/, domain/, libsignal/, runner/, runlog/
 ├── results/                # liczby do pracy: CSV + wygenerowane tabele
 ├── runs/                   # (gitignore) biegi: meta, config, metryki, checkpointy
 ├── external/LibSignal/     # submoduł: fork LibSignala + patche silnika
 └── deploy/hpc/             # ścieżka zapasowa: Docker/Apptainer/SLURM na Cyfronet
 ```
 
-Podział jest celowy: **`src/` to kod własny, `external/` to cudzy**. Wszystko, co
-zostało dołożone do LibSignala, widać jednym poleceniem — patrz
+Podział jest celowy na dwóch poziomach.
+
+**`src/` to kod własny, `external/` to cudzy.** Wszystko, co zostało dołożone do
+LibSignala, widać jednym poleceniem — patrz
 [Relacja do LibSignala](#relacja-do-libsignala).
+
+**Wewnątrz `src/tsc_marl/` zależności idą w jedną stronę**, od `paths`/`domain` w dół
+listy do `runner`. Konkretnie: `core/` nie importuje `libsignal/` (silnik dostaje z
+zewnątrz, od `runner/train_core.py`), a `domain/` nie importuje niczego z projektu.
+Dzięki temu rdzeń Fazy 1 testuje się bez symulatora — `make test` chodzi ~2 s.
 
 ## Instalacja
 
@@ -106,7 +130,7 @@ z extra), a nie `uv sync` — bez tej flagi `uv run` zsynchronizowałby `.venv` 
 „Co policzyć" jest plikiem w `configs/suites/*.yml`, a nie linią w historii powłoki:
 
 ```yaml
-entry: core                 # core → tsc_marl.run_core, tsc → tsc_marl.run
+entry: core                 # core → runner.train_core, tsc → runner.train
 mode: realistic             # realistic = yellow 5 (protokół pracy), benchmark = 0
 grid:
   network: [cityflow_jinan3x4_4ph, cityflow_hangzhou4x4_4ph]
@@ -121,10 +145,10 @@ poprzedni bieg. `--replace` wymusza przeliczenie. Suite z `overrides` dokleja sw
 nazwę do `run_id`, żeby dwa różne configi nie biły się o jeden katalog; suite bez
 nadpisań trafia w te same identyfikatory co uruchomienia ręczne.
 
-**Nie wołaj `python -m tsc_marl.run` bezpośrednio.** `PYTHONHASHSEED=0` musi być
+**Nie wołaj `python -m tsc_marl.runner.train` bezpośrednio.** `PYTHONHASHSEED=0` musi być
 ustawiony przed startem interpretera — z poziomu Pythona nie zadziała, a bez niego
 `world_sumo` daje różne wyniki dla tych samych argumentów. CLI załatwia to,
-restartując interpreter (`cli.ensure_hashseed`).
+restartując interpreter (`runner/cli.py:ensure_hashseed`).
 
 Dostępne metody: `fixedtime`, `sotl`, `maxpressure`, `efficientmp`, `advancedmp`,
 `advancedcolight`, `presslight`, `colight`, `mplight`, `frap`, `dqn`.
@@ -153,7 +177,7 @@ w grupie, żeby ogon najdłuższego nie udawał średniej.
 Obsługuje to [`src/runlog/`](src/runlog/README.md) — **osobne narzędzie, niezależne od
 tej pracy**: nie importuje niczego z `tsc_marl` i nie wie nic o ruchu drogowym.
 Tłumaczenie między nim a LibSignalem siedzi w
-[`src/tsc_marl/experiment.py`](src/tsc_marl/experiment.py).
+[`src/tsc_marl/libsignal/experiment.py`](src/tsc_marl/libsignal/experiment.py).
 
 Trzy niezmienniki, które `runlog` egzekwuje, bo każdy z nich odpowiada błędowi, który
 już się w tym projekcie zdarzył: **status biegu** (przerwany trening nie liczy się jako
@@ -230,7 +254,7 @@ Na gałęzi `thesis` są wyłącznie patche silnika, których nie da się zrobi�
 Wszystko inne — agenci, configi, protokół — mieszka w tym repo. Jest to możliwe, bo
 Registry LibSignala zapełnia się dekoratorami przy imporcie, a ścieżki configów są
 rozwiązywane względem CWD; uruchamiamy go więc z korzenia repo, żeby czytał nasze
-`configs/` i `data/`. Szczegóły: [`src/tsc_marl/libsignal.py`](src/tsc_marl/libsignal.py).
+`configs/` i `data/`. Szczegóły: [`src/tsc_marl/libsignal/bridge.py`](src/tsc_marl/libsignal/bridge.py).
 
 Baseline'y `fixedtime`, `sotl`, `presslight`, `colight`, `mplight`, `frap` pochodzą
 z LibSignala. `efficientmp`, `advancedmp` i `advancedcolight` są **implementacjami

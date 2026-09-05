@@ -51,7 +51,7 @@ dev = ["ruff", "pytest"]
 [project.scripts]
 # `tsc` ląduje w .venv/bin po `uv pip install -e .`. Do tego czasu działa
 # równoważne `python -m tsc_marl`.
-tsc = "tsc_marl.cli:app"
+tsc = "tsc_marl.runner.cli:app"
 
 [build-system]
 requires = ["hatchling"]
@@ -73,14 +73,16 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B"]
-# LibSignal wymaga importów po ustawieniu sys.path (patrz tsc_marl/libsignal.py),
+# LibSignal wymaga importów po ustawieniu sys.path (patrz tsc_marl/libsignal/bridge.py),
 # więc importy nie-na-górze-pliku są tu zamierzone.
 ignore = ["E402"]
 
 [tool.ruff.lint.per-file-ignores]
 # Nazewnictwo z papierów: W1/L/M/N oraz `l`,`m` na ruch (l,m) w definicjach pressure.
 # Zmiana na czytelniejsze nazwy rozjechałaby kod z wzorami, które implementuje.
-"src/tsc_marl/agents/*" = ["N803", "N806", "E741"]
+# Dotyczy dziedziny (wzory ATS) i wtyczek do LibSignala, które te wzory wołają.
+"src/tsc_marl/domain/*" = ["N803", "N806", "E741"]
+"src/tsc_marl/libsignal/agents/*" = ["N803", "N806", "E741"]
 # Testy nazywamy po polsku i asercje piszemy wprost — bez wymogów dla kodu produkcyjnego.
 "tests/*" = ["N802"]
 # runlog to narzędzie ogólnego przeznaczenia — bez wyjątków nazewniczych z papierów.

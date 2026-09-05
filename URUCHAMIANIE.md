@@ -86,7 +86,7 @@ Gotowe siatki:
 Własna siatka to plik w `configs/suites/`:
 
 ```yaml
-entry: core                 # core → tsc_marl.run_core, tsc → tsc_marl.run
+entry: core                 # core → runner.train_core, tsc → runner.train
 mode: realistic             # realistic = yellow 5, benchmark = yellow 0
 timeout: 86400              # sekundy na jeden punkt
 grid:
@@ -159,7 +159,7 @@ Gdyby środowisko jednak padło: `make setup` (albo `make setup-gpu`) odbudowuje
 
 ## Jedna pułapka
 
-**Nie wołaj `python -m tsc_marl.run` ani `tsc_marl.run_core` bezpośrednio.**
+**Nie wołaj `python -m tsc_marl.runner.train` ani `runner.train_core` bezpośrednio.**
 
 `PYTHONHASHSEED=0` musi być ustawiony **zanim** wystartuje interpreter — z poziomu
 Pythona nie zadziała, a bez niego `world_sumo` daje różne wyniki dla tych samych

@@ -14,16 +14,13 @@ from pathlib import Path
 
 import pytest
 
-from tsc_marl import libsignal
+from tsc_marl import libsignal, paths
 
 libsignal.bootstrap()  # ścieżka do submodułu + SUMO_HOME (world/__init__ ciągnie world_sumo)
 
 ROADNETS = {
-    "jinan3x4": libsignal.DATA / "raw_data" / "jinan_3x4" / "roadnet_3_4_4phase.json",
-    "hangzhou4x4": libsignal.DATA
-    / "raw_data"
-    / "hangzhou_4x4_advanced"
-    / "roadnet_4_4_4phase.json",
+    "jinan3x4": paths.DATA / "raw_data" / "jinan_3x4" / "roadnet_3_4_4phase.json",
+    "hangzhou4x4": paths.DATA / "raw_data" / "hangzhou_4x4_advanced" / "roadnet_4_4_4phase.json",
 }
 
 
@@ -74,8 +71,8 @@ def _build(agent_name: str, network: str):
     from common.registry import Registry
     from utils.logger import build_config
 
-    from tsc_marl import session
-    from tsc_marl.run import parse_args
+    from tsc_marl.libsignal import session
+    from tsc_marl.runner.train import parse_args
 
     session.register_engine_components()
     args = parse_args(["-a", agent_name, "-n", network])
@@ -92,7 +89,7 @@ def _build(agent_name: str, network: str):
 @pytest.fixture(scope="session")
 def advanced_colight_world():
     """(world, agent) dla `advancedcolight` na JiNan 3×4. ~15 s — stąd `slow`."""
-    cfg = libsignal.CONFIGS / "sim" / f"{NETWORK}.cfg"
+    cfg = paths.CONFIGS / "sim" / f"{NETWORK}.cfg"
     snapshot = cfg.read_bytes()  # LibSignal wpisuje tu ścieżki logów replaya
     try:
         yield _build("advancedcolight", NETWORK)
