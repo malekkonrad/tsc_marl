@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import platform
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,6 +12,26 @@ from typing import Any
 from runlog import store
 from runlog.provenance import collect
 from runlog.run import OK, RUNNING, Run, RunView
+
+
+def is_orphan(meta: dict[str, Any]) -> bool:
+    """Czy bieg w statusie `running` jest martwy: zapisany na TEJ maszynie przez
+    proces, który już nie istnieje.
+
+    Ostrożnie w obie strony: bieg z innej maszyny albo bez zapisanego `pid`
+    (metadane sprzed tej zmiany) uznajemy za żywy — zdeptanie liczącego procesu
+    jest gorsze niż ręczne `replace=True`. Ponowne użycie numeru pid przez inny
+    proces też daje „żywy", czyli znowu błąd po bezpiecznej stronie."""
+    pid, host = meta.get("pid"), meta.get("host")
+    if not isinstance(pid, int) or host != platform.node():
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False  # proces istnieje, tylko nie nasz
+    return False
 
 
 class Experiment:
@@ -38,7 +60,10 @@ class Experiment:
           nie nadpisujemy po cichu: to jest ta pomyłka, po której dwa różne
           eksperymenty dzielą jeden katalog i nie da się tego wykryć po fakcie.
         * status `ok` albo `running` → `RunExists` (chyba że `replace=True`).
-          `running` też blokuje, bo może to być ŻYWY bieg w innym procesie.
+          `running` też blokuje, bo może to być ŻYWY bieg w innym procesie —
+          WYJĄTEK: bieg osierocony (`is_orphan`: ta sama maszyna, proces nie żyje),
+          np. po `kill -TERM` albo restarcie maszyny. Taki bieg nigdy się nie
+          domknie, a bez tego wyjątku blokowałby wznowienie siatki na zawsze.
         * status `failed`/`timeout` → wznowienie dozwolone, katalog czyszczony.
         """
         path = self.path / run_id
@@ -52,7 +77,9 @@ class Experiment:
                     f"({existing.get('params_hash')} vs {digest}). "
                     "Zmień run_id albo podaj replace=True, jeśli naprawdę chcesz nadpisać."
                 )
-            if existing.get("status") in (OK, RUNNING):
+            if existing.get("status") == OK or (
+                existing.get("status") == RUNNING and not is_orphan(existing)
+            ):
                 raise store.RunExists(
                     f"run_id '{run_id}' ma status '{existing.get('status')}' — "
                     "użyj find() żeby go pominąć, albo replace=True żeby policzyć ponownie."
@@ -70,6 +97,9 @@ class Experiment:
             "params": params,
             "params_hash": digest,
             "provenance": collect(repos),
+            # kto liczy — bez tego osieroconego `running` nie da się odróżnić od żywego
+            "pid": os.getpid(),
+            "host": platform.node(),
         }
         store.write_json(path / store.META, meta)
         run = Run(path, meta)

@@ -79,11 +79,26 @@ def prototype(
     mode: str = typer.Option("edl", help="'edl' albo 'softmax'"),
     epochs: int = typer.Option(150, help="epoki uczenia głowy"),
     hop: bool = typer.Option(False, help="1-hop zamiast 0-hop (druga iteracja 2.0)"),
+    ensemble: int = typer.Option(5, help="członkowie deep ensemble (wzorzec epistemic); 0 = bez"),
 ) -> None:
     """Bramka prototypu 2.0 (uczenie + tabela + kryteria) -> results/gate_2_0.md."""
     from tsc_marl.uncertainty import prototype as module
 
-    cfg = module.TrainConfig(mode=mode, epochs=epochs, hop=hop)
+    cfg = module.TrainConfig(mode=mode, epochs=epochs, hop=hop, ensemble=ensemble)
+    print(module.run(cfg, network=network))
+
+
+@app.command()
+def obshead(
+    network: str = typer.Option("cityflow_jinan3x4_4ph", "-n", help="sieć bazowa zrzutu"),
+    window: int = typer.Option(4, help="ile ostatnich odczytów widzi głowa"),
+    neighbors: bool = typer.Option(True, help="dołóż średnią odczytów sąsiadów upstream"),
+    epochs: int = typer.Option(60, help="epoki uczenia głowy"),
+) -> None:
+    """Bramka prototypu 2.2 — głowa obserwacyjna (per ruch → krawędź) -> results/gate_2_2.md."""
+    from tsc_marl.uncertainty import obs_head as module
+
+    cfg = module.ObsConfig(window=window, neighbors=neighbors, epochs=epochs)
     print(module.run(cfg, network=network))
 
 
@@ -146,11 +161,13 @@ def evaluate_(ctx: typer.Context) -> None:
 def suite_run(
     nazwa: str = typer.Argument(..., help="nazwa albo ścieżka pliku z configs/suites/"),
     replace: bool = typer.Option(False, "--replace", help="policz ponownie także gotowe punkty"),
+    jobs: int = typer.Option(1, "--jobs", "-j", help="ile punktów liczyć naraz (podprocesy)"),
+    stagger: float = typer.Option(15.0, help="sekundy między startami równoległych punktów"),
 ) -> None:
     """Policz wszystkie punkty siatki (pomija te, które mają aktualny wynik)."""
     from tsc_marl.runner import suite
 
-    licznik = suite.run(suite.load(nazwa), replace=replace)
+    licznik = suite.run(suite.load(nazwa), replace=replace, jobs=jobs, stagger=stagger)
     if licznik.get("failed") or licznik.get("timeout"):
         raise typer.Exit(1)
 
@@ -179,6 +196,50 @@ def suite_list() -> None:
     for path in sorted(suite.SUITES.glob("*.yml")):
         s = suite.load(path)
         print(f"  {s.name:16s} {s.module:20s} yellow={s.yellow}  {len(s.points())} punktów")
+
+
+# ------------------------------------------------------------------- awarie (T2)
+
+degrade_app = typer.Typer(
+    no_args_is_help=True, help="Zamrożone sterowniki pod awarią sensorów (configs/robustness)."
+)
+app.add_typer(degrade_app, name="degrade")
+
+
+@degrade_app.command("run")
+def degrade_run(
+    plan: str = typer.Argument(..., help="nazwa albo ścieżka pliku z configs/robustness/"),
+    jobs: int = typer.Option(1, "--jobs", "-j", help="ile punktów liczyć naraz"),
+    replace: bool = typer.Option(False, "--replace", help="policz ponownie także gotowe"),
+    stagger: float = typer.Option(15.0, help="sekundy między startami podprocesów"),
+) -> None:
+    """Policz brakujące punkty planu (sterownik × sieć × seed, wszystkie scenariusze)."""
+    from tsc_marl.robustness.degrade import load_plan
+    from tsc_marl.runner import degrade
+
+    licznik = degrade.run_plan(load_plan(plan), jobs=jobs, replace=replace, stagger=stagger)
+    if licznik.get("failed") or licznik.get("timeout"):
+        raise typer.Exit(1)
+
+
+@degrade_app.command("status")
+def degrade_status(plan: str = typer.Argument(...)) -> None:
+    """Stan punktów planu — także tych, którym brakuje checkpointu rodzica."""
+    from tsc_marl.robustness.degrade import load_plan
+    from tsc_marl.runner import degrade
+
+    for w in degrade.status(load_plan(plan)):
+        att = f"{w['att_clean']:.1f}" if w["att_clean"] is not None else "—"
+        print(f"{w['run_id']:64s} {w['status']:8s} {att:>7s}  ← {w['rodzic']}")
+
+
+@degrade_app.command("report")
+def degrade_report(plan: str = typer.Argument("t2_nomech")) -> None:
+    """Tabela i krzywe degradacji z policzonych biegów -> results/<plan>.md."""
+    from tsc_marl.analysis import degradation
+    from tsc_marl.robustness.degrade import load_plan
+
+    print(degradation.main(load_plan(plan)))
 
 
 # ------------------------------------------------------------------------ raporty

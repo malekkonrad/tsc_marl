@@ -1,6 +1,6 @@
 # GATE Fazy 1 — rdzeń (GAT + PPO + CTDE) vs Advanced-CoLight
 
-Wygenerowane: 2026-09-11 17:38. Suity `p1_reference` + `p1_gate`, tryb realistyczny (yellow=5), protokół `configs/tsc/thesis_protocol.yml`.
+Wygenerowane: 2026-09-11 18:08. Suity `p1_reference` + `p1_gate`, tryb realistyczny (yellow=5), protokół `configs/tsc/thesis_protocol.yml`.
 ATT = średnia z 10 ostatnich epizodów testowych biegu; niżej średnia ± std po seedach.
 Kod jednakowy dla wszystkich biegów: libsignal `5bcd823`, tsc_marl `544112a`; maszyna: `glider-B760-Pro-RS`.
 
@@ -28,6 +28,22 @@ Kod jednakowy dla wszystkich biegów: libsignal `5bcd823`, tsc_marl `544112a`; m
 | cityflow_hangzhou4x4_4ph | rdzeń (gatppo) | 318.4 | 31–32 | 2930 | 1.15 | 1052 | cuda:0 |
 
 Zbieżność = pierwszy epizod, od którego kroczące 10 testów mieści się w 2% od wyniku końcowego (zakres po seedach). Najgorszy test w ogonie łapie jednorazowe załamania polityki, których średnia z 10 nie pokazuje.
+
+## Krzywe uczenia
+
+Rysunki w `results/figures/` (PNG tutaj, PDF do pracy), przeliczane razem z tym raportem.
+
+![Test ATT po epizodach. Linia = średnia po seedach, wstęga = min–max (n = 3). Górny rząd: pełny zakres; dolny: przybliżenie na plateau z progiem bramki (ATT Advanced-CoLight + 5%).](figures/p1_att_test.png)
+
+*Test ATT po epizodach. Linia = średnia po seedach, wstęga = min–max (n = 3). Górny rząd: pełny zakres; dolny: przybliżenie na plateau z progiem bramki (ATT Advanced-CoLight + 5%).*
+
+![Sygnały update'u PPO — rdzeń (gatppo), jeden update na epizod. Wiersze = sieci; linia = średnia po seedach, wstęga = min–max (n = 3). Value loss w skali log.](figures/p1_ppo_diagnostics.png)
+
+*Sygnały update'u PPO — rdzeń (gatppo), jeden update na epizod. Wiersze = sieci; linia = średnia po seedach, wstęga = min–max (n = 3). Value loss w skali log.*
+
+![Strata TD Advanced-CoLight po epizodach (skala log; epizody przed `learning_start` pominięte). Linia = średnia po seedach, wstęga = min–max (n = 3).](figures/p1_colight_loss.png)
+
+*Strata TD Advanced-CoLight po epizodach (skala log; epizody przed `learning_start` pominięte). Linia = średnia po seedach, wstęga = min–max (n = 3).*
 
 ## Kryterium wyjścia
 

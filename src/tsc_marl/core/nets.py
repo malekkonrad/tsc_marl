@@ -50,7 +50,7 @@ import torch
 from agent.colight import Embedding_MLP, MultiHeadAttModel
 from torch import Tensor, nn
 from torch.distributions import Categorical
-from torch_geometric.nn import global_mean_pool
+from torch_geometric.nn import SAGEConv, global_mean_pool
 
 # Domyślne = `configs/tsc/colight.yml`, czyli konfiguracja, na której zmierzyliśmy
 # baseline. Powtórzone tutaj, żeby encoder dało się zbudować w teście bez Registry.
@@ -192,6 +192,102 @@ class GATEncoder(nn.Module):
         return f"ob_length={self.ob_length}, n_layers={self.n_layers}, out_dim={self.out_dim}"
 
 
+#: Warianty agregacji sąsiadów w ACTORZE — ablacja 1.6. Krytyk zostaje zawsze GAT-em:
+#: ablacja pyta, czy DECYZJA korzysta na ważeniu sąsiadów, a nie czy uczy się jej
+#: lepszy krytyk. Zmiana krytyka w tym samym biegu pomieszałaby dwie przyczyny.
+ENCODERS = ("gat", "mean", "none")
+
+
+class _AblationEncoder(nn.Module):
+    """Wspólny szkielet wariantów ablacyjnych: TEN SAM `Embedding_MLP` i te same
+    wymiary co `GATEncoder`, różni się wyłącznie tym, co warstwa robi z sąsiadami.
+    Bez tego ablacja porównywałaby też głębokość i szerokość sieci."""
+
+    def __init__(
+        self,
+        ob_length: int,
+        *,
+        emb_dims: Sequence[int] = DEFAULT_EMB_DIMS,
+        n_layers: int = 1,
+        input_dim: Sequence[int] = DEFAULT_INPUT_DIM,
+        output_dim: Sequence[int] = DEFAULT_OUTPUT_DIM,
+        dims_each_head: Sequence[int] = DEFAULT_DIMS_EACH_HEAD,
+        num_heads: Sequence[int] = DEFAULT_NUM_HEADS,
+    ) -> None:
+        super().__init__()
+        GATEncoder._validate(
+            ob_length, emb_dims, n_layers, input_dim, output_dim, num_heads, dims_each_head
+        )
+        self.ob_length = ob_length
+        self.n_layers = n_layers
+        self.out_dim = int(output_dim[n_layers - 1])
+        self.embedding_mlp = Embedding_MLP(ob_length, layers=list(emb_dims))
+        self.blocks = nn.ModuleList(
+            self._block(int(input_dim[i]), int(output_dim[i])) for i in range(n_layers)
+        )
+
+    def _block(self, d_in: int, d_out: int) -> nn.Module:
+        raise NotImplementedError
+
+    # NIE `_apply`: to nazwa wewnętrznej metody `nn.Module`, przez którą idzie
+    # `.to(device)` — nadpisana wywalała budowę rdzenia na pierwszym `.to()`.
+
+    def _aggregate(self, block: nn.Module, h: Tensor, edge_index: Tensor) -> Tensor:
+        raise NotImplementedError
+
+    def forward(self, x: Tensor, edge_index: Tensor) -> Tensor:
+        if x.dim() != 2 or x.shape[1] != self.ob_length:
+            raise ValueError(f"oczekiwane [N, {self.ob_length}], jest {tuple(x.shape)}")
+        h = self.embedding_mlp(x, True)
+        for block in self.blocks:
+            h = torch.relu(self._aggregate(block, h, edge_index))
+        return h
+
+    def extra_repr(self) -> str:
+        return f"ob_length={self.ob_length}, n_layers={self.n_layers}, out_dim={self.out_dim}"
+
+
+class MeanPoolEncoder(_AblationEncoder):
+    """GraphSAGE-mean: h_i' = W₁h_i + W₂·mean_{j∈N(i)} h_j. Każdy sąsiad waży TYLE
+    SAMO — dokładnie to, czego attention ma nie robić. Ablacja „GAT vs mean-pool"
+    ([[zhou-2025-gmslight]]): czy uczone ważenie sąsiadów w ogóle coś daje."""
+
+    def _block(self, d_in: int, d_out: int) -> nn.Module:
+        return SAGEConv(d_in, d_out, aggr="mean")
+
+    def _aggregate(self, block: nn.Module, h: Tensor, edge_index: Tensor) -> Tensor:
+        return block(h, edge_index)
+
+
+class LocalEncoder(_AblationEncoder):
+    """Bez sąsiadów: MLP tej samej głębokości, `edge_index` ignorowany. Ablacja
+    „po co GNN" ([[chen-2020-mplight]]): agent widzi wyłącznie własne skrzyżowanie,
+    parameter sharing zostaje (jak w MPLight)."""
+
+    def _block(self, d_in: int, d_out: int) -> nn.Module:
+        return nn.Linear(d_in, d_out)
+
+    def _aggregate(self, block: nn.Module, h: Tensor, edge_index: Tensor) -> Tensor:
+        return block(h)
+
+
+def build_encoder(kind: str, ob_length: int, **kwargs: Any) -> nn.Module:
+    """`gat` | `mean` | `none` -> encoder [N, ob_length] -> [N, out_dim]."""
+    classes = {"gat": GATEncoder, "mean": MeanPoolEncoder, "none": LocalEncoder}
+    if kind not in classes:
+        raise ValueError(f"encoder={kind!r}, dozwolone: {ENCODERS}")
+    return classes[kind](ob_length, **kwargs)
+
+
+def encoder_kind() -> str:
+    """Wariant actora z configu (`model.encoder`). Domyślnie `gat` i BEZ wpisu
+    w `gatppo.yml`: dopisanie klucza zmieniłoby odcisk configu i unieważniło
+    policzone biegi GATE-a. Ablacje ustawiają go przez `overrides` suite'a."""
+    from common.registry import Registry  # noqa: PLC0415 - dopiero po bootstrapie
+
+    return Registry.mapping["model_mapping"]["setting"].param.get("encoder", "gat")
+
+
 def orthogonal_(layer: nn.Linear, gain: float) -> nn.Linear:
     """Inicjalizacja ortogonalna + zerowy bias — konwencja PPO/MAPPO.
 
@@ -232,6 +328,7 @@ class Actor(nn.Module):
         n_phases: int,
         *,
         hidden: int | None = None,
+        encoder: str = "gat",
         **encoder_kwargs: Any,
     ) -> None:
         super().__init__()  # MUSI być pierwsze: bez tego nn.Module nie ma jeszcze
@@ -241,7 +338,10 @@ class Actor(nn.Module):
 
         self.ob_length = ob_length
         self.n_phases = n_phases
-        self.encoder = GATEncoder(ob_length, **encoder_kwargs)
+        self.encoder_kind = encoder
+        # nazwa atrybutu `encoder` zostaje dla KAŻDEGO wariantu — klucze state_dict
+        # (`encoder.embedding_mlp...`) muszą się zgadzać z checkpointami GATE-a
+        self.encoder = build_encoder(encoder, ob_length, **encoder_kwargs)
 
         # Domyślnie głowa jest jedną warstwą liniową, bo CoLight ma dokładnie tyle
         # (`OUTPUT_LAYERS: []` w colight.yml). Dzięki temu jedyną różnicą wobec
@@ -269,13 +369,14 @@ class Actor(nn.Module):
         (`StateBuilder.n_phases`), a nie YAML, w którym łatwo zostawić wartość
         z innej sieci.
         """
-        return cls(ob_length, n_phases, **{**GATEncoder.registry_kwargs(), **overrides})
+        kwargs = {"encoder": encoder_kind(), **GATEncoder.registry_kwargs()}
+        return cls(ob_length, n_phases, **{**kwargs, **overrides})
 
     def forward(self, x: Tensor, edge_index: Tensor) -> Tensor:  # [N, F] -> [N, n_phases]
         return self.head(self.encoder(x, edge_index))
 
     def extra_repr(self) -> str:
-        return f"ob_length={self.ob_length}, n_phases={self.n_phases}"
+        return f"ob_length={self.ob_length}, n_phases={self.n_phases}, encoder={self.encoder_kind}"
 
 
 class Critic(nn.Module):
@@ -376,18 +477,21 @@ class ActorCritic(nn.Module):
         hidden: int | None = None,
         critic_hidden: int = 128,
         critic_n_layers: int = 2,
+        encoder: str = "gat",
         **encoder_kwargs: Any,
     ) -> None:
         super().__init__()
         critic_kwargs = {k: v for k, v in encoder_kwargs.items() if k != "n_layers"}
-        self.actor = Actor(ob_length, n_phases, hidden=hidden, **encoder_kwargs)
+        self.actor = Actor(ob_length, n_phases, hidden=hidden, encoder=encoder, **encoder_kwargs)
+        # krytyk ZAWSZE GAT — patrz komentarz przy ENCODERS
         self.critic = Critic(
             ob_length, hidden=critic_hidden, n_layers=critic_n_layers, **critic_kwargs
         )
 
     @classmethod
     def from_registry(cls, ob_length: int, n_phases: int, **overrides: Any) -> ActorCritic:
-        return cls(ob_length, n_phases, **{**GATEncoder.registry_kwargs(), **overrides})
+        kwargs = {"encoder": encoder_kind(), **GATEncoder.registry_kwargs()}
+        return cls(ob_length, n_phases, **{**kwargs, **overrides})
 
     def distribution(self, x: Tensor, edge_index: Tensor) -> Categorical:
         """Rozkład nad fazami. Każdy WIERSZ to osobny agent — przy współdzielonych

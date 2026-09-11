@@ -1,0 +1,17 @@
+# T1 — metody uczone w TRYBIE BENCHMARK (yellow=0), czyli tak, jak liczą papiery.
+#
+# Zamyka ostatnie otwarte zdanie bramki Fazy 0: czy pipeline odtwarza literaturę
+# także dla metod UCZONYCH. Jedyny dotąd bieg Advanced-CoLighta w tym trybie to
+# `sanity60` (60 epizodów, 8 faz) — za mało, żeby stanąć obok 245,73 (JiNan-1)
+# i 270,45 (HangZhou-1) z papieru. CoLight obok, bo ma w literaturze 272,06.
+#
+# CPU z tego samego powodu co t1_learned.yml.
+entry: tsc
+mode: benchmark
+timeout: 86400
+ngpu: "-1"
+
+grid:
+  agent: [advancedcolight, colight]
+  network: [cityflow_jinan3x4_4ph, cityflow_hangzhou4x4_4ph]
+  seed: [0, 1, 2]

@@ -81,6 +81,44 @@ def test_zywy_bieg_tez_blokuje(exp):
         exp.start("r1", PARAMS)
 
 
+def _dead_pid() -> int:
+    """Pid procesu, który na pewno już nie żyje."""
+    import subprocess
+    import sys
+
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    p.wait()
+    return p.pid
+
+
+def _set_meta(exp, run_id, **fields):
+    path = exp.path / run_id / rstore.META
+    meta = json.loads(path.read_text())
+    meta.update(fields)
+    path.write_text(json.dumps(meta))
+
+
+def test_osierocony_bieg_wolno_policzyc_od_nowa(exp):
+    """`running` zapisany na tej maszynie przez proces, którego już nie ma (kill -TERM,
+    restart) nigdy się nie domknie — bez tej reguły blokowałby wznowienie siatki."""
+    exp.start("r1", PARAMS)
+    _set_meta(exp, "r1", pid=_dead_pid())
+    with exp.start("r1", PARAMS) as run:
+        run.result(att=1.0)
+    assert exp.runs()[0].status == "ok"
+
+
+def test_running_z_innej_maszyny_albo_bez_pid_nadal_blokuje(exp):
+    """Ostrożnie: cudzej maszyny nie sprawdzimy, a stare metadane nie mają pid."""
+    exp.start("r1", PARAMS)
+    _set_meta(exp, "r1", pid=_dead_pid(), host="inna-maszyna")
+    with pytest.raises(RunExists):
+        exp.start("r1", PARAMS)
+    _set_meta(exp, "r1", pid=None, host=None)
+    with pytest.raises(RunExists):
+        exp.start("r1", PARAMS)
+
+
 def test_nieudany_bieg_wolno_powtorzyc(exp):
     with pytest.raises(RuntimeError), exp.start("r1", PARAMS):
         raise RuntimeError("boom")

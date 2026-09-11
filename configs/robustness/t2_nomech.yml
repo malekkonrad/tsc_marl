@@ -1,0 +1,51 @@
+# T2 BEZ MECHANIZMU — jak bardzo zamrożone sterowniki degradują się pod awarią,
+# zanim dołożymy jakąkolwiek niepewność. Oś X figury głównej i test wykonalności
+# fallbacku: FixedTime (507 s na JiNan, 569 s na HangZhou, tryb realistyczny) ma
+# sens jako dolna warstwa TYLKO tam, gdzie polityka pod awarią spada poniżej niego.
+#
+# Wszystkie sterowniki czytają TĘ SAMĄ warstwę detektorów (`robustness/controllers.py`):
+# MaxPressure liczy decyzję z popsutego wektora stanu, nie z silnika.
+#
+# Uczone: checkpoint z runs/t1/<agent>__<sieć>__s<seed>_y5 (wagi końcowe).
+# Na maszynie bez tych wag punkt jest POMIJANY z komunikatem, nie wywala planu.
+name: t2_nomech
+mode: realistic
+draws: 5          # losowania awarii na scenariusz; czysty liczony raz (deterministyczny)
+timeout: 7200
+
+networks: [cityflow_jinan3x4_4ph, cityflow_hangzhou4x4_4ph]
+
+controllers:
+  gatppo: {seeds: [0, 1, 2]}
+  advancedcolight: {seeds: [0, 1, 2]}
+  efficientmp: {}
+  advancedmp: {}
+  fixedtime: {}
+
+# Poziomy DETEKTORA (patrz results/sensor_severity.md — przelicznik na cechę ~0,8–0,9
+# dla gauss). Rodziny ułożone wg skali obserwowalności z implementacja.md 2.0a.
+scenarios:
+  # szum pomiarowy (chwilowy) — w tym 3,5/4,0 z protokołu RobustLight
+  - {kind: gauss, level: 0.5}
+  - {kind: gauss, level: 1.0}
+  - {kind: gauss, level: 2.0}
+  - {kind: gauss, level: 3.5}
+  - {kind: gauss, level: 4.0}
+  - {kind: urand, level: 2.0}
+  - {kind: urand, level: 4.0}
+  # martwe detektory, podstawienie `zero` (protokół RobustLight — porównywalność)
+  - {kind: mask, level: 0.1}
+  - {kind: mask, level: 0.25}
+  - {kind: mask, level: 0.5}
+  - {kind: mask, level: 0.75}
+  # całe skrzyżowania bez sensorów (kriging z DiffLight)
+  - {kind: mask, level: 0.25, unit: intersection}
+  - {kind: mask, level: 0.5, unit: intersection}
+  # martwe detektory BEZ ŚLADU: `hold` zamraża ostatnią wartość od decyzji 60 (15 min)
+  - {kind: mask, level: 0.25, substitution: hold, onset: 60}
+  - {kind: mask, level: 0.5, substitution: hold, onset: 60}
+  # rozkalibrowanie (nieobserwowalne) — multiplikatywny błąd wzmocnienia per pas
+  - {kind: drift, level: 0.1}
+  - {kind: drift, level: 0.2}
+  - {kind: drift, level: 0.3}
+  - {kind: drift, level: 0.5}

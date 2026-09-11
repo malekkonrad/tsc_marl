@@ -43,15 +43,25 @@ tsc_marl/
 │   │   ├── experiment.py   #     adapter LibSignal ↔ runlog (id biegu, parsowanie logów)
 │   │   └── agents/         #     wtyczki do ICH Registry: Efficient-MP, Advanced-MP,
 │   │                       #     Advanced-CoLight
+│   ├── uncertainty/        #   FAZA 2: zrzut BC, głowy niepewności, prototypy bramek
+│   │   ├── dataset.py      #     stan → akcja Advanced-MP, wszystkie scenariusze awarii
+│   │   ├── heads.py        #     EDL (Dirichlet) + MC-dropout, jedna dekompozycja
+│   │   ├── prototype.py    #     bramka 2.0 — niepewność DECYZJI (+ deep ensemble)
+│   │   └── obs_head.py     #     bramka 2.2 — niepewność OBSERWACJI per ruch → krawędź
+│   ├── robustness/         #   FAZA 3: sterowniki pod awarią sensorów
+│   │   ├── controllers.py  #     polityka, Advanced-CoLight, MaxPressure z wektora stanu, FixedTime
+│   │   └── degrade.py      #     plan T2 + pętla ewaluacji zamrożonego sterownika
 │   ├── runner/             #   URUCHAMIANIE: wejścia procesu i orkiestracja
 │   │   ├── cli.py          #     `tsc <komenda>` (cienkie, rozdziela ruch)
 │   │   ├── train.py        #     trening/pomiar agenta LibSignala
 │   │   ├── train_core.py   #     trening rdzenia Fazy 1
 │   │   ├── evaluate.py     #     ewaluacja zamrożonej polityki z checkpointu
-│   │   └── suite.py        #     deklaratywne siatki biegów
+│   │   ├── degrade.py      #     `tsc degrade` — plan T2 w podprocesach
+│   │   └── suite.py        #     deklaratywne siatki biegów (równolegle: -j)
 │   └── analysis/           #   WYNIKI: czyta zapisane biegi, nic nie uruchamia
 │       ├── plot.py         #     krzywe uczenia (działa też dla biegu w toku)
-│       └── report.py       #     tabele T1 do pracy
+│       ├── report.py       #     tabele T1 do pracy
+│       └── degradation.py  #     tabela i krzywe degradacji T2
 ├── src/runlog/             # NARZĘDZIE (niezależne od dziedziny): przechowywanie,
 │                           # odpytywanie i agregacja wyników eksperymentów
 ├── configs/
@@ -227,6 +237,11 @@ konfiguracji.
 | `t1_baseline.md` | nasze liczby obok literatury — GATE Fazy 0 |
 | `t1_table.md` | mean ± std po ziarnach |
 | `t1_meta.json` | protokół, wersje kodu (SHA obu repo), data |
+| `p1_gate.md` | GATE Fazy 1: rdzeń vs Advanced-CoLight |
+| `gate_2_0.md` | bramka 2.0 — niepewność decyzji (EDL vs ensemble, OOD, szum) |
+| `gate_2_2.md` | bramka 2.2 — głowa obserwacyjna, detekcja per ruch i per krawędź, separacja 2×2 |
+| `sensor_severity.md` | przelicznik poziom awarii na detektorze → odchylenie cechy |
+| `t2_nomech.md` | T2 bez mechanizmu: degradacja zamrożonych sterowników pod awarią |
 
 Checkpointy i logi trafiają do `runs/` i **nie są wersjonowane** — w sandboxie urosły
 do 642 MB. Kolumny `t_min`, `w1`, `obs_length`, `drop_always_green` w CSV nie są

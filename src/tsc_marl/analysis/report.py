@@ -57,6 +57,8 @@ WINDOW = 10
 # kroczące WINDOW testów mieści się w CONVERGED od wyniku końcowego.
 TAIL = 50
 CONVERGED = 0.02
+# Krzywe uczenia bramki — obok raportu, żeby markdown linkował je ścieżką względną.
+FIGURES = RESULTS / "figures"
 
 
 def build_baseline_report(rows):
@@ -288,7 +290,7 @@ def build_gate_report(exp):
     df["device"] = df["run_id"].map(devices)
 
     labels = {GATE_REFERENCE: "Advanced-CoLight", GATE_CORE: "rdzeń (gatppo)"}
-    att_rows, seed_rows, curve_rows, verdicts = [], [], [], []
+    att_rows, seed_rows, curve_rows, verdicts, ref_att = [], [], [], [], {}
     for net in GATE_NETWORKS:
         side = {
             agent: df[(df["network"] == net) & (df["agent"] == agent)].sort_values("seed")
@@ -296,6 +298,7 @@ def build_gate_report(exp):
         }
         ref = side[GATE_REFERENCE]["att_last10"].astype(float)
         core = side[GATE_CORE]["att_last10"].astype(float)
+        ref_att[net] = ref.mean()
         delta = (core.mean() - ref.mean()) / ref.mean()
         pvalue = (
             ttest_ind(core, ref, equal_var=False).pvalue
@@ -323,6 +326,13 @@ def build_gate_report(exp):
                 f"| {s['queue'].astype(float).mean():.2f} | {s['duration_s'].mean():.0f} "
                 f"| {', '.join(sorted(set(s['device'])))} |"
             )
+
+    # matplotlib dopiero tutaj — tabele T1 nie powinny go potrzebować
+    from tsc_marl.analysis.plot import gate_figures
+
+    figures = gate_figures(
+        curves, df[["run_id", "network", "agent"]], labels, ref_att, GATE_TOLERANCE, FIGURES
+    )
 
     device_of = {
         agent: ", ".join(sorted(set(df[df["agent"] == agent]["device"]))) for agent in labels
@@ -383,6 +393,16 @@ def build_gate_report(exp):
         f"{CONVERGED * 100:.0f}% od wyniku końcowego (zakres po seedach). Najgorszy test w "
         "ogonie łapie jednorazowe załamania polityki, których średnia z 10 nie pokazuje.",
         "",
+        "## Krzywe uczenia",
+        "",
+        f"Rysunki w `results/{FIGURES.name}/` (PNG tutaj, PDF do pracy), przeliczane razem "
+        "z tym raportem.",
+        "",
+        *(
+            line
+            for name, caption in figures
+            for line in (f"![{caption}]({FIGURES.name}/{name})", "", f"*{caption}*", "")
+        ),
         "## Kryterium wyjścia",
         "",
         f"Rdzeń w granicach **{GATE_TOLERANCE * 100:.0f}%** ATT Advanced-CoLighta na każdej "

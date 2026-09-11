@@ -82,6 +82,22 @@ Gotowe siatki:
 | `t1_paper` | to samo przy `yellow=0` — tryb, w którym liczą papiery |
 | `p1_reference` | Advanced-CoLight × 2 sieci × 3 seedy — odniesienie dla GATE Fazy 1 |
 | `p1_gate` | rdzeń GAT+PPO+CTDE × 2 sieci × 3 seedy |
+| `t1_learned` | CoLight, PressLight × 2 sieci × 3 seedy, `yellow=5` — CPU |
+| `t1_learned_paper` | Advanced-CoLight, CoLight w trybie papierów (`yellow=0`) — CPU |
+| `p1_abl_meanpool` | ablacja: actor z mean-pool (GraphSAGE) zamiast GAT — GPU |
+| `p1_abl_nognn` | ablacja: actor bez sąsiadów (MLP) — GPU |
+| `p1_abl_state_{queue,pressure,ep}` | ablacja stanu zamiast ATS — GPU |
+
+Punkty liczą się **równolegle** flagą `-j`:
+
+```bash
+uv run tsc suite run t1_learned -j 4     # 4 podprocesy naraz
+```
+
+Starty są rozsunięte o 15 s (`--stagger`), bo LibSignal przepisuje `configs/sim/*.cfg`
+przy budowie świata i dwa procesy startujące w tej samej sekundzie potrafią przeczytać
+plik ucięty w połowie. Pad w pierwszych 90 s jest ponawiany raz. Każde dziecko dostaje
+`OMP_NUM_THREADS = rdzenie / j`, a jego wyjście idzie do `runs/_suite_logs/<suite>/`.
 
 Własna siatka to plik w `configs/suites/`:
 
@@ -99,6 +115,75 @@ overrides:                  # opcjonalne nadpisania configu agenta
 Siatka **z** `overrides` dokleja swoją nazwę do `run_id` (żeby dwa różne configi nie
 biły się o jeden katalog); siatka **bez** nadpisań trafia w te same identyfikatory co
 uruchomienia ręczne, więc od razu widzi wcześniejsze wyniki jako gotowe.
+
+---
+
+## Awarie sensorów — zamrożone sterowniki (T2)
+
+Plan w `configs/robustness/<nazwa>.yml`: sieci, sterowniki (uczone z seedami),
+scenariusze awarii i liczba losowań. Jeden punkt = sterownik × sieć × seed,
+wszystkie scenariusze w jednym biegu `runs/t2/...`.
+
+```bash
+uv run tsc degrade status t2_nomech      # co policzone, komu brakuje wag rodzica
+uv run tsc degrade run t2_nomech -j 6    # policz brakujące
+uv run tsc degrade report t2_nomech      # -> results/t2_nomech.md + results/figures/
+```
+
+Uczone sterowniki (gatppo, Advanced-CoLight) biorą **końcowe wagi** z biegu treningowego
+`runs/t1/<agent>__<sieć>__s<seed>_y5`. Bez pliku wag punkt jest pomijany z komunikatem,
+nie wywala planu. Raport sprawdza, że czysty wynik ewaluatora równa się ostatniemu
+testowi z treningu — inaczej ewaluator mierzyłby inną politykę niż tabela T1.
+
+---
+
+## Prototypy Fazy 2 (CPU, minuty)
+
+```bash
+uv run tsc dataset -n cityflow_jinan3x4_4ph --episodes 3   # zrzut BC (stan → akcja Advanced-MP)
+uv run tsc prototype                                        # bramka 2.0 -> results/gate_2_0.md
+uv run tsc obshead                                          # bramka 2.2 -> results/gate_2_2.md
+uv run tsc severity                                         # przelicznik dotkliwości awarii
+```
+
+Zbiory OOD dla epistemic: `cityflow_jinan3x4_4ph_d0p{25,5,75}` (popyt w dół),
+`cityflow_jinan3x4_4ph_r{2000,2500}` (inny wzorzec ruchu), `cityflow_hangzhou4x4_4ph`
+(inna topologia) — każdy trzeba najpierw zrzucić `tsc dataset -n <sieć>`.
+
+---
+
+## Gdzie co liczyć — laptop vs glider
+
+Wagi treningów żyją tylko na gliderze (kopie `runs/t1` na laptopie są bez `*.pt`).
+
+| co | gdzie | dlaczego |
+|---|---|---|
+| `entry: core` (gatppo, ablacje `p1_abl_*`) | glider | GPU |
+| `tsc degrade run` dla uczonych | glider | potrzebuje wag |
+| `t1_learned`, `t1_learned_paper` | dowolna, CPU | LibSignal nie ma obsługi GPU |
+| `tsc prototype`, `obshead`, `dataset`, reguły w `degrade` | laptop | CPU, minuty |
+
+**Nocna kolejka na gliderze — jedna komenda:**
+
+```bash
+git pull
+bash deploy/glider/noc.sh        # dwie kolejki w tle: GPU (ablacje) i CPU (T2 → T1)
+```
+
+Skrypt sprawdza `tsc doctor` i CUDA, rusza obie kolejki odporne na wylogowanie
+i wypisuje, gdzie patrzeć (`runs/_suite_logs/noc_<data>/`). Wznowienie po przerwie
+to ta sama komenda: gotowe punkty są pomijane, a bieg przerwany na tej maszynie
+(martwy proces w statusie `running`) liczy się od nowa — `runlog` rozpoznaje go
+po zapisanym `pid`. `DRY=1` tylko wypisuje komendy; `CPU_J`/`GPU_J` zmieniają
+równoległość.
+
+Nie licz tego samego `run_id` na obu maszynach — przy synchronizacji jeden katalog
+nadpisze drugi. Po liczeniu na gliderze przenieś wyniki razem z wagami:
+
+```bash
+rsync -av glider:tsc_marl/runs/t1/ runs/t1/      # z wagami (potrzebne do degrade)
+rsync -av glider:tsc_marl/runs/t2/ runs/t2/
+```
 
 ---
 

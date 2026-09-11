@@ -146,6 +146,83 @@ def test_odrzuca_niespojna_konfiguracje(kwargs, match):
         GATEncoder(OB_LENGTH, **kwargs)
 
 
+# ------------------------------------------------------- warianty ablacyjne
+
+
+@pytest.mark.parametrize("kind", ["gat", "mean", "none"])
+def test_warianty_encodera_ten_sam_ksztalt_i_gradient(graph, kind):
+    """Ablacja ma porównywać AGREGACJĘ, nie rozmiar sieci: ten sam kontrakt
+    [N, ob_length] -> [N, 128] i gradient do każdego parametru."""
+    from tsc_marl.core.nets import build_encoder
+
+    torch.manual_seed(0)
+    enc = build_encoder(kind, OB_LENGTH)
+    out = enc(observations(graph), graph.edge_index)
+    assert out.shape == (graph.n_nodes, 128)
+    out.sum().backward()
+    assert all(p.grad is not None and p.grad.abs().sum() > 0 for p in enc.parameters())
+
+
+@pytest.mark.parametrize("kind", ["gat", "mean", "none"])
+def test_warianty_encodera_rownowaznosc_permutacyjna(graph, kind):
+    from tsc_marl.core.nets import build_encoder
+
+    torch.manual_seed(0)
+    enc = build_encoder(kind, OB_LENGTH).eval()
+    x = observations(graph)
+    perm = torch.randperm(graph.n_nodes, generator=torch.Generator().manual_seed(3))
+    inv = torch.empty_like(perm)
+    inv[perm] = torch.arange(graph.n_nodes)
+    ei = inv[graph.edge_index]
+    assert torch.allclose(enc(x, graph.edge_index)[perm], enc(x[perm], ei), atol=1e-5)
+
+
+def test_none_nie_widzi_sasiadow_a_mean_widzi(graph):
+    """To, co ablacja ma rozdzielić: `none` zależy WYŁĄCZNIE od własnego wiersza,
+    `mean` i `gat` zmieniają wyjście, gdy zmieni się sąsiad."""
+    from tsc_marl.core.nets import build_encoder
+
+    x = observations(graph)
+    src, dst = graph.edge_index[:, 0]
+    x2 = x.clone()
+    x2[src] += 5.0
+    for kind, powinno in (("none", False), ("mean", True), ("gat", True)):
+        torch.manual_seed(0)
+        enc = build_encoder(kind, OB_LENGTH).eval()
+        zmiana = not torch.allclose(enc(x, graph.edge_index)[dst], enc(x2, graph.edge_index)[dst])
+        assert zmiana == powinno, kind
+
+
+@pytest.mark.parametrize("kind", ["gat", "mean", "none"])
+def test_warianty_przezywaja_to_device(graph, kind):
+    """Regresja: metoda wariantu nazwana `_apply` nadpisała `nn.Module._apply`, przez
+    które idzie `.to(device)` — `CoreTrainer.from_world` padał na pierwszej linii,
+    a testy wyjścia i gradientu przechodziły, bo nie przenosiły sieci."""
+    ac = ActorCritic(OB_LENGTH, 8, encoder=kind).to("cpu").to(torch.float32)
+    assert ac.actor(observations(graph), graph.edge_index).shape == (graph.n_nodes, 8)
+
+
+def test_nieznany_encoder():
+    from tsc_marl.core.nets import build_encoder
+
+    with pytest.raises(ValueError, match="encoder"):
+        build_encoder("rakieta", OB_LENGTH)
+
+
+def test_actorcritic_wariant_tylko_w_actorze():
+    """Krytyk zostaje GAT-em przy każdym wariancie actora — ablacja pyta
+    o decyzję, nie o krytyka. Klucze state_dict actora GAT bez zmian, więc
+    checkpointy GATE-a ładują się dalej."""
+    from tsc_marl.core.nets import LocalEncoder
+
+    ac = ActorCritic(OB_LENGTH, 8, encoder="none")
+    assert isinstance(ac.actor.encoder, LocalEncoder)
+    assert isinstance(ac.critic.encoder, GATEncoder)
+    gat = ActorCritic(OB_LENGTH, 8)
+    stare = Actor(OB_LENGTH, 8)
+    assert gat.actor.state_dict().keys() == stare.state_dict().keys()
+
+
 @pytest.mark.slow
 def test_from_registry_czyta_ten_sam_config_co_baseline(advanced_colight_world):
     """Prawdziwy bieg ma brać hiperparametry z `colight.yml`, a nie z domyślnych

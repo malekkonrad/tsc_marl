@@ -103,6 +103,7 @@ class StateBuilder:
         self.state = state
         self.reward = reward
         self.obs_length = obs_length
+        self.drop_always_green = drop_always_green
         self.structs = [
             self._build_structs(inter, drop_always_green, action_interval, obs_length)
             for inter in self.intersections
@@ -259,6 +260,20 @@ class StateBuilder:
             # bo obserwacja opisuje decyzję, nie stan lampy.
             rows[idx, self.ob_length - self.n_phases + inter.current_phase] = 1.0
         return rows
+
+    def phase_incidence(self) -> np.ndarray:
+        """[N, n_faz, n_mov] bool — które ruchy (kolumny bloku cech) obsługuje która faza.
+
+        Most między stanem opisanym per RUCH a decyzją podejmowaną per FAZĘ: p(s) =
+        Σ e(l,m) po ruchach fazy (Def. 5). Z tą macierzą decyzję MaxPressure da się
+        policzyć z SAMEGO wektora stanu — czyli także z popsutego, co jest całą
+        potrzebą ewaluacji pod awarią (`robustness/controllers.py`).
+        """
+        out = np.zeros((self.n_nodes, self.n_phases, self.n_mov), dtype=bool)
+        for i, inter in enumerate(self.intersections):
+            for phase, movements in enumerate(ats.phase_incidence(inter, self.drop_always_green)):
+                out[i, phase, movements] = True
+        return out
 
     def reset_sensors(self, episode: int) -> None:
         """Przelosuj TRWAŁY stan detektorów na nowy epizod. Bez tego ten sam

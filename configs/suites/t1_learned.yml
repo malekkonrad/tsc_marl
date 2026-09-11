@@ -1,0 +1,17 @@
+# T1 — uczone baseline'y klasy DQN z LibSignala, TRYB REALISTYCZNY (yellow=5).
+# Liczby CoLighta z sandboxa (287,3) powstały przy zepsutym `att_last10` i przed
+# patchem `save_model`, więc NIE są wynikiem tego repo — tu liczymy je od nowa.
+# Bez CoLighta tabela T1 nie ma klasycznego baseline'u GAT+DQN obok rdzenia.
+#
+# CPU z konieczności: `agent/colight.py` i `presslight.py` w submodule nie mają
+# obsługi urządzenia (patrz komentarz w p1_reference.yml). Ta siatka jest więc
+# DOBRA DO LICZENIA NA MASZYNIE BEZ KARTY — tam, gdzie GPU i tak by stało.
+entry: tsc
+mode: realistic
+timeout: 86400
+ngpu: "-1"
+
+grid:
+  agent: [colight, presslight]
+  network: [cityflow_jinan3x4_4ph, cityflow_hangzhou4x4_4ph]
+  seed: [0, 1, 2]

@@ -147,7 +147,7 @@ def collect(
         builders = {slug(s): StateBuilder.from_registry(world, order, failure=s) for s in scenarios}
         env = TrafficEnv(world, graph, clean_builder, cfg.action_interval)
 
-        incidence = _incidence(clean_builder, config["model"].get("drop_always_green", True))
+        incidence = clean_builder.phase_incidence()
         acc = _Accumulator(builders, incidence)
         att: list[float] = []
         for ep in range(episodes):
@@ -297,17 +297,6 @@ def expert_check(
         "boundary_rate": float(boundary.mean()),
         "margin": margin.astype(np.float32),
     }
-
-
-def _incidence(builder, drop_always_green: bool) -> np.ndarray:
-    """[N, n_faz, n_mov] bool — patrz `Dataset.incidence`."""
-    from tsc_marl.domain import ats
-
-    out = np.zeros((builder.n_nodes, builder.n_phases, builder.n_mov), dtype=bool)
-    for i, inter in enumerate(builder.intersections):
-        for phase, movements in enumerate(ats.phase_incidence(inter, drop_always_green)):
-            out[i, phase, movements] = True
-    return out
 
 
 def _dead_movements(builder) -> np.ndarray:

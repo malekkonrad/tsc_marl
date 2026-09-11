@@ -229,6 +229,63 @@ def test_domyslnie_cpu(tmp_path):
     assert argv[argv.index("--ngpu") + 1] == "-1"
 
 
+# ------------------------------------------------------------------ równolegle
+
+
+def _launcher(tmp_path, kody: dict, czasy: dict | None = None):
+    """`launch` dla `schedule` na zwykłych procesach Pythona: punkt -> kod wyjścia
+    (lista = kolejne próby). Zapisuje, ile razy punkt wystartował."""
+    import subprocess
+    import sys
+
+    starty: dict = {}
+    czasy = czasy or {}
+
+    def launch(point):
+        n = starty.get(point, 0)
+        starty[point] = n + 1
+        kod = kody[point][min(n, len(kody[point]) - 1)]
+        sen = czasy.get(point, 0.05)
+        log = open(tmp_path / f"{point}.log", "a")  # noqa: SIM115
+        cmd = [sys.executable, "-c", f"import time,sys; time.sleep({sen}); sys.exit({kod})"]
+        return subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT), log
+
+    return launch, starty
+
+
+def test_schedule_liczy_wszystko_i_zwraca_statusy(tmp_path):
+    launch, starty = _launcher(tmp_path, {"a": [0], "b": [0], "c": [0]})
+    wynik = suite.schedule(["a", "b", "c"], launch, jobs=2, timeout=30, stagger=0)
+    assert wynik == {"a": "ok", "b": "ok", "c": "ok"}
+    assert starty == {"a": 1, "b": 1, "c": 1}
+
+
+def test_wczesny_pad_ponawiany_raz(tmp_path):
+    """Pad w pierwszych sekundach to najpewniej wyścig o `configs/sim/*.cfg`
+    (patrz STAGGER_S) — ponawiamy RAZ. Drugi pad z rzędu to prawdziwy błąd:
+    pętla ponowień bez końca zjadłaby noc liczenia na jednym zepsutym punkcie."""
+    launch, starty = _launcher(tmp_path, {"chwilowy": [1, 0], "zepsuty": [1]})
+    wynik = suite.schedule(["chwilowy", "zepsuty"], launch, jobs=2, timeout=30, stagger=0)
+    assert wynik == {"chwilowy": "ok", "zepsuty": "failed"}
+    assert starty == {"chwilowy": 2, "zepsuty": 2}
+
+
+def test_timeout_zabija_proces(tmp_path):
+    launch, _ = _launcher(tmp_path, {"wolny": [0]}, {"wolny": 30})
+    wynik = suite.schedule(["wolny"], launch, jobs=1, timeout=0.5, stagger=0)
+    assert wynik == {"wolny": "timeout"}
+
+
+def test_stagger_rozsuwa_starty(tmp_path):
+    """Starty co najmniej `stagger` od siebie, nawet przy wolnych slotach."""
+    import time
+
+    launch, _ = _launcher(tmp_path, {"a": [0], "b": [0]})
+    t0 = time.time()
+    suite.schedule(["a", "b"], launch, jobs=2, timeout=30, stagger=0.6)
+    assert time.time() - t0 >= 0.6
+
+
 @pytest.mark.slow
 def test_ngpu_nie_wchodzi_do_odcisku(tmp_path):
     """NAJWAŻNIEJSZY test tej sekcji: ten sam bieg na CPU i na GPU to JEDEN

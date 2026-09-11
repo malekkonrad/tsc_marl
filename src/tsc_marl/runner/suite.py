@@ -204,13 +204,22 @@ def run_one(suite: Suite, point: Point, replace: bool = False) -> tuple[str, flo
     return "ok", time.time() - t0
 
 
-def run(suite: Suite, replace: bool = False) -> dict[str, int]:
-    """Policz wszystkie punkty suite'a. Zwraca licznik statusów."""
+def run(
+    suite: Suite, replace: bool = False, jobs: int = 1, stagger: float | None = None
+) -> dict[str, int]:
+    """Policz wszystkie punkty suite'a. Zwraca licznik statusów.
+
+    `jobs > 1` liczy punkty RÓWNOLEGLE (osobne podprocesy — i tak każdy punkt ma
+    własny, bo Registry jest globalne). Biegi i tak żyją w osobnych katalogach,
+    więc `runlog` nie ma tu nic do synchronizacji; jedyny współdzielony zasób to
+    `configs/sim/*.cfg` — patrz `run_parallel`.
+    """
     libsignal.bootstrap()  # potrzebne do czytania configów przy planowaniu siatki
     exp = experiment.experiment()
     licznik = {"ok": 0, "pominięte": 0, "failed": 0, "timeout": 0}
 
     print(f"suite '{suite.name}' → {suite.module}, yellow={suite.yellow}, {suite.path}")
+    todo: list[Point] = []
     for point in suite.points():
         _, params, rid = plan(suite, point)
         # skip-if-done po ODCISKU PARAMETRÓW, nie po nazwie: zmiana czegokolwiek
@@ -219,13 +228,135 @@ def run(suite: Suite, replace: bool = False) -> dict[str, int]:
             print(f"  {point.label()}  pomijam (jest wynik)")
             licznik["pominięte"] += 1
             continue
-        print(f"  {point.label()} ...", end=" ", flush=True)
-        status, dt = run_one(suite, point, replace)
-        print(f"{status} ({dt:.0f}s)")
-        licznik[status] = licznik.get(status, 0) + 1
+        todo.append(point)
+
+    if jobs <= 1:
+        for point in todo:
+            print(f"  {point.label()} ...", end=" ", flush=True)
+            status, dt = run_one(suite, point, replace)
+            print(f"{status} ({dt:.0f}s)")
+            licznik[status] = licznik.get(status, 0) + 1
+    else:
+        gap = STAGGER_S if stagger is None else stagger
+        for status in run_parallel(suite, todo, replace, jobs, gap).values():
+            licznik[status] = licznik.get(status, 0) + 1
 
     print(f"\n{licznik}. Biegi: {exp.path}")
     return licznik
+
+
+# ------------------------------------------------------------ równolegle
+
+#: Odstęp między STARTAMI podprocesów. Nie kosmetyka: `World_param_Interface`
+#: LibSignala przepisuje `configs/sim/<sieć>.cfg` przez `open(path, 'w')`
+#: (obcina plik, potem pisze), a CityFlow czyta go przy budowie świata. Dwa
+#: procesy startujące w tej samej sekundzie potrafią więc przeczytać plik
+#: ucięty w połowie — `JSONDecodeError` albo pad silnika. Świat powstaje w
+#: pierwszych ~10 s życia procesu, później pliku nikt już nie czyta.
+STAGGER_S = 15.0
+#: Pad szybszy niż to jest traktowany jako pad STARTU (patrz wyżej) i ponawiany
+#: raz. Pad po kilku minutach to prawdziwy błąd biegu — jego nie powtarzamy.
+EARLY_FAIL_S = 90.0
+
+
+def _child_threads(jobs: int) -> str:
+    """Wątki BLAS/torch na dziecko. Domyślnie torch bierze WSZYSTKIE rdzenie, więc
+    N równoległych biegów to N×rdzenie wątków walczących o te same rdzenie —
+    przełączanie kontekstów zjada więcej, niż daje równoległość."""
+    import os  # noqa: PLC0415
+
+    return str(max(1, (os.cpu_count() or 1) // jobs))
+
+
+def logs_dir(suite: Suite) -> Path:
+    """stdout/stderr podprocesów. Do PLIKU, nie do potoku: przy kilku dzieciach
+    naraz nikt nie czyta potoków na bieżąco, a pełny bufor potoku (64 KB)
+    zatrzymuje proces piszący — trening wisiałby bez żadnego komunikatu."""
+    from tsc_marl.paths import RUNS  # noqa: PLC0415
+
+    d = RUNS / "_suite_logs" / suite.name
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def run_parallel(
+    suite: Suite,
+    points: list[Point],
+    replace: bool,
+    jobs: int,
+    stagger: float = STAGGER_S,
+) -> dict[Point, str]:
+    """Licz `points` w `jobs` podprocesach naraz. -> {punkt: status}."""
+    env = libsignal.child_env()
+    env.setdefault("OMP_NUM_THREADS", _child_threads(jobs))
+    env.setdefault("MKL_NUM_THREADS", env["OMP_NUM_THREADS"])
+    logs = logs_dir(suite)
+
+    def launch(point: Point):
+        cmd = [sys.executable, "-m", suite.module, *suite.argv(point, replace)]
+        name = f"{point.agent}__{point.network}__s{point.seed}.log"
+        log = open(logs / name, "a", encoding="utf-8")  # noqa: SIM115 - zamyka schedule
+        log.write(f"\n$ {' '.join(cmd)}\n")
+        log.flush()
+        proc = subprocess.Popen(cmd, cwd=REPO_ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
+        return proc, log
+
+    print(f"  {len(points)} punktów, {jobs} naraz, logi: {logs}")
+    # Migawka configów symulatora dla CAŁEJ siatki: dziecko przywraca to, co
+    # zastało na starcie, a przy równoległych biegach mogło zastać plik już
+    # zabrudzony przez sąsiada. Ostatnie słowo należy więc do rodzica.
+    with libsignal.sim_configs_untouched():
+        return schedule(points, launch, jobs, suite.timeout, stagger)
+
+
+def _label(point) -> str:
+    return point.label() if hasattr(point, "label") else str(point)
+
+
+def schedule(points, launch, jobs: int, timeout: float, stagger: float) -> dict:
+    """Kolejka z `jobs` slotami. Rozdzielona od `run_parallel`, żeby dało się ją
+    przetestować na zwykłych procesach `sleep`, bez stawiania CityFlow.
+
+    `launch(point) -> (Popen, plik_logu)`. Zwraca {punkt: 'ok'|'failed'|'timeout'}.
+    """
+    pending = list(points)
+    retried: set = set()
+    active: dict = {}  # punkt -> (proc, log, t0)
+    done: dict = {}
+    last_start = -float("inf")
+
+    while pending or active:
+        # start nowych — najwyżej jeden na `stagger` sekund
+        while pending and len(active) < jobs and time.time() - last_start >= stagger:
+            point = pending.pop(0)
+            proc, log = launch(point)
+            active[point] = (proc, log, time.time())
+            last_start = time.time()
+            print(f"  → start  {_label(point)}", flush=True)
+
+        for point, (proc, log, t0) in list(active.items()):
+            dt = time.time() - t0
+            code = proc.poll()
+            if code is None and dt > timeout:
+                proc.kill()
+                proc.wait()
+                code = "timeout"
+            if code is None:
+                continue
+            log.close()
+            del active[point]
+            if code == 0:
+                done[point] = "ok"
+            elif code != "timeout" and dt < EARLY_FAIL_S and point not in retried:
+                retried.add(point)
+                pending.insert(0, point)  # najpierw ponów to, co padło przy starcie
+                print(f"  ! pad po {dt:.0f}s (start?) — ponawiam {_label(point)}", flush=True)
+                continue
+            else:
+                done[point] = "timeout" if code == "timeout" else "failed"
+            print(f"  ✓ {done[point]:7s} {_label(point)} ({dt:.0f}s)", flush=True)
+        time.sleep(0.2)
+    return done
 
 
 def status(suite: Suite) -> list[dict[str, Any]]:
