@@ -73,6 +73,56 @@ def train(ctx: typer.Context) -> None:
     train_module.main(ctx.args)
 
 
+@app.command()
+def prototype(
+    network: str = typer.Option("cityflow_jinan3x4_4ph", "-n", help="sieć bazowa zrzutu"),
+    mode: str = typer.Option("edl", help="'edl' albo 'softmax'"),
+    epochs: int = typer.Option(150, help="epoki uczenia głowy"),
+    hop: bool = typer.Option(False, help="1-hop zamiast 0-hop (druga iteracja 2.0)"),
+) -> None:
+    """Bramka prototypu 2.0 (uczenie + tabela + kryteria) -> results/gate_2_0.md."""
+    from tsc_marl.uncertainty import prototype as module
+
+    cfg = module.TrainConfig(mode=mode, epochs=epochs, hop=hop)
+    print(module.run(cfg, network=network))
+
+
+@app.command()
+def demand(
+    network: str = typer.Option("cityflow_jinan3x4_4ph", "-n", help="sieć bazowa"),
+    factors: str = typer.Option("0.5,1.5", help="mnożniki natężenia, po przecinku"),
+) -> None:
+    """Warianty popytu (scenariusz OOD dla epistemic) -> configs/sim/<sieć>_d*.cfg."""
+    from tsc_marl.domain import demand as module
+
+    for f in [float(x) for x in factors.split(",")]:
+        flow, cfg = module.write_variant(network, f)
+        print(f"x{f:g}: {cfg}  ({flow.name})")
+
+
+@app.command()
+def dataset(
+    network: str = typer.Option("cityflow_jinan3x4_4ph", "-n", help="sieć"),
+    expert: str = typer.Option("advancedmp", "-a", help="ekspert do behavior cloningu"),
+    episodes: int = typer.Option(3, help="liczba epizodów (różnią się LOSOWANIEM AWARII)"),
+    replace: bool = typer.Option(False, help="nadpisz istniejący bieg"),
+) -> None:
+    """Zbiór (stan -> akcja eksperta) dla prototypu 2.0 -> runs/bc/."""
+    from tsc_marl.uncertainty import dataset as module
+
+    print(module.build(network, expert=expert, episodes=episodes, replace=replace))
+
+
+@app.command()
+def severity(
+    network: str = typer.Option("cityflow_jinan3x4_4ph", help="sieć, na której mierzymy"),
+) -> None:
+    """Przelicznik dotkliwości awarii sensora -> results/sensor_severity.md."""
+    from tsc_marl.analysis import severity as module
+
+    print(module.main(network))
+
+
 @app.command(context_settings=PASSTHROUGH)
 def core(ctx: typer.Context) -> None:
     """Rdzeń Fazy 1 — GAT + PPO + CTDE, własna pętla (`tsc core -n ... --seed 0`)."""
@@ -136,7 +186,7 @@ def suite_list() -> None:
 
 @app.command()
 def table() -> None:
-    """Przelicz tabele T1 z zapisanych biegów do `results/` (nic nie uruchamia)."""
+    """Przelicz tabele T1 i GATE Fazy 1 z zapisanych biegów do `results/` (nic nie uruchamia)."""
     from tsc_marl import libsignal
     from tsc_marl.analysis import report
     from tsc_marl.libsignal import experiment
