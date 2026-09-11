@@ -107,6 +107,7 @@ class TrafficEnv:
         self.features = features
         self.action_interval = action_interval
 
+        self.episode = -1
         self._to_world = world_order(graph, world)
         self._delay = _delay_generators(world, graph.order_intersections(world))
         self._reset_stats()
@@ -120,9 +121,16 @@ class TrafficEnv:
         self._queue_sum = np.zeros(n, dtype=np.float64)
         self._delay_sum = np.zeros(n, dtype=np.float64)
 
-    def reset(self) -> np.ndarray:
-        """Nowy epizod. -> obserwacja [N, ob_length]."""
+    def reset(self, episode: int | None = None) -> np.ndarray:
+        """Nowy epizod. -> obserwacja [N, ob_length].
+
+        `episode` steruje LOSOWANIEM AWARII (`features.reset_sensors`), więc
+        podany jawnie czyni bieg eval-only odtwarzalnym niezależnie od tego, ile
+        epizodów treningowych go poprzedziło. Domyślnie licznik idzie sam.
+        """
+        self.episode = self.episode + 1 if episode is None else episode
         self.world.reset()
+        self.features.reset_sensors(self.episode)
         self._reset_stats()
         return self.features.observe()
 
@@ -279,7 +287,7 @@ class CoreTrainer:
 
     # ---------------------------------------------------------------- epizody
 
-    def collect(self) -> tuple[RolloutBuffer, dict[str, float]]:
+    def collect(self, episode: int | None = None) -> tuple[RolloutBuffer, dict[str, float]]:
         """Jeden epizod treningowy: polityka PRÓBKUJE (eksploracja PPO)."""
         cfg = self.config
         buffer = RolloutBuffer(
@@ -289,7 +297,7 @@ class CoreTrainer:
             self.edge_index,
             device=self.device,
         )
-        obs = self._obs(self.env.reset())
+        obs = self._obs(self.env.reset(episode))
         for _ in range(cfg.decisions):
             actions, log_probs, values = self.ppo.act(obs, self.edge_index)
             next_obs, rewards, _ = self.env.step(self._actions(actions))
@@ -299,13 +307,13 @@ class CoreTrainer:
         return buffer, self.env.metrics()
 
     @torch.no_grad()
-    def evaluate(self) -> dict[str, float]:
+    def evaluate(self, episode: int | None = None) -> dict[str, float]:
         """Epizod testowy: argmax i TYLKO ACTOR.
 
         Krytyk nie jest wołany — to jest ta „inferencja = tylko actor" z planu,
         i tak samo będzie wyglądać wdrożenie na Pi w Fazie 5.
         """
-        obs = self._obs(self.env.reset())
+        obs = self._obs(self.env.reset(episode))
         for _ in range(self.config.test_decisions):
             actions = self.ppo.ac.actor(obs, self.edge_index).argmax(-1)
             next_obs, _, _ = self.env.step(self._actions(actions))
@@ -334,13 +342,13 @@ class CoreTrainer:
         test_att: list[float] = []
 
         for e in range(n_episodes):
-            buffer, train_metrics = self.collect()
+            buffer, train_metrics = self.collect(e)
             stats = self.ppo.update(buffer)
             self._log(e, "train", {**train_metrics, **stats})
 
             test_metrics = None
             if self.config.test_when_train:
-                test_metrics = self.evaluate()
+                test_metrics = self.evaluate(e)
                 self._log(e, "test", test_metrics)
                 test_att.append(test_metrics["att"])
                 self.history.append(test_metrics)
