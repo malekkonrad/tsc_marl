@@ -187,3 +187,23 @@ def effective_running(
                 n += 1
         counts[lane] = n
     return counts
+
+
+def phase_incidence(inter: Intersection, drop_always_green: bool = True) -> list[list[int]]:
+    """[faza] → indeksy ruchów z `controlled_movements`, które ta faza obsługuje.
+
+    Most między Def. 11 (STAN opisany per ruch) a Def. 5/10 (DECYZJA podejmowana
+    per faza): p(s) = Σ e(l,m) i d(s) = Σ r(l,m) po ruchach fazy. Bez tego
+    z wektora stanu nie da się odtworzyć wyboru Advanced-MP, choć cała potrzebna
+    informacja w nim siedzi — a na tym stoi realizowalność zadania BC w 2.0.
+
+    Ruch mający zielone w kilku fazach pojawia się w kilku wierszach; to jest
+    poprawne, bo `controlled_movements` deduplikuje ruchy, a nie ich udział
+    w fazach.
+    """
+    flat = controlled_movements(inter, drop_always_green)
+    index = {(road_of(ins[0]), road_of(outs[0])): i for i, (ins, outs) in enumerate(flat)}
+    return [
+        [index[(road_of(ins[0]), road_of(outs[0]))] for ins, outs in moves]
+        for moves in phase_movements(inter, drop_always_green)
+    ]

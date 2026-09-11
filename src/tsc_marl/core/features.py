@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 import numpy as np
 
 from tsc_marl.domain import ats
+from tsc_marl.domain.sensors import FailureSpec, SensorModel, failure_units
 
 if TYPE_CHECKING:  # tylko dla typów — inaczej moduł nie zaimportuje się bez
     from world.world_cityflow import Intersection, World  # bootstrapu ścieżki do submodułu
@@ -84,6 +85,7 @@ class StateBuilder:
         obs_length: float | None = None,
         action_interval: int = 15,
         n_phases: int | None = None,
+        failure: FailureSpec | None = None,
     ) -> None:
         if state not in STATE_VARIANTS:
             raise ValueError(f"state={state!r}, dozwolone: {STATE_VARIANTS}")
@@ -108,6 +110,17 @@ class StateBuilder:
         self.n_mov = max(len(s.movements) for s in self.structs)
         self.n_phases = n_phases or max(len(inter.phases) for inter in self.intersections)
 
+        # Warstwa awarii sensora (Faza 2/3). JEDNA instancja na wszystkie
+        # skrzyżowania — ten sam fizyczny detektor bywa czytany przez dwa
+        # sąsiadujące skrzyżowania i musi im pokazać tę samą wartość.
+        self.failure = failure or FailureSpec()
+        self.sensors: SensorModel | None = None
+        if self.failure.active:
+            lanes = sorted({lane for st in self.structs for lane in st.all_lanes})
+            self.sensors = SensorModel(
+                self.failure, failure_units(self.intersections, lanes, self.failure.unit)
+            )
+
     @classmethod
     def from_registry(
         cls, world: World, intersections: Sequence[Intersection], **overrides: Any
@@ -121,6 +134,7 @@ class StateBuilder:
             "reward": param.get("reward", "queue"),
             "drop_always_green": param.get("drop_always_green", True),
             "obs_length": param.get("obs_length", None),
+            "failure": FailureSpec.from_registry(),
             "action_interval": Registry.mapping["trainer_mapping"]["setting"].param[
                 "action_interval"
             ],
@@ -194,8 +208,18 @@ class StateBuilder:
             self.obs_length,
         )
 
-    def observe(self) -> np.ndarray:
-        """[skrzyżowania, ob_length], float32, w kolejności podanej przy budowie."""
+    def observe(self, *, corrupt: bool = True) -> np.ndarray:
+        """[skrzyżowania, ob_length], float32, w kolejności podanej przy budowie.
+
+        `corrupt=False` omija warstwę awarii NIE RUSZAJĄC jej stanu (żadnego
+        losowania, żadnej aktualizacji `hold`). Dzięki temu dwa wywołania w tym
+        samym momencie symulacji dają parę (czysta, popsuta) z DOKŁADNIE tego
+        samego stanu silnika — to jest zbiór uczący prototypu 2.0 i miara,
+        względem której liczy się dotkliwość awarii.
+        """
+        sensors = self.sensors if corrupt else None
+        if sensors is not None:
+            sensors.begin_decision()
         snapshot = self._snapshot()
         lane_vehicles, distances, speeds = snapshot
         full_queue = (
@@ -205,6 +229,8 @@ class StateBuilder:
         rows = np.zeros((self.n_nodes, self.ob_length), dtype=np.float32)
         for idx, (inter, s) in enumerate(zip(self.intersections, self.structs, strict=True)):
             q = self._queue(s, snapshot, full_queue)
+            if sensors is not None:
+                q = sensors.read(q, s.all_lanes, channel="queue")
 
             if self.state == "queue":
                 head = [sum(q[lane] for lane in ins) / len(ins) for ins, _ in s.movements]
@@ -223,6 +249,8 @@ class StateBuilder:
                     self.world.lane_length,
                     s.effective_range,
                 )
+                if sensors is not None:
+                    running = sensors.read(running, s.in_lanes, channel="running")
                 demand = ats.movement_running(s.movements, running)
                 rows[idx, self.n_mov : self.n_mov + len(demand)] = demand
 
@@ -232,10 +260,21 @@ class StateBuilder:
             rows[idx, self.ob_length - self.n_phases + inter.current_phase] = 1.0
         return rows
 
+    def reset_sensors(self, episode: int) -> None:
+        """Przelosuj TRWAŁY stan detektorów na nowy epizod. Bez tego ten sam
+        zbiór pasów byłby zepsuty przez cały trening, a `hold` przeciekałby
+        wartości sprzed `world.reset()`."""
+        if self.sensors is not None:
+            self.sensors.reset(episode)
+
     def rewards(self) -> np.ndarray:
         """[skrzyżowania], float32. Zawsze z PEŁNEJ kolejki pasa, nigdy z okna
         `obs_length` — okno jest własnością obserwacji (tak liczy je referencyjna
-        implementacja), a nagroda ma zostać porównywalna z CoLightem."""
+        implementacja), a nagroda ma zostać porównywalna z CoLightem.
+
+        Warstwa awarii jej NIE DOTYKA i nie jest to kwestia flagi: `get_info`
+        czyta cache świata, nie ścieżkę obserwacji. To jest scope CORE Fazy 3 —
+        trening i nagroda na czystym, awaria tylko na wejściu polityki."""
         queue = self.world.get_info("lane_waiting_count")
         out = np.zeros(self.n_nodes, dtype=np.float32)
         for idx, s in enumerate(self.structs):

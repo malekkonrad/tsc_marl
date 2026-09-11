@@ -241,3 +241,48 @@ def session(
                 "Na maszynie z kartą sprawdź `make setup-gpu` (torch z indeksu cu121)."
             )
         yield Session(run=run, config=config, logger=logger, args=args, device=device)
+
+
+@contextmanager
+def standalone_world(
+    agent: str,
+    network: str,
+    *,
+    config_patch: dict[str, Any] | None = None,
+    n_agents: int | None = None,
+):
+    """Świat LibSignala + agenci POZA pętlą treningową — diagnostyka i zrzuty danych.
+
+    `session()` kończy się w stanie „Registry zapełnione, świat NIE zbudowany",
+    bo każde wejście stawia go inaczej; tutaj stawiamy go sami. Bieg `runlog`
+    NIE jest tu zakładany: pomiar przelicznika albo zrzut zbioru to nie to samo
+    co bieg eksperymentu, a wołający, który chce proweniencji, otwiera bieg sam.
+
+    Wszystko idzie pod `sim_configs_untouched`, bo `build_config` DOPISUJE do
+    `configs/sim/*.cfg` ścieżki logów replaya ze znacznikiem czasu — bez tego
+    samo policzenie diagnostyki brudzi wersjonowany config.
+
+    -> (world, agents, config). `n_agents` domyślnie po jednym na skrzyżowanie
+    (tak zbudowane są metody MP-owe); modele współdzielone, jak Advanced-CoLight,
+    biorą `n_agents=1`.
+    """
+    libsignal.bootstrap()
+    register_engine_components()
+
+    from common.registry import Registry
+
+    from tsc_marl import paths
+    from tsc_marl.runner.train import parse_args
+
+    args = parse_args(["-a", agent, "-n", network])
+    with libsignal.sim_configs_untouched():
+        config, _ = resolve(args, config_patch)
+        build_interfaces(config)
+
+        from world.world_cityflow import World
+
+        cfg = paths.CONFIGS / "sim" / f"{network}.cfg"
+        world = World(str(cfg), thread_num=config["trainer"].get("thread", 4), interface="libsumo")
+        n = len(world.intersections) if n_agents is None else n_agents
+        agents = [Registry.mapping["model_mapping"][agent](world, rank) for rank in range(n)]
+        yield world, agents, config
