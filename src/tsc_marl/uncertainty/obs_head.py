@@ -300,6 +300,10 @@ def evaluate(fitted: Fitted, data: Loaded, sources: np.ndarray, scenarios=None) 
         s_std = sigma / fitted.y_std
         u_mov = movement_uncertainty(s_std, n_mov)
         bad = corrupted_movements(xt, xc, data.dead[name][tail], n_mov)
+        # BŁĘDNY odczyt = cecha faktycznie odjechała od prawdy. Martwy detektor na pustym
+        # pasie raportuje prawdziwe 0 — jest „popsuty", ale żadna głowa nie ma go czym
+        # wykryć (zero to wartość modalna). Detekcję liczymy więc też na samych błędnych.
+        wrong = corrupted_movements(xt, xc, np.zeros_like(data.dead[name][tail]), n_mov)
         u_max, _ = edge_uncertainty(u_mov, sources, "max")
         u_mean, edges = edge_uncertainty(u_mov, sources, "mean")
         bad_edge = np.stack([bad[:, i, sources[i] == j].any(-1) for i, j in edges], -1)
@@ -313,6 +317,8 @@ def evaluate(fitted: Fitted, data: Loaded, sources: np.ndarray, scenarios=None) 
             "rmse_input": float(np.sqrt(((xt - xc) ** 2).mean())),
             "rmse_mu": float(np.sqrt((err_mu**2).mean())),
             "corrupt_share": float(bad.mean()),
+            "wrong_share": float(wrong.mean()),
+            "auroc_wrong": auroc(u_mov[wrong], clean_u) if name != "clean" else float("nan"),
             "auroc_mov": auroc(u_mov[bad], clean_u) if name != "clean" else float("nan"),
             "auroc_edge_max": (
                 auroc(u_max[bad_edge], clean_edge[0]) if name != "clean" else float("nan")
@@ -338,9 +344,11 @@ def _gauss_series(res: dict[str, Any]) -> list[tuple[float, float]]:
 
 def gate(res: dict[str, Any], sep: dict[str, Any]) -> dict[str, Any]:
     gs = _gauss_series(res)
-    unseen = [res[n]["auroc_mov"] for n in UNSEEN if n in res]
-    seen = [res[n]["auroc_mov"] for n in ("gauss1", "gauss2", "mask0p25") if n in res]
-    drift = [res[n]["auroc_mov"] for n in res if n.startswith("drift")]
+    # kryteria na odczytach BŁĘDNYCH (patrz `evaluate`) — pytanie brzmi „czy głowa widzi
+    # zły odczyt", a nie „czy wie, że detektor jest martwy, gdy raportuje prawdę"
+    unseen = [res[n]["auroc_wrong"] for n in UNSEEN if n in res]
+    seen = [res[n]["auroc_wrong"] for n in ("gauss1", "gauss2", "mask0p25") if n in res]
+    drift = [res[n]["auroc_wrong"] for n in res if n.startswith("drift")]
     out = {
         "a_series": gs,
         "a_monotonic": [v for _, v in gs] == sorted(v for _, v in gs),
@@ -397,14 +405,16 @@ def to_markdown(res: dict[str, Any], g: dict[str, Any], cfg: ObsConfig, ood_res:
         f"{', '.join(cfg.train_scenarios)}. Ewaluacja na ogonie epizodu. u = σ w jednostkach "
         "odchylenia cechy na czystym; u ruchu = max po jego cechach (EP, demand).",
         "",
-        "| scenariusz | tren. | popsute ruchy | u średnie | AUROC ruch | AUROC krawędź (max) "
+        "| scenariusz | tren. | popsute ruchy | błędne ruchy | u średnie | AUROC ruch (popsute) "
+        "| AUROC ruch (błędne) | AUROC krawędź (max) "
         "| AUROC krawędź (mean) | pokrycie 90% | RMSE wejścia | RMSE μ |",
-        "|---|:-:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "|---|:-:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for name, r in res.items():
         lines.append(
             f"| {name} | {'x' if name in cfg.train_scenarios else ''} | {r['corrupt_share']:.1%} "
-            f"| {r['u_mean']:.3f} | {_fmt(r['auroc_mov'])} | {_fmt(r['auroc_edge_max'])} "
+            f"| {r['wrong_share']:.1%} | {r['u_mean']:.3f} | {_fmt(r['auroc_mov'])} "
+            f"| {_fmt(r['auroc_wrong'])} | {_fmt(r['auroc_edge_max'])} "
             f"| {_fmt(r['auroc_edge_mean'])} | {r['coverage90']:.1%} | {r['rmse_input']:.3f} "
             f"| {r['rmse_mu']:.3f} |"
         )
@@ -498,6 +508,13 @@ def _separation_findings(sep: dict[str, Any], labels: list[str]) -> list[str]:
         f"**{col_obs:+.3f}**.",
         f"* `u_ep`: przyrost od awarii **{row_ep:+.4f}**, od OOD **{col_ep:+.4f}**.",
     ]
+    if np.isfinite(col_obs) and col_obs < 0:
+        out.append(
+            "* `u_obs` SPADA na ruchu spoza treningu: σ głowy skaluje się z obciążeniem (mniej "
+            "pojazdów = mniejszy możliwy błąd odczytu), a zbiory OOD są lżejsze. Kierunek jest "
+            "nieszkodliwy dla fallbacku (brak fałszywych alarmów), ale próg na `u_obs` trzeba "
+            "liczyć względem σ przewidywanego na czystym, nie jako stałą bezwzględną."
+        )
     obs_ok = np.isfinite(row_obs) and row_obs > 3 * max(abs(col_obs), 1e-9)
     ep_ok = np.isfinite(col_ep) and col_ep > max(row_ep, 0)
     out.append(
@@ -517,6 +534,7 @@ def run(cfg: ObsConfig | None = None, *, network: str = "cityflow_jinan3x4_4ph")
     from tsc_marl.paths import RESULTS, RUNS  # noqa: PLC0415
     from tsc_marl.uncertainty import prototype as P  # noqa: PLC0415
 
+    P.cap_threads()
     cfg = cfg or ObsConfig()
     base = load(RUNS / "bc" / f"advancedmp__{network}__ep3" / "dataset.npz")
     n_mov = base.dead["clean"].shape[-1]

@@ -167,10 +167,12 @@ Wagi treningów żyją tylko na gliderze (kopie `runs/t1` na laptopie są bez `*
 
 ```bash
 git pull
-bash deploy/glider/noc.sh        # dwie kolejki w tle: GPU (ablacje) i CPU (T2 → T1)
+bash deploy/glider/noc.sh        # trzy kolejki w tle: gpu, cpu, t2
 ```
 
-Skrypt sprawdza `tsc doctor` i CUDA, rusza obie kolejki odporne na wylogowanie
+Kolejki: `gpu` trenuje rdzeń i ablacje, `cpu` trenuje baseline'y LibSignala, a `t2`
+czeka, aż obie skończą, i dopiero wtedy liczy ewaluacje pod awarią (potrzebuje ich wag),
+raporty T2 i `tsc table`. Skrypt sprawdza `tsc doctor` i CUDA, rusza kolejki odporne na wylogowanie
 i wypisuje, gdzie patrzeć (`runs/_suite_logs/noc_<data>/`). Wznowienie po przerwie
 to ta sama komenda: gotowe punkty są pomijane, a bieg przerwany na tej maszynie
 (martwy proces w statusie `running`) liczy się od nowa — `runlog` rozpoznaje go

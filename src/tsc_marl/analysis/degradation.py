@@ -37,6 +37,11 @@ COLORS = {
     "advancedcolight": "#eb6834",
     "efficientmp": "#1baf7a",
     "advancedmp": "#eda100",
+    # warianty actora z ablacji 1.6 (plan t2_ablations): sloty 5 i 7 palety, żeby
+    # nie pożyczać koloru Advanced-CoLighta ani reguł z t2_nomech (walidacja
+    # z rdzeniem: CVD ΔE ≥ 13,0, normal ≥ 27,5)
+    "gatppo_mean": "#e87ba4",
+    "gatppo_nognn": "#4a3aa7",
 }
 LABELS = {
     "gatppo": "rdzeń GAT+PPO+CTDE",
@@ -44,6 +49,8 @@ LABELS = {
     "efficientmp": "Efficient-MP",
     "advancedmp": "Advanced-MP",
     "fixedtime": "FixedTime",
+    "gatppo_mean": "actor mean-pool",
+    "gatppo_nognn": "actor bez GNN",
 }
 INK, INK2, MUTED = "#0b0b0b", "#52514e", "#898781"
 GRID, AXIS, SURFACE = "#e1e0d9", "#c3c2b7", "#fcfcfb"

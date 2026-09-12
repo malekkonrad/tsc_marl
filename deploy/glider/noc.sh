@@ -3,16 +3,17 @@
 #
 #     bash deploy/glider/noc.sh
 #
-# startuje DWIE kolejki w tle (odporne na wylogowanie) i od razu wraca:
-#   gpu — ablacje rdzenia 1.6 (entry: core, karta 0), siatka po siatce;
-#   cpu — T2 bez mechanizmu (potrzebuje wag z runs/t1, które są tylko tutaj),
-#         potem uczone baseline'y LibSignala (CoLight/PressLight/Advanced-CoLight).
-# Kolejność w kolejce CPU = priorytet: T2 rozstrzyga o fallbacku, T1 może poczekać.
+# startuje w tle (odporne na wylogowanie) TRZY kolejki i od razu wraca:
+#   gpu — treningi rdzenia i ablacji (entry: core, karta 0), siatka po siatce;
+#   cpu — treningi LibSignala (Advanced-CoLight, CoLight, PressLight), tylko CPU;
+#   t2  — ewaluacje pod awarią sensorów. CZEKA, aż gpu i cpu skończą, bo potrzebuje
+#         wag z tych treningów (inaczej nowe seedy byłyby pominięte jako „brak rodzica").
 #
-# WZNOWIENIE: to samo polecenie. Siatki pomijają punkty z aktualnym wynikiem,
-# a bieg przerwany na tej maszynie (martwy proces) liczy się od nowa.
+# Siatki pomijają punkty z aktualnym wynikiem, więc skrypt liczy tylko to, czego brak
+# (np. dograne seedy 3–4). WZNOWIENIE po przerwie: to samo polecenie — bieg przerwany
+# na tej maszynie (martwy proces w `running`) runlog liczy od nowa.
 #
-# Zmienne: CPU_J / GPU_J (ile punktów naraz), DRY=1 (tylko wypisz komendy).
+# Zmienne: CPU_J / GPU_J / T2_J (ile punktów naraz), DRY=1 (tylko wypisz komendy).
 set -u
 cd "$(dirname "$0")/../.."
 TSC=.venv/bin/tsc
@@ -20,8 +21,13 @@ N=$(nproc)
 # CityFlow bierze 4 wątki na symulację, torch dostaje 2 — stąd ~6 wątków na punkt
 CPU_J=${CPU_J:-$(( N / 6 > 2 ? N / 6 : 2 ))}
 GPU_J=${GPU_J:-2}
+T2_J=${T2_J:-$(( N / 5 > 2 ? N / 5 : 2 ))}
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-2}
 export MKL_NUM_THREADS=$OMP_NUM_THREADS
+
+GPU_SUITES="p1_gate p1_abl_meanpool p1_abl_nognn p1_abl_state_ep p1_abl_state_pressure p1_abl_state_queue"
+CPU_SUITES="p1_reference t1_learned t1_learned_paper"
+T2_PLANS="t2_nomech t2_ablations"
 
 run() {
   local rc=0
@@ -31,21 +37,31 @@ run() {
 }
 
 gpu_queue() {
-  for s in p1_abl_meanpool p1_abl_nognn p1_abl_state_ep p1_abl_state_pressure p1_abl_state_queue; do
-    run suite run "$s" -j "$GPU_J"
-  done
+  for s in $GPU_SUITES; do run suite run "$s" -j "$GPU_J"; done
+  touch "$LOG/gpu.done"
 }
 
 cpu_queue() {
-  run degrade run t2_nomech -j "$CPU_J"
-  run degrade report t2_nomech
-  run suite run t1_learned -j "$CPU_J"
-  run suite run t1_learned_paper -j "$CPU_J"
+  for s in $CPU_SUITES; do run suite run "$s" -j "$CPU_J"; done
+  touch "$LOG/cpu.done"
+}
+
+t2_queue() {
+  if [ -z "${DRY:-}" ]; then
+    echo "$(date '+%F %T')  czekam na koniec treningów (gpu.done + cpu.done)"
+    until [ -f "$LOG/gpu.done" ] && [ -f "$LOG/cpu.done" ]; do sleep 60; done
+  fi
+  for p in $T2_PLANS; do
+    run degrade run "$p" -j "$T2_J"
+    run degrade report "$p"
+  done
+  run table
 }
 
 case "${1:-}" in
-  _gpu) gpu_queue; exit ;;
-  _cpu) cpu_queue; exit ;;
+  _gpu) LOG=$2; gpu_queue; exit ;;
+  _cpu) LOG=$2; cpu_queue; exit ;;
+  _t2) LOG=$2; t2_queue; exit ;;
 esac
 
 if [ -z "${DRY:-}" ]; then
@@ -57,16 +73,18 @@ fi
 LOG=runs/_suite_logs/noc_$(date +%Y%m%d_%H%M)
 mkdir -p "$LOG"
 if [ -n "${DRY:-}" ]; then
-  bash "$0" _gpu; bash "$0" _cpu
+  bash "$0" _gpu "$LOG"; bash "$0" _cpu "$LOG"; bash "$0" _t2 "$LOG"
+  rm -rf "$LOG"
   exit
 fi
-setsid nohup bash "$0" _gpu > "$LOG/gpu.log" 2>&1 < /dev/null &
-sleep 20  # rozsunięcie startów obu kolejek (configs/sim/*.cfg — patrz suite.STAGGER_S)
-setsid nohup bash "$0" _cpu > "$LOG/cpu.log" 2>&1 < /dev/null &
+setsid nohup bash "$0" _gpu "$LOG" > "$LOG/gpu.log" 2>&1 < /dev/null &
+sleep 20  # rozsunięcie startów kolejek (configs/sim/*.cfg — patrz suite.STAGGER_S)
+setsid nohup bash "$0" _cpu "$LOG" > "$LOG/cpu.log" 2>&1 < /dev/null &
+setsid nohup bash "$0" _t2 "$LOG" > "$LOG/t2.log" 2>&1 < /dev/null &
 
 cat <<EOF
-Ruszyło: $N rdzeni, CPU_J=$CPU_J, GPU_J=$GPU_J, OMP_NUM_THREADS=$OMP_NUM_THREADS.
-Postęp:   tail -f $LOG/gpu.log $LOG/cpu.log
-Stan:     $TSC degrade status t2_nomech ; $TSC suite status t1_learned
+Ruszyło: $N rdzeni, GPU_J=$GPU_J, CPU_J=$CPU_J, T2_J=$T2_J, OMP_NUM_THREADS=$OMP_NUM_THREADS.
+Postęp:   tail -f $LOG/gpu.log $LOG/cpu.log $LOG/t2.log
+Stan:     $TSC suite status p1_gate ; $TSC degrade status t2_ablations
 Stop:     pkill -f 'deploy/glider/noc.sh' ; pkill -f 'tsc (suite|degrade) run'
 EOF

@@ -60,14 +60,41 @@ CONVERGED = 0.02
 # Krzywe uczenia bramki — obok raportu, żeby markdown linkował je ścieżką względną.
 FIGURES = RESULTS / "figures"
 
+# WARIANT biegu = sufiks `run_id` po `__s<seed>_y<yellow>`. Siatki z `overrides` (ablacje,
+# `p1_abl_*`) mają TEGO SAMEGO agenta, sieć, seed i yellow co rdzeń — różnią się tylko
+# odciskiem configu i sufiksem. Bez tej kolumny ablacje wmieszałyby się do wiersza rdzenia
+# w T1 i do strony `gatppo` w GATE, a werdykt bramki liczyłby się z 36 biegów zamiast 6.
+RUN_SUFFIX = re.compile(r"__s\d+_y\d+(?:__(?P<variant>.+))?$")
+
+# Ablacje rdzenia 1.6: wariant -> etykieta. "" = rdzeń z GATE (GAT, stan ATS).
+AGGREGATION = {"": "GAT (rdzeń)", "p1_abl_meanpool": "mean-pool (GraphSAGE)",
+               "p1_abl_nognn": "bez GNN (MLP)"}  # fmt: skip
+STATE = {"": "ATS (rdzeń)", "p1_abl_state_ep": "EP", "p1_abl_state_pressure": "pressure",
+         "p1_abl_state_queue": "queue"}  # fmt: skip
+
+
+def variant_of(run_id: str) -> str:
+    m = RUN_SUFFIX.search(run_id)
+    return (m.group("variant") or "") if m else ""
+
 
 def build_baseline_report(rows):
     """T1-baseline: nasze liczby obok literatury, osobno dla obu trybów raportowania.
-    To jest punkt odniesienia całej pracy — GATE Fazy 0."""
-    idx = {}
+    To jest punkt odniesienia całej pracy — GATE Fazy 0.
+
+    Metody uczone mają kilka seedów: komórka to ŚREDNIA po seedach (wcześniej słownik
+    trzymał ostatni wczytany bieg, czyli losowy seed). Biegi z wariantem (ablacje,
+    sanity) nie wchodzą — to nie jest ta sama metoda."""
+    acc = {}
     for r in rows:
+        if r.get("variant"):
+            continue
+        v = r.get("att_last10")
+        v = r.get("att") if v is None or v != v else v
         # yellow_length jest liczbą (parametry biegu mają typy, w odróżnieniu od CSV)
-        idx[(r["network"], r["agent"], r.get("yellow_length"))] = r
+        acc.setdefault((r["network"], r["agent"], r.get("yellow_length")), []).append(float(v))
+    idx = {k: {"att_last10": sum(v) / len(v), "att": sum(v) / len(v), "n": len(v)}
+           for k, v in acc.items()}  # fmt: skip
     out = [
         "# T1-baseline — punkt odniesienia pracy",
         "",
@@ -104,7 +131,10 @@ def build_baseline_report(rows):
                 continue
 
             def val(x):
-                return f"{float(x['att_last10'] or x['att']):.1f}" if x else "—"
+                if not x:
+                    return "—"
+                n = f" (n={x['n']})" if x["n"] > 1 else ""
+                return f"{float(x['att_last10']):.1f}{n}"
 
             ref = lit.get(agent)
             d = "—"
@@ -145,9 +175,13 @@ def training_results(exp):
     (np. awarię sensorów), a nie metodę. Wpuszczone do tabeli T1 udawałyby dodatkowe
     seedy tej samej metody i zaniżałyby albo zawyżały jej średnią."""
     df = exp.results(status="ok")
-    if df.empty or "parent_run" not in df.columns:
+    if df.empty:
         return df
-    return df[df["parent_run"].isna()]
+    if "parent_run" in df.columns:
+        df = df[df["parent_run"].isna()]
+    df = df.copy()
+    df["variant"] = df["run_id"].map(variant_of)
+    return df
 
 
 def _records(exp):
@@ -164,12 +198,16 @@ def build_table(exp):
         print("Brak policzonych biegów w runs/ — najpierw odpal runy.", file=sys.stderr)
         return
 
-    # `advancedmp` przy różnych W1 to różne metody, nie ten sam agent z rozrzutem
+    # `advancedmp` przy różnych W1 to różne metody, nie ten sam agent z rozrzutem;
+    # wariant (sufiks run_id) to też inna metoda — patrz RUN_SUFFIX
     df["label"] = df.apply(
         lambda r: (
-            f"{r['agent']} (W1={r['w1']})"
-            if r["agent"] == "advancedmp" and r.get("w1")
-            else r["agent"]
+            (
+                f"{r['agent']} (W1={r['w1']})"
+                if r["agent"] == "advancedmp" and r.get("w1")
+                else r["agent"]
+            )
+            + (f" [{r['variant']}]" if r["variant"] else "")
         ),
         axis=1,
     )
@@ -198,6 +236,7 @@ def build_table(exp):
         )
     build_baseline_report(_records(exp))
     build_gate_report(exp)
+    build_ablation_report(exp)
     table = "\n".join(lines)
     RESULTS.mkdir(exist_ok=True)
     (RESULTS / "t1_table.md").write_text(
@@ -257,6 +296,7 @@ def build_gate_report(exp):
         df["agent"].isin([GATE_REFERENCE, GATE_CORE])
         & (df["yellow_length"] == GATE_YELLOW)
         & df["network"].isin(GATE_NETWORKS)
+        & (df["variant"] == "")  # ablacje mają tego samego agenta — patrz RUN_SUFFIX
     ]
     missing = [
         f"{agent}@{net}"
@@ -470,3 +510,82 @@ def build_gate_report(exp):
     RESULTS.mkdir(exist_ok=True)
     (RESULTS / "p1_gate.md").write_text("\n".join(out))
     print("\n".join(out))
+
+
+# ------------------------------------------------------------------ ablacje 1.6
+
+
+def _ablation_rows(df, variants: dict[str, str], net: str):
+    """(etykieta, wartości att_last10 po seedach) dla wariantów obecnych w danych."""
+    out = []
+    for variant, label in variants.items():
+        vals = df[(df["network"] == net) & (df["variant"] == variant)]["att_last10"]
+        vals = vals.astype(float).dropna().tolist()
+        if vals:
+            out.append((label, variant, vals))
+    return out
+
+
+def build_ablation_report(exp):
+    """Ablacje rdzenia 1.6 -> `results/p1_ablations.md`. Odniesienie = biegi GATE
+    (wariant pusty), więc Δ mierzy dokładnie jedną zmianę względem rdzenia."""
+    import numpy as np
+    from scipy.stats import ttest_ind
+
+    df = training_results(exp)
+    if df.empty:
+        return
+    core = df[(df["agent"] == GATE_CORE) & (df["yellow_length"] == GATE_YELLOW)]
+    known = set(AGGREGATION) | set(STATE)
+    if not (core["variant"].isin(known - {""})).any():
+        return
+    refs = df[(df["yellow_length"] == GATE_YELLOW) & (df["variant"] == "")
+              & df["agent"].isin(["advancedcolight", "efficientmp", "advancedmp"])]  # fmt: skip
+
+    def fmt(vals):
+        sd = f" ± {np.std(vals, ddof=1):.1f}" if len(vals) > 1 else ""
+        return f"{np.mean(vals):.1f}{sd}"
+
+    out = [
+        "# Ablacje rdzenia (1.6) — GAT+PPO+CTDE",
+        "",
+        f"Wygenerowane: {datetime.now():%Y-%m-%d %H:%M}. Tryb realistyczny (yellow=5), "
+        "ATT = średnia z 10 ostatnich testów, mean ± std po seedach. Każdy wariant zmienia "
+        "JEDNĄ rzecz względem rdzenia z GATE; krytyk zostaje GAT-em we wszystkich "
+        "(ablacja pyta o decyzję actora). Δ > 0 = gorzej niż rdzeń.",
+        "",
+    ]
+    for net in GATE_NETWORKS:
+        sub = core[core["network"] == net]
+        base = sub[sub["variant"] == ""]["att_last10"].astype(float).dropna().tolist()
+        if not base:
+            continue
+        out += [f"## {net}", ""]
+        for title, variants in (("Agregacja sąsiadów w actorze", AGGREGATION),
+                                ("Reprezentacja stanu", STATE)):  # fmt: skip
+            rows = _ablation_rows(sub, variants, net)
+            out += [f"### {title}", "", "| wariant | ATT | Δ vs rdzeń | p (Welch) | n |",
+                    "|---|---:|---:|---:|:-:|"]  # fmt: skip
+            for label, variant, vals in rows:
+                if variant == "":
+                    out.append(f"| **{label}** | {fmt(vals)} | — | — | {len(vals)} |")
+                    continue
+                d = np.mean(vals) / np.mean(base) - 1
+                p = ttest_ind(vals, base, equal_var=False).pvalue if len(vals) > 1 else float("nan")
+                out.append(f"| {label} | {fmt(vals)} | {d:+.2%} | {_p(p)} | {len(vals)} |")
+            out.append("")
+        ref_rows = []
+        for a in ("advancedcolight", "efficientmp", "advancedmp"):
+            vals = refs[(refs["network"] == net) & (refs["agent"] == a)]["att_last10"]
+            if not vals.empty:
+                ref_rows.append(f"{a}: {fmt(vals.astype(float).tolist())}")
+        if ref_rows:
+            out += ["Odniesienie (ten sam protokół): " + " · ".join(ref_rows) + ".", ""]
+    out += [
+        "## Jak czytać",
+        "",
+        "* p z testu Welcha przy n=3 to orientacja, nie dowód — ta sama konwencja co w GATE.",
+        "* Efficient-MP i Advanced-MP obok: odpowiedź na „po co GNN, skoro MaxPressure "
+        "wystarcza” — wariant bez GNN powinien lądować między nimi a rdzeniem.",
+    ]
+    (RESULTS / "p1_ablations.md").write_text("\n".join(out) + "\n")

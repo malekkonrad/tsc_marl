@@ -15,4 +15,4 @@ ngpu: "0"
 
 grid:
   network: [cityflow_jinan3x4_4ph, cityflow_hangzhou4x4_4ph]
-  seed: [0, 1, 2]
+  seed: [0, 1, 2, 3, 4]   # 3–4 dograne pod Fazę 3 (protokół: 5 seedów w robustness)

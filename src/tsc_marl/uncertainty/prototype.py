@@ -60,6 +60,19 @@ OOD_GROUPS = {
 TIE_EPS = 1e-6
 
 
+def cap_threads(limit: int = 4) -> int:
+    """Wątki torcha dla prototypów na CPU. Sieci mają kilkadziesiąt tysięcy wag, a batch
+    to 32 kroki — przy domyślnych N wątkach synchronizacja kosztuje więcej niż rachunek,
+    a dwa takie procesy obok siebie (albo obok treningu) kręcą się w aktywnym oczekiwaniu
+    OpenMP: 2026-09-11 bramki, które liczą się w minuty, stały 15 h na 800% CPU.
+    Jawne OMP_NUM_THREADS w środowisku wygrywa."""
+    import os  # noqa: PLC0415
+
+    n = int(os.environ.get("OMP_NUM_THREADS") or min(limit, os.cpu_count() or 1))
+    torch.set_num_threads(n)
+    return n
+
+
 @dataclass(frozen=True)
 class TrainConfig:
     mode: str = "edl"  # "edl" (deployowana) albo "softmax" (baza pod MC-dropout)
@@ -612,6 +625,7 @@ def run(cfg: TrainConfig | None = None, *, network: str = "cityflow_jinan3x4_4ph
     from tsc_marl.paths import RESULTS, RUNS
 
     libsignal.bootstrap()  # `heads` -> `core.nets` ciągnie `agent.colight` z submodułu
+    cap_threads()
     cfg = cfg or TrainConfig()
     base = RUNS / "bc" / f"advancedmp__{network}__ep3"
     data = load(base / "dataset.npz")

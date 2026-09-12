@@ -1,6 +1,6 @@
 # GATE Fazy 1 — rdzeń (GAT + PPO + CTDE) vs Advanced-CoLight
 
-Wygenerowane: 2026-09-11 18:08. Suity `p1_reference` + `p1_gate`, tryb realistyczny (yellow=5), protokół `configs/tsc/thesis_protocol.yml`.
+Wygenerowane: 2026-09-12 10:33. Suity `p1_reference` + `p1_gate`, tryb realistyczny (yellow=5), protokół `configs/tsc/thesis_protocol.yml`.
 ATT = średnia z 10 ostatnich epizodów testowych biegu; niżej średnia ± std po seedach.
 Kod jednakowy dla wszystkich biegów: libsignal `5bcd823`, tsc_marl `544112a`; maszyna: `glider-B760-Pro-RS`.
 
