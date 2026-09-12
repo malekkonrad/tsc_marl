@@ -25,7 +25,7 @@ from typing import Any
 
 from tsc_marl import libsignal
 from tsc_marl.paths import REPO_ROOT, RUNS
-from tsc_marl.robustness.degrade import EXPERIMENT, Plan, Unit, load_plan
+from tsc_marl.robustness.degrade import EXPERIMENT, LEARNED, Plan, Unit, load_plan
 
 
 def experiment():
@@ -34,17 +34,40 @@ def experiment():
     return Experiment(EXPERIMENT, root=RUNS)
 
 
-def parent_view(plan: Plan, unit: Unit):
-    """RunView rodzica z `runs/t1` albo None (sterownik bez treningu)."""
+def parent_views(plan: Plan, unit: Unit) -> list[tuple[str, Any]]:
+    """[(run_id, RunView albo None)] — rodzice z `runs/t1`; pusta lista dla reguł.
+    None = brak biegu albo bieg nieskończony (`status != ok`)."""
     from tsc_marl.libsignal import experiment as t1  # noqa: PLC0415
 
-    pid = plan.parent_id(unit)
-    if pid is None:
-        return None
-    view = next((r for r in t1.experiment().runs() if r.id == pid), None)
-    if view is None or view.status != "ok":
-        return None
-    return view
+    ids = plan.parent_ids(unit)
+    if not ids:
+        return []
+    runs = {r.id: r for r in t1.experiment().runs()}
+    return [(pid, runs[pid] if pid in runs and runs[pid].status == "ok" else None) for pid in ids]
+
+
+def parent_view(plan: Plan, unit: Unit):
+    """Pierwszy rodzic (ten, którego polityka steruje) albo None."""
+    views = parent_views(plan, unit)
+    return views[0][1] if views else None
+
+
+def resolve_parents(plan: Plan, unit: Unit) -> tuple[list[Any], list[Path], str | None]:
+    """-> (rodzice, checkpointy, powód braku). Powód None = wszystko na miejscu."""
+    views = parent_views(plan, unit)
+    missing = [pid for pid, v in views if v is None]
+    if missing:
+        return [], [], f"brak biegu {', '.join(missing)}"
+    parents = [v for _, v in views]
+    ckpts = [checkpoint(plan, unit, p) for p in parents]
+    lost = [str(c) for c in ckpts if c is None or not c.is_file()]
+    if lost:
+        return parents, ckpts, f"brak wag {', '.join(lost)}"
+    if plan.kind(unit.controller) == "ensemble":
+        hashes = {p.params.get("config_hash") for p in parents}
+        if len(hashes) > 1:
+            return parents, ckpts, "członkowie ensemble mają różne configi (architektury)"
+    return parents, ckpts, None
 
 
 def checkpoint(plan: Plan, unit: Unit, parent) -> Path | None:
@@ -54,19 +77,22 @@ def checkpoint(plan: Plan, unit: Unit, parent) -> Path | None:
     if parent is None:
         return None
     kind = plan.kind(unit.controller)
-    if kind == "policy":
+    if kind in ("policy", "ensemble"):
         return parent.path / "engine" / "core.pt"
     from tsc_marl.runner.evaluate import available_checkpoints, engine_run_dir  # noqa: PLC0415
 
     agent = plan.agent(unit.controller)
-    model_dir = engine_run_dir(parent.path, "cityflow", agent, unit.network, "test") / "model"
+    # sieć RODZICA, nie ewaluacji: w planie OOD polityka z HangZhou jedzie po innym ruchu,
+    # a LibSignal trzymał jej wagi pod nazwą sieci treningowej
+    net = parent.params.get("network", unit.network)
+    model_dir = engine_run_dir(parent.path, "cityflow", agent, net, "test") / "model"
     saved = available_checkpoints(model_dir)
     if not saved:
         return model_dir / "<brak>.pt"
     return saved[max(saved)][0]
 
 
-def unit_params(plan: Plan, unit: Unit, parent) -> dict[str, Any]:
+def unit_params(plan: Plan, unit: Unit, parents: list[Any]) -> dict[str, Any]:
     """Tożsamość biegu T2. Liczona tą samą funkcją przez rodzica (skip-if-done)
     i dziecko (rejestracja) — dwie kopie rozjechałyby się przy pierwszej zmianie."""
     from runlog import params_hash  # noqa: PLC0415
@@ -82,10 +108,13 @@ def unit_params(plan: Plan, unit: Unit, parent) -> dict[str, Any]:
         "draws": plan.draws,
         "scenarios": [s.as_dict() for s in plan.scenarios_for(unit)],
     }
-    if parent is not None:
+    if parents:
         # uczony: tożsamość niesie rodzic (jego odcisk obejmuje config i trening)
-        params["parent_run"] = parent.id
-        params["parent_params_hash"] = parent.meta.get("params_hash")
+        params["parent_run"] = parents[0].id
+        params["parent_params_hash"] = parents[0].meta.get("params_hash")
+        if len(parents) > 1:
+            params["ensemble_runs"] = [p.id for p in parents]
+            params["ensemble_hashes"] = [p.meta.get("params_hash") for p in parents]
     else:
         # reguła: tożsamość niesie jej config (np. `w1` Advanced-MP)
         args = parse_args(["-a", params["agent"], "-n", unit.network])
@@ -110,7 +139,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def build_controller(plan: Plan, unit: Unit, env, config, agents, ckpt: Path | None):
+def build_controller(plan: Plan, unit: Unit, env, config, agents, ckpts: list[Path]):
     import numpy as np  # noqa: PLC0415
     import torch  # noqa: PLC0415
 
@@ -120,18 +149,24 @@ def build_controller(plan: Plan, unit: Unit, env, config, agents, ckpt: Path | N
     kind = plan.kind(unit.controller)
     feats = env.features
     model = config["model"]
-    if kind == "policy":
+    if kind in ("policy", "ensemble"):
         from tsc_marl.core.nets import ActorCritic  # noqa: PLC0415
 
-        ac = ActorCritic.from_registry(feats.ob_length, feats.n_phases)
-        payload = torch.load(ckpt, map_location="cpu", weights_only=True)
-        ac.actor.load_state_dict(payload["actor"])
-        return c.PolicyController(ac.actor, env.graph.edge_index, name=unit.controller)
+        actors = []
+        for path in ckpts:
+            ac = ActorCritic.from_registry(feats.ob_length, feats.n_phases)
+            ac.actor.load_state_dict(
+                torch.load(path, map_location="cpu", weights_only=True)["actor"]
+            )
+            actors.append(ac.actor)
+        if kind == "ensemble":
+            return c.EnsembleController(actors, env.graph.edge_index, name=unit.controller)
+        return c.PolicyController(actors[0], env.graph.edge_index, name=unit.controller)
     if kind == "colight":
         (agent,) = agents
         if agent.ob_length != feats.ob_length:
             raise SystemExit(f"ob_length agenta {agent.ob_length} != stanu {feats.ob_length}")
-        agent.model.load_state_dict(torch.load(ckpt, map_location="cpu"))
+        agent.model.load_state_dict(torch.load(ckpts[0], map_location="cpu"))
         agent.model.eval()
         order = world_order(env.graph, env.world)
         return c.ColightController(
@@ -165,22 +200,17 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(f"plan '{plan.name}' nie ma sterownika '{unit.controller}'")
     set_global_seed(unit.seed)
 
-    parent = parent_view(plan, unit)
     kind = plan.kind(unit.controller)
-    if kind in ("policy", "colight") and parent is None:
-        raise SystemExit(f"brak biegu-rodzica {plan.parent_id(unit)} ze statusem ok w runs/t1")
-    ckpt = checkpoint(plan, unit, parent)
-    if ckpt is not None and not ckpt.is_file():
-        raise SystemExit(
-            f"brak checkpointu {ckpt} — biegi z glidera trzeba zsynchronizować RAZEM z wagami"
-        )
+    parents, ckpts, why = resolve_parents(plan, unit)
+    if kind in LEARNED and why:
+        raise SystemExit(f"{why} — biegi z glidera trzeba zsynchronizować RAZEM z wagami")
 
     patch: dict[str, Any] = {"model": {}, "trainer": {"yellow_length": plan.yellow}}
-    if parent is not None:
-        resolved = yaml.safe_load((parent.path / "config.resolved.yml").read_text())
+    if parents:
+        resolved = yaml.safe_load((parents[0].path / "config.resolved.yml").read_text())
         patch["model"].update(resolved["model"])
     patch["model"]["graphic"] = True  # TrafficEnv potrzebuje grafu także dla reguł
-    params = unit_params(plan, unit, parent)
+    params = unit_params(plan, unit, parents)
 
     from tsc_marl.core.features import StateBuilder  # noqa: PLC0415
     from tsc_marl.core.graph import RoadNetGraph  # noqa: PLC0415
@@ -204,7 +234,7 @@ def main(argv: list[str] | None = None) -> None:
             return StateBuilder.from_registry(world, order, failure=spec)
 
         env = TrafficEnv(world, graph, make(None), loop.action_interval)
-        controller = build_controller(plan, unit, env, config, agents, ckpt)
+        controller = build_controller(plan, unit, env, config, agents, ckpts)
 
         exp = experiment()
         with exp.start(
@@ -212,7 +242,13 @@ def main(argv: list[str] | None = None) -> None:
         ) as run:
 
             def log(row):
-                run.log(step=row["draw"], split=row["scenario"], **{m: row[m] for m in METRICS})
+                extra = {k: v for k, v in row.items() if k.startswith("ens_")}
+                run.log(
+                    step=row["draw"],
+                    split=row["scenario"],
+                    **{m: row[m] for m in METRICS},
+                    **extra,
+                )
                 print(
                     f"  {row['scenario']:28s} los {row['draw']}  ATT {row['att']:7.1f}", flush=True
                 )
@@ -223,7 +259,7 @@ def main(argv: list[str] | None = None) -> None:
             )  # fmt: skip
             run.result(
                 **summarize(rows),
-                checkpoint=str(ckpt.relative_to(REPO_ROOT)) if ckpt else None,
+                checkpoint=str(ckpts[0].relative_to(REPO_ROOT)) if ckpts else None,
                 plan=plan.name,
             )
     print(f"runlog: {run.path}")
@@ -244,15 +280,12 @@ def run_plan(plan: Plan, jobs: int = 1, replace: bool = False, stagger: float = 
     todo: list[Unit] = []
     print(f"plan '{plan.name}' ({len(plan.scenarios)} scenariuszy, {plan.draws} losowań)")
     for unit in plan.units():
-        parent = parent_view(plan, unit)
-        if plan.kind(unit.controller) in ("policy", "colight"):
-            ckpt = checkpoint(plan, unit, parent)
-            if parent is None or ckpt is None or not ckpt.is_file():
-                why = "brak biegu" if parent is None else f"brak wag ({ckpt})"
-                print(f"  {unit.label()}  POMIJAM — {why}: {plan.parent_id(unit)}")
-                licznik["brak rodzica"] += 1
-                continue
-        if not replace and exp.is_done(plan.run_id(unit), unit_params(plan, unit, parent)):
+        parents, _, why = resolve_parents(plan, unit)
+        if plan.kind(unit.controller) in LEARNED and why:
+            print(f"  {unit.label()}  POMIJAM — {why}")
+            licznik["brak rodzica"] += 1
+            continue
+        if not replace and exp.is_done(plan.run_id(unit), unit_params(plan, unit, parents)):
             print(f"  {unit.label()}  pomijam (jest wynik)")
             licznik["pominięte"] += 1
             continue

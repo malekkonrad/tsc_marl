@@ -179,6 +179,17 @@ to ta sama komenda: gotowe punkty są pomijane, a bieg przerwany na tej maszynie
 po zapisanym `pid`. `DRY=1` tylko wypisuje komendy; `CPU_J`/`GPU_J` zmieniają
 równoległość.
 
+**Test gałęzi epistemic — po zakończeniu `noc.sh`:**
+
+```bash
+bash deploy/glider/ood.sh        # plan t2_ood w tle; odmówi startu, gdy noc.sh jeszcze liczy
+```
+
+Liczy zamrożone polityki, Advanced-CoLighta, reguły i ensemble 5 actorów rdzenia na ruchu
+treningowym, lżejszym (JiNan ×0,25, inny wzorzec) i cięższym (realny HangZhou 5816, ×2,3
+pojazdów). Werdykt w `results/t2_ood.md`: czy polityka przegrywa z MaxPressure na nowym
+ruchu i czy rozbieżność actorów rośnie tam mocniej niż pod szumem detektorów.
+
 Nie licz tego samego `run_id` na obu maszynach — przy synchronizacji jeden katalog
 nadpisze drugi. Po liczeniu na gliderze przenieś wyniki razem z wagami:
 

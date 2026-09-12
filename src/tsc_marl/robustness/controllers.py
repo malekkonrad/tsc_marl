@@ -143,3 +143,55 @@ class ColightController:
 
     def act(self, obs: np.ndarray) -> np.ndarray:
         return np.asarray(self.agent.get_action(obs, None, test=True), dtype=np.int64)
+
+
+class EnsembleController:
+    """Kilka actorów rdzenia (różne seedy): decyduje PIERWSZY, pozostali tylko głosują.
+
+    Rozbieżność ich rozkładów nad fazami to epistemic w samej polityce RL — bez
+    dodatkowego treningu i bez EDL. Ta sama dekompozycja co BALD i ensemble z 2.0:
+    MI = H(średniego rozkładu) − średnia H(rozkładów). Obok odsetek członków, którzy
+    wybraliby inną fazę niż decydujący — prostsza, łatwa do opisania miara.
+
+    Decyduje jeden seed, a nie większość: pytamy, czy rozbieżność WYKRYWA kłopoty
+    wdrożonej polityki, więc trajektoria ma być trajektorią tej polityki."""
+
+    state_independent = False
+
+    def __init__(self, actors, edge_index: torch.Tensor, name: str = "gatppo_ens") -> None:
+        if len(actors) < 2:
+            raise ValueError("ensemble potrzebuje co najmniej dwóch actorów")
+        self.actors = [a.eval() for a in actors]
+        self.edge_index = edge_index
+        self.name = name
+        self.reset_stats()
+
+    def reset_stats(self) -> None:
+        self._mi: list[np.ndarray] = []
+        self._disagree: list[np.ndarray] = []
+        self._aleatoric: list[np.ndarray] = []
+
+    @torch.no_grad()
+    def act(self, obs: np.ndarray) -> np.ndarray:
+        x = torch.from_numpy(np.asarray(obs, dtype=np.float32))
+        probs = torch.softmax(torch.stack([a(x, self.edge_index) for a in self.actors]), -1)
+        mean = probs.mean(0)  # [N, P]
+        total = -(mean * torch.log(mean + 1e-10)).sum(-1)
+        aleatoric = -(probs * torch.log(probs + 1e-10)).sum(-1).mean(0)
+        votes = probs.argmax(-1)  # [K, N]
+        driver = votes[0]
+        self._mi.append((total - aleatoric).clamp_min(0).numpy())
+        self._aleatoric.append(aleatoric.numpy())
+        self._disagree.append((votes[1:] != driver).float().mean(0).numpy())
+        return driver.numpy().astype(np.int64)
+
+    def episode_stats(self) -> dict[str, float]:
+        if not self._mi:
+            return {}
+        mi = np.concatenate(self._mi)
+        return {
+            "ens_mi": float(mi.mean()),
+            "ens_mi_p90": float(np.quantile(mi, 0.9)),
+            "ens_aleatoric": float(np.concatenate(self._aleatoric).mean()),
+            "ens_disagree": float(np.concatenate(self._disagree).mean()),
+        }

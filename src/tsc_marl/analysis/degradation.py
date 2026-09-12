@@ -51,6 +51,7 @@ LABELS = {
     "fixedtime": "FixedTime",
     "gatppo_mean": "actor mean-pool",
     "gatppo_nognn": "actor bez GNN",
+    "gatppo_ens": "ensemble 5 actorów (decyduje seed 0)",
 }
 INK, INK2, MUTED = "#0b0b0b", "#52514e", "#898781"
 GRID, AXIS, SURFACE = "#e1e0d9", "#c3c2b7", "#fcfcfb"
@@ -66,8 +67,8 @@ FAMILIES = (
 )  # fmt: skip
 
 
-def load(plan: Plan):
-    """Długa ramka: controller, network, seed, scenario, draw, att, throughput."""
+def load(plan: Plan, metrics: tuple[str, ...] = ("att", "throughput")):
+    """Długa ramka: controller, network, seed, scenario, draw + kolumny `metrics`."""
     import pandas as pd  # noqa: PLC0415
 
     from runlog import Experiment  # noqa: PLC0415
@@ -81,7 +82,7 @@ def load(plan: Plan):
         if not path.is_file():
             continue
         m = pd.read_csv(path)
-        m = m[m["metric"].isin(["att", "throughput"])]
+        m = m[m["metric"].isin(list(metrics))]
         wide = m.pivot_table(index=["split", "step"], columns="metric", values="value")
         wide = wide.reset_index().rename(columns={"split": "scenario", "step": "draw"})
         p = run.params
@@ -277,6 +278,8 @@ def plot(plan: Plan, agg, network: str, path: Path) -> Path | None:
     specs = _spec_by_slug(plan)
     families = [(t, [s for s in plan.scenarios if f(s)]) for t, f in FAMILIES]
     families = [(t, s) for t, s in families if s]
+    if not families:
+        return None
     ft = sub[(sub["controller"] == "fixedtime") & (sub["scenario"] == "clean")]
     ft_att = float(ft["att_mean"].iloc[0]) if len(ft) else None
 

@@ -18,6 +18,7 @@ wyłącznie tym, co zrobił sterownik.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,7 +39,18 @@ KINDS = {
     "advancedmp": "pressure",
     "fixedtime": "fixed",
 }
-LEARNED = ("policy", "colight")
+#: `ensemble` = kilka actorów rdzenia naraz: decyduje pierwszy, reszta głosuje — rozbieżność
+#: ich rozkładów to epistemic W SAMEJ POLITYCE RL (test gałęzi epistemic, plan t2_ood).
+LEARNED = ("policy", "colight", "ensemble")
+#: Sufiks wariantu ruchu w nazwie sieci (`_d0p25`, `_d1p5`, `_r2000`, `_r5816`). `{base}`
+#: w szablonie rodzica = sieć bez sufiksu, czyli sieć, NA KTÓREJ polityka się uczyła.
+VARIANT_SUFFIX = re.compile(r"_(?:d\d+(?:p\d+)?|r\d+)$")
+
+
+def base_network(network: str) -> str:
+    return VARIANT_SUFFIX.sub("", network)
+
+
 METRICS = ("att", "throughput", "queue", "delay", "reward")
 
 
@@ -78,6 +90,8 @@ class Plan:
         return self.controllers[controller].get("agent", controller)
 
     def kind(self, controller: str) -> str:
+        if "ensemble" in self.controllers[controller]:
+            return "ensemble"
         return KINDS[self.agent(controller)]
 
     def units(self) -> list[Unit]:
@@ -86,23 +100,39 @@ class Plan:
         out = []
         for net in self.networks:
             for label, spec in self.controllers.items():
-                seeds = spec.get("seeds", [0]) if self.kind(label) in LEARNED else [0]
+                kind = self.kind(label)
+                if kind == "ensemble":
+                    seeds = [spec["ensemble"][0]]  # jeden punkt: seed, który podejmuje decyzje
+                elif kind in LEARNED:
+                    seeds = spec.get("seeds", [0])
+                else:
+                    seeds = [0]
                 out += [Unit(label, net, int(s)) for s in seeds]
         return out
 
+    def parent_ids(self, unit: Unit) -> list[str]:
+        """Biegi treningowe w `runs/t1`, z których bierzemy checkpointy — jeden dla
+        polityki, kilka dla ensemble (pierwszy = ten, który decyduje)."""
+        kind = self.kind(unit.controller)
+        if kind not in LEARNED:
+            return []
+        spec = self.controllers[unit.controller]
+        template = spec.get("parent", "{agent}__{network}__s{seed}_y{yellow}")
+        seeds = spec["ensemble"] if kind == "ensemble" else [unit.seed]
+        return [
+            template.format(
+                agent=self.agent(unit.controller),
+                network=unit.network,
+                base=base_network(unit.network),
+                seed=s,
+                yellow=self.yellow,
+            )
+            for s in seeds
+        ]
+
     def parent_id(self, unit: Unit) -> str | None:
-        """Bieg treningowy w `runs/t1`, z którego bierzemy checkpoint."""
-        if self.kind(unit.controller) not in LEARNED:
-            return None
-        template = self.controllers[unit.controller].get(
-            "parent", "{agent}__{network}__s{seed}_y{yellow}"
-        )
-        return template.format(
-            agent=self.agent(unit.controller),
-            network=unit.network,
-            seed=unit.seed,
-            yellow=self.yellow,
-        )
+        ids = self.parent_ids(unit)
+        return ids[0] if ids else None
 
     def run_id(self, unit: Unit) -> str:
         return f"{unit.controller}__{unit.network}__s{unit.seed}_y{self.yellow}__{self.name}"
@@ -143,9 +173,13 @@ def load_plan(path: str | Path) -> Plan:
         draws=int(raw.get("draws", 5)),
         timeout=int(raw.get("timeout", 7200)),
     )
-    for label in plan.controllers:
+    for label, spec in plan.controllers.items():
         if plan.agent(label) not in KINDS:
             raise SystemExit(f"plan '{p.name}': nieznany sterownik '{plan.agent(label)}'")
+        if "ensemble" in spec and KINDS[plan.agent(label)] != "policy":
+            raise SystemExit(f"plan '{p.name}': ensemble tylko z actorów rdzenia ('{label}')")
+        if "ensemble" in spec and len(spec["ensemble"]) < 2:
+            raise SystemExit(f"plan '{p.name}': ensemble '{label}' potrzebuje ≥ 2 seedów")
     slugs = [slug(s) for s in plan.scenarios]
     if len(set(slugs)) != len(slugs):
         raise SystemExit(f"plan '{p.name}': zdublowane scenariusze {slugs}")
@@ -178,9 +212,13 @@ def evaluate(
         n = draws if spec.active else 1
         for draw in range(n):
             obs = env.reset(draw)
+            if hasattr(controller, "reset_stats"):
+                controller.reset_stats()
             for _ in range(decisions):
                 obs, _, _ = env.step(controller.act(obs))
             row: dict[str, Any] = {"scenario": slug(spec), "draw": draw, **env.metrics()}
+            if hasattr(controller, "episode_stats"):
+                row.update(controller.episode_stats())
             sensors = getattr(env.features, "sensors", None)
             row["n_broken"] = len(sensors.broken) if sensors is not None else 0
             rows.append(row)
@@ -196,8 +234,9 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, float]:
     for r in rows:
         by.setdefault(r["scenario"], []).append(r)
     for name, group in by.items():
-        for metric in ("att", "throughput"):
-            out[f"{metric}__{name}"] = sum(r[metric] for r in group) / len(group)
+        for metric in ("att", "throughput", "ens_mi", "ens_disagree"):
+            if metric in group[0]:
+                out[f"{metric}__{name}"] = sum(r[metric] for r in group) / len(group)
     if "att__clean" in out:
         out["att"] = out["att__clean"]
     return out

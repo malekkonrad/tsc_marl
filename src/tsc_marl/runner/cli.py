@@ -233,6 +233,17 @@ def degrade_status(plan: str = typer.Argument(...)) -> None:
         print(f"{w['run_id']:64s} {w['status']:8s} {att:>7s}  ← {w['rodzic']}")
 
 
+@degrade_app.command("ood")
+def degrade_ood(plan: str = typer.Argument("t2_ood")) -> None:
+    """Test gałęzi epistemic: polityka vs MaxPressure na nowym ruchu + rozbieżność ensemble."""
+    from tsc_marl import libsignal
+    from tsc_marl.analysis import ood
+    from tsc_marl.robustness.degrade import load_plan
+
+    libsignal.bootstrap()
+    print(ood.main(load_plan(plan)))
+
+
 @degrade_app.command("report")
 def degrade_report(plan: str = typer.Argument("t2_nomech")) -> None:
     """Tabela i krzywe degradacji z policzonych biegów -> results/<plan>.md."""
