@@ -51,6 +51,10 @@ UNSEEN = ("gauss3p5", "gauss4", "urand3p5", "mask0p5", "mask0p25_intersection")
 class ObsConfig:
     window: int = 4
     neighbors: bool = True
+    #: Cechy TRWAŁOŚCI odczytu w oknie: jaki ułamek okna cecha stała w miejscu i jaki była
+    #: dokładnie zerem. Martwy detektor z podstawieniem `zero` zostawia ślad właśnie w czasie
+    #: (utknięcie), a nie w pojedynczej wartości — zero jest na czystym wartością modalną.
+    persistence: bool = False
     hidden: int = 128
     epochs: int = 60
     lr: float = 1e-3
@@ -86,11 +90,27 @@ def neighbor_matrix(edge_index: np.ndarray, n: int) -> np.ndarray:
     return np.divide(a, deg, out=np.zeros_like(a), where=deg > 0)
 
 
-def build_inputs(x: np.ndarray, win: np.ndarray, adj: np.ndarray | None) -> np.ndarray:
-    """[T, N, F] -> [T, N, k·F (+F)] — okno własnych odczytów (+ średnia sąsiadów)."""
+def persistence_features(x: np.ndarray, win: np.ndarray, n_feat: int) -> np.ndarray:
+    """[T, N, 2·n_feat]: dla każdej cechy ruchu ułamek kroków okna BEZ ZMIANY wartości
+    i ułamek odczytów DOKŁADNIE ZEROWYCH. Na początku epizodu okno jest przycięte
+    (powtórzone indeksy), więc „bez zmiany" rośnie tam sztucznie — tak samo na czystym
+    i na popsutym wejściu, więc nie zdradza awarii."""
+    xs = np.stack([x[win[:, j]][..., :n_feat] for j in range(win.shape[1])])  # [k, T, N, f]
+    same = (np.abs(np.diff(xs, axis=0)) < 1e-6).mean(0) if len(xs) > 1 else np.zeros_like(xs[0])
+    zero = (np.abs(xs) < 1e-6).mean(0)
+    return np.concatenate([same, zero], -1)
+
+
+def build_inputs(
+    x: np.ndarray, win: np.ndarray, adj: np.ndarray | None, n_persist: int = 0
+) -> np.ndarray:
+    """[T, N, F] -> [T, N, k·F (+F) (+2·n_persist)] — okno własnych odczytów, średnia
+    sąsiadów upstream i (opcjonalnie) cechy trwałości pierwszych `n_persist` cech."""
     parts = [x[win[:, j]] for j in range(win.shape[1])]
     if adj is not None:
         parts.append(np.einsum("ij,tjf->tif", adj, x))
+    if n_persist:
+        parts.append(persistence_features(x, win, n_persist))
     return np.concatenate(parts, -1).astype(np.float32)
 
 
@@ -182,7 +202,8 @@ class Fitted:
     def features(self, data: Loaded, x: np.ndarray) -> np.ndarray:
         win = window_index(data.episode, self.cfg.window)
         adj = neighbor_matrix(data.edge_index, data.n_nodes) if self.cfg.neighbors else None
-        return (build_inputs(x, win, adj) - self.in_mean) / self.in_std
+        n_persist = self.n_feat if self.cfg.persistence else 0
+        return (build_inputs(x, win, adj, n_persist) - self.in_mean) / self.in_std
 
     @torch.no_grad()
     def predict(self, data: Loaded, x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -202,13 +223,14 @@ def fit(data: Loaded, cfg: ObsConfig | None = None) -> tuple[Fitted, list[dict]]
     win = window_index(data.episode, cfg.window)
     adj = neighbor_matrix(data.edge_index, data.n_nodes) if cfg.neighbors else None
     train = data.mask(cfg.split, train=True)
-    zs = [build_inputs(data.x[s], win, adj)[train] for s in cfg.train_scenarios]
+    n_persist = n_feat if cfg.persistence else 0
+    zs = [build_inputs(data.x[s], win, adj, n_persist)[train] for s in cfg.train_scenarios]
     z = np.concatenate(zs).reshape(-1, zs[0].shape[-1])
     y = np.concatenate([data.x_clean[train][..., :n_feat]] * len(zs)).reshape(-1, n_feat)
 
     # standaryzacja z CZYSTEGO zbioru treningowego — σ wychodzi wtedy w jednostkach
     # „odchylenia cechy na czystym", porównywalnych między cechami
-    clean_z = build_inputs(data.x_clean, win, adj)[train].reshape(-1, z.shape[-1])
+    clean_z = build_inputs(data.x_clean, win, adj, n_persist)[train].reshape(-1, z.shape[-1])
     in_mean, in_std = clean_z.mean(0), np.maximum(clean_z.std(0), 1e-3)
     clean_y = data.x_clean[train][..., :n_feat].reshape(-1, n_feat)
     y_mean, y_std = clean_y.mean(0), np.maximum(clean_y.std(0), 1e-3)
@@ -528,6 +550,82 @@ def _separation_findings(sep: dict[str, Any], labels: list[str]) -> list[str]:
         )  # fmt: skip
     )
     return out
+
+
+# ------------------------------------------------------- poprawka na maskach
+
+#: Warianty porównywane w próbie poprawy bramki 2.2 na martwych detektorach. Lista
+#: i kryterium zapisane PRZED pierwszym uruchomieniem (2026-09-13) — wynik nie może
+#: przesunąć progu. Wariant 0 = głowa z bramki 2.2, punkt odniesienia.
+MASK_VARIANTS = (
+    ("okno 4 (bramka 2.2)", ObsConfig()),
+    ("okno 12", ObsConfig(window=12)),
+    ("okno 12 + trwałość", ObsConfig(window=12, persistence=True)),
+)
+MASK_UNSEEN = ("mask0p5", "mask0p25_intersection")
+NOISE_UNSEEN = ("gauss3p5", "gauss4", "urand3p5")
+MASK_THRESHOLD = 0.70  # AUROC na błędnych odczytach, OBIE niewidziane maski
+NOISE_FLOOR = 0.80  # szum niewidziany nie może na tym stracić
+
+
+def mask_variants(network: str = "cityflow_jinan3x4_4ph") -> Path:
+    """Trzy warianty głowy na tym samym zrzucie -> `results/gate_2_2_masks.md`."""
+    from tsc_marl.paths import RESULTS, RUNS  # noqa: PLC0415
+    from tsc_marl.uncertainty import prototype as P  # noqa: PLC0415
+
+    P.cap_threads()
+    base = load(RUNS / "bc" / f"advancedmp__{network}__ep3" / "dataset.npz")
+    sources = movement_sources(network, base.dead["clean"].shape[-1])
+    results = []
+    for label, cfg in MASK_VARIANTS:
+        fitted, _ = fit(base, cfg)
+        results.append((label, cfg, evaluate(fitted, base, sources)))
+
+    cols = ("gauss1", "gauss2", "gauss4", "urand3p5", "mask0p25", "mask0p5",
+            "mask0p25_intersection", "drift0p3")  # fmt: skip
+    out = [
+        "# Bramka 2.2 — próba poprawy na martwych detektorach",
+        "",
+        f"Kryterium ustalone PRZED uruchomieniem: wariant zalicza, jeśli AUROC na błędnych "
+        f"odczytach ≥ {MASK_THRESHOLD} na OBU niewidzianych maskach ({', '.join(MASK_UNSEEN)}) "
+        f"i ≥ {NOISE_FLOOR} na każdym niewidzianym szumie ({', '.join(NOISE_UNSEEN)}). "
+        "Trening na clean/gauss1/gauss2/mask0p25, ewaluacja na ogonie epizodu.",
+        "",
+        "| wariant | " + " | ".join(cols) + " | pokrycie 90% (czyste) | zalicza |",
+        "|---|" + "---:|" * len(cols) + "---:|:-:|",
+    ]
+    passing = []
+    for label, _cfg, res in results:
+        ok = (
+            min(res[n]["auroc_wrong"] for n in MASK_UNSEEN) >= MASK_THRESHOLD
+            and min(res[n]["auroc_wrong"] for n in NOISE_UNSEEN) >= NOISE_FLOOR
+        )
+        if ok:
+            passing.append(label)
+        cells = " | ".join(_fmt(res[c]["auroc_wrong"]) for c in cols)
+        out.append(
+            f"| {label} | {cells} | {res['clean']['coverage90']:.1%} | {'TAK' if ok else 'NIE'} |"
+        )
+    best = max(results, key=lambda r: min(r[2][n]["auroc_wrong"] for n in MASK_UNSEEN))
+    out += [
+        "",
+        "## Werdykt",
+        "",
+        (
+            f"**Bramka 2.2 ZALICZONA** wariantem: {', '.join(passing)}. Ten wariant zastępuje "
+            "głowę z bramki 2.2 w mechanizmie Fazy 3."
+            if passing
+            else "**Bramka 2.2 ZAMKNIĘTA JAKO ZALICZONA CZĘŚCIOWO.** Żaden wariant nie osiąga "
+            f"{MASK_THRESHOLD} na obu niewidzianych maskach. Najlepszy na maskach: "
+            f"„{best[0]}” (min AUROC "
+            f"{min(best[2][n]['auroc_wrong'] for n in MASK_UNSEEN):.3f}). Głowa jest estymatorem "
+            "niepewności dla awarii SZUMOWYCH, a na awariach CICHYCH (martwe detektory) działa "
+            "słabo — do opisania wprost; ablacja rule-gate vs UQ na maskach zyskuje na wadze."
+        ),
+    ]
+    path = RESULTS / "gate_2_2_masks.md"
+    path.write_text("\n".join(out) + "\n", encoding="utf-8")
+    return path
 
 
 def run(cfg: ObsConfig | None = None, *, network: str = "cityflow_jinan3x4_4ph") -> Path:

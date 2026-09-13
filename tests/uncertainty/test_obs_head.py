@@ -119,3 +119,26 @@ def test_glowa_podnosi_sigma_na_szumie():
     _, s_clean = fitted.predict(data, data.x["clean"])
     _, s_noisy = fitted.predict(data, data.x["gauss1"])
     assert s_noisy.mean() > 1.5 * s_clean.mean()
+
+
+def test_cechy_trwalosci_widza_utkniecie_i_zero():
+    """Detektor, który stoi w miejscu, daje „bez zmiany" = 1; zmieniający się — 0.
+    Stałe zero liczy się podwójnie: bez zmiany ORAZ zero."""
+    t, n = 6, 1
+    x = np.zeros((t, n, 3), np.float32)
+    x[:, 0, 0] = np.arange(t)  # cecha 0 zmienia się co krok
+    x[:, 0, 1] = 5.0  # cecha 1 utknęła na 5
+    # cecha 2 utknęła na 0
+    win = O.window_index(np.zeros(t, dtype=int), 3)
+    f = O.persistence_features(x, win, 3)
+    assert f.shape == (t, n, 6)
+    same, zero = f[-1, 0, :3], f[-1, 0, 3:]
+    assert same.tolist() == [0.0, 1.0, 1.0]
+    assert zero.tolist() == [0.0, 0.0, 1.0]
+
+
+def test_trwalosc_zmienia_szerokosc_wejscia():
+    x = np.ones((4, 2, 5), np.float32)
+    win = O.window_index(np.zeros(4, dtype=int), 2)
+    assert O.build_inputs(x, win, None).shape[-1] == 10
+    assert O.build_inputs(x, win, None, n_persist=3).shape[-1] == 10 + 6

@@ -94,11 +94,20 @@ def obshead(
     window: int = typer.Option(4, help="ile ostatnich odczytów widzi głowa"),
     neighbors: bool = typer.Option(True, help="dołóż średnią odczytów sąsiadów upstream"),
     epochs: int = typer.Option(60, help="epoki uczenia głowy"),
+    persistence: bool = typer.Option(False, help="dołóż cechy trwałości odczytu (utknięcie)"),
+    mask_variants: bool = typer.Option(
+        False, help="porównaj warianty na martwych detektorach -> results/gate_2_2_masks.md"
+    ),
 ) -> None:
     """Bramka prototypu 2.2 — głowa obserwacyjna (per ruch → krawędź) -> results/gate_2_2.md."""
     from tsc_marl.uncertainty import obs_head as module
 
-    cfg = module.ObsConfig(window=window, neighbors=neighbors, epochs=epochs)
+    if mask_variants:
+        print(module.mask_variants(network=network))
+        return
+    cfg = module.ObsConfig(
+        window=window, neighbors=neighbors, epochs=epochs, persistence=persistence
+    )
     print(module.run(cfg, network=network))
 
 
