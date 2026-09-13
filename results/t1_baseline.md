@@ -1,6 +1,6 @@
 # T1-baseline — punkt odniesienia pracy
 
-Wygenerowane: 2026-09-12 10:33. Protokół: `configs/tsc/thesis_protocol.yml` (Δt=15 s, epizod 3600 s, `PYTHONHASHSEED=0`), sieci w wariancie 4-fazowym — jak protokół papierów.
+Wygenerowane: 2026-09-12 17:49. Protokół: `configs/tsc/thesis_protocol.yml` (Δt=15 s, epizod 3600 s, `PYTHONHASHSEED=0`), sieci w wariancie 4-fazowym — jak protokół papierów.
 
 ATT = średnia z 10 ostatnich epizodów testowych (metody bez treningu: jeden przebieg).
 Δ liczone względem literatury w trybie **benchmark**, bo w nim liczą swoje wyniki papiery.
@@ -16,7 +16,7 @@ ATT = średnia z 10 ostatnich epizodów testowych (metody bez treningu: jeden pr
 | advancedmp | 274.3 | 299.2 | 253.61 | +8.2% |
 | presslight | — | 321.3 (n=3) | — | — |
 | colight | 284.2 (n=3) | 323.6 (n=3) | 272.06 | +4.5% |
-| advancedcolight | 268.8 (n=3) | 293.5 (n=3) | 245.73 | +9.4% |
+| advancedcolight | 268.8 (n=3) | 293.5 (n=5) | 245.73 | +9.4% |
 
 ## cityflow_hangzhou4x4_4ph
 
@@ -29,7 +29,7 @@ ATT = średnia z 10 ostatnich epizodów testowych (metody bez treningu: jeden pr
 | advancedmp | 314.7 | 325.4 | 279.47 | +12.6% |
 | presslight | — | 339.2 (n=3) | — | — |
 | colight | 326.0 (n=3) | 342.5 (n=3) | 297.02 | +9.8% |
-| advancedcolight | 306.6 (n=3) | 316.9 (n=3) | 270.45 | +13.4% |
+| advancedcolight | 306.6 (n=3) | 317.1 (n=5) | 270.45 | +13.4% |
 
 ## Jak czytać Δ
 

@@ -1,31 +1,31 @@
 # GATE Fazy 1 — rdzeń (GAT + PPO + CTDE) vs Advanced-CoLight
 
-Wygenerowane: 2026-09-12 10:33. Suity `p1_reference` + `p1_gate`, tryb realistyczny (yellow=5), protokół `configs/tsc/thesis_protocol.yml`.
+Wygenerowane: 2026-09-12 17:49. Suity `p1_reference` + `p1_gate`, tryb realistyczny (yellow=5), protokół `configs/tsc/thesis_protocol.yml`.
 ATT = średnia z 10 ostatnich epizodów testowych biegu; niżej średnia ± std po seedach.
-Kod jednakowy dla wszystkich biegów: libsignal `5bcd823`, tsc_marl `544112a`; maszyna: `glider-B760-Pro-RS`.
+**UWAGA: biegi z 2 różnych wersji kodu** — porównanie niepewne; maszyna: `glider-B760-Pro-RS`.
 
 | sieć | Advanced-CoLight | rdzeń (gatppo) | Δ | p (Welch) | n | w progu |
 |---|---:|---:|---:|---:|:-:|:-:|
-| cityflow_jinan3x4_4ph | 293.5 ± 0.6 | 295.6 ± 0.8 | +0.73% | 0.021 | 3 / 3 | TAK |
-| cityflow_hangzhou4x4_4ph | 316.9 ± 0.1 | 317.2 ± 0.3 | +0.09% | 0.233 | 3 / 3 | TAK |
+| cityflow_jinan3x4_4ph | 293.5 ± 0.4 | 295.7 ± 1.0 | +0.74% | 0.004 | 5 / 5 | TAK |
+| cityflow_hangzhou4x4_4ph | 317.1 ± 0.2 | 317.2 ± 0.2 | +0.04% | 0.331 | 5 / 5 | TAK |
 
 ## Po seedach
 
 | sieć | agent | ATT (10 ost. testów) |
 |---|---|---|
-| cityflow_jinan3x4_4ph | Advanced-CoLight | s0 292.8 · s1 293.8 · s2 293.8 |
-| cityflow_jinan3x4_4ph | rdzeń (gatppo) | s0 294.7 · s1 296.1 · s2 296.0 |
-| cityflow_hangzhou4x4_4ph | Advanced-CoLight | s0 317.0 · s1 317.0 · s2 316.8 |
-| cityflow_hangzhou4x4_4ph | rdzeń (gatppo) | s0 317.4 · s1 317.4 · s2 316.9 |
+| cityflow_jinan3x4_4ph | Advanced-CoLight | s0 292.8 · s1 293.8 · s2 293.8 · s3 293.5 · s4 293.5 |
+| cityflow_jinan3x4_4ph | rdzeń (gatppo) | s0 294.7 · s1 296.1 · s2 296.0 · s3 294.7 · s4 296.9 |
+| cityflow_hangzhou4x4_4ph | Advanced-CoLight | s0 317.0 · s1 317.0 · s2 316.8 · s3 317.2 · s4 317.3 |
+| cityflow_hangzhou4x4_4ph | rdzeń (gatppo) | s0 317.4 · s1 317.4 · s2 316.9 · s3 317.1 · s4 317.2 |
 
 ## Stabilność i koszt
 
 | sieć | agent | najgorszy test (ost. 50) | zbieżność [epizod] | throughput | queue | czas biegu [s] | urządzenie |
 |---|---|---:|---:|---:|---:|---:|---|
-| cityflow_jinan3x4_4ph | Advanced-CoLight | 300.7 | 34–55 | 6173 | 7.88 | 3096 | cpu |
-| cityflow_jinan3x4_4ph | rdzeń (gatppo) | 297.7 | 36–56 | 6172 | 8.05 | 1349 | cuda:0 |
-| cityflow_hangzhou4x4_4ph | Advanced-CoLight | 349.7 | 33–39 | 2931 | 1.13 | 2686 | cpu |
-| cityflow_hangzhou4x4_4ph | rdzeń (gatppo) | 318.4 | 31–32 | 2930 | 1.15 | 1052 | cuda:0 |
+| cityflow_jinan3x4_4ph | Advanced-CoLight | 300.7 | 34–84 | 6173 | 7.86 | 3194 | cpu |
+| cityflow_jinan3x4_4ph | rdzeń (gatppo) | 299.3 | 36–56 | 6174 | 8.03 | 1424 | cuda:0 |
+| cityflow_hangzhou4x4_4ph | Advanced-CoLight | 349.7 | 27–39 | 2931 | 1.14 | 2867 | cpu |
+| cityflow_hangzhou4x4_4ph | rdzeń (gatppo) | 318.4 | 27–32 | 2929 | 1.14 | 1121 | cuda:0 |
 
 Zbieżność = pierwszy epizod, od którego kroczące 10 testów mieści się w 2% od wyniku końcowego (zakres po seedach). Najgorszy test w ogonie łapie jednorazowe załamania polityki, których średnia z 10 nie pokazuje.
 
@@ -33,28 +33,28 @@ Zbieżność = pierwszy epizod, od którego kroczące 10 testów mieści się w 
 
 Rysunki w `results/figures/` (PNG tutaj, PDF do pracy), przeliczane razem z tym raportem.
 
-![Test ATT po epizodach. Linia = średnia po seedach, wstęga = min–max (n = 3). Górny rząd: pełny zakres; dolny: przybliżenie na plateau z progiem bramki (ATT Advanced-CoLight + 5%).](figures/p1_att_test.png)
+![Test ATT po epizodach. Linia = średnia po seedach, wstęga = min–max (n = 5). Górny rząd: pełny zakres; dolny: przybliżenie na plateau z progiem bramki (ATT Advanced-CoLight + 5%).](figures/p1_att_test.png)
 
-*Test ATT po epizodach. Linia = średnia po seedach, wstęga = min–max (n = 3). Górny rząd: pełny zakres; dolny: przybliżenie na plateau z progiem bramki (ATT Advanced-CoLight + 5%).*
+*Test ATT po epizodach. Linia = średnia po seedach, wstęga = min–max (n = 5). Górny rząd: pełny zakres; dolny: przybliżenie na plateau z progiem bramki (ATT Advanced-CoLight + 5%).*
 
-![Sygnały update'u PPO — rdzeń (gatppo), jeden update na epizod. Wiersze = sieci; linia = średnia po seedach, wstęga = min–max (n = 3). Value loss w skali log.](figures/p1_ppo_diagnostics.png)
+![Sygnały update'u PPO — rdzeń (gatppo), jeden update na epizod. Wiersze = sieci; linia = średnia po seedach, wstęga = min–max (n = 5). Value loss w skali log.](figures/p1_ppo_diagnostics.png)
 
-*Sygnały update'u PPO — rdzeń (gatppo), jeden update na epizod. Wiersze = sieci; linia = średnia po seedach, wstęga = min–max (n = 3). Value loss w skali log.*
+*Sygnały update'u PPO — rdzeń (gatppo), jeden update na epizod. Wiersze = sieci; linia = średnia po seedach, wstęga = min–max (n = 5). Value loss w skali log.*
 
-![Strata TD Advanced-CoLight po epizodach (skala log; epizody przed `learning_start` pominięte). Linia = średnia po seedach, wstęga = min–max (n = 3).](figures/p1_colight_loss.png)
+![Strata TD Advanced-CoLight po epizodach (skala log; epizody przed `learning_start` pominięte). Linia = średnia po seedach, wstęga = min–max (n = 5).](figures/p1_colight_loss.png)
 
-*Strata TD Advanced-CoLight po epizodach (skala log; epizody przed `learning_start` pominięte). Linia = średnia po seedach, wstęga = min–max (n = 3).*
+*Strata TD Advanced-CoLight po epizodach (skala log; epizody przed `learning_start` pominięte). Linia = średnia po seedach, wstęga = min–max (n = 5).*
 
 ## Kryterium wyjścia
 
 Rdzeń w granicach **5%** ATT Advanced-CoLighta na każdej sieci (Δ > 0 = rdzeń gorszy). Próg to górna granica sformułowania z `p1_gate.yml` („w granicach kilku procent”), zapisana jako `GATE_TOLERANCE` w `analysis/report.py` PO obejrzeniu wyników — dlatego niżej jest też najmniejszy próg, przy którym werdykt się utrzymuje.
 
-* **cityflow_jinan3x4_4ph** — różnica rozróżnialna statystycznie (Welch, p = 0.021) na korzyść: Advanced-CoLight; praktycznie 0.73% ATT.
-* **cityflow_hangzhou4x4_4ph** — metody nierozróżnialne (Welch, p = 0.233); Δ +0.09% mieści się w rozrzucie po seedach.
+* **cityflow_jinan3x4_4ph** — różnica rozróżnialna statystycznie (Welch, p = 0.004) na korzyść: Advanced-CoLight; praktycznie 0.74% ATT.
+* **cityflow_hangzhou4x4_4ph** — metody nierozróżnialne (Welch, p = 0.331); Δ +0.04% mieści się w rozrzucie po seedach.
 
 ## Werdykt
 
-**GATE Fazy 1: ZALICZONA.** Największe Δ = +0.73%; werdykt utrzymuje się przy każdym progu ≥ 0.73%.
+**GATE Fazy 1: ZALICZONA.** Największe Δ = +0.74%; werdykt utrzymuje się przy każdym progu ≥ 0.74%.
 
 ## Skąd różnica czasu biegu
 

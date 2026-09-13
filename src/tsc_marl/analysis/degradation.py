@@ -137,6 +137,10 @@ def parent_consistency(df) -> list[dict[str, Any]]:
         path = parent.path / "metrics.csv" if parent else None
         if path is None or not path.is_file():
             continue
+        # tylko gdy ewaluacja jedzie po ruchu TRENINGOWYM rodzica — na innym pliku ruchu
+        # (plan t2_ood) różnica z ostatnim testem treningu jest oczekiwana, nie jest błędem
+        if parent.params.get("network") != r.network:
+            continue
         m = pd.read_csv(path)
         test = m[(m["split"] == "test") & (m["metric"] == "att")].sort_values("step")
         if test.empty:

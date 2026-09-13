@@ -5,7 +5,8 @@
 #
 # Potrzebuje 5 seedów rdzenia i Advanced-CoLighta (noc.sh je dogrywa). Startuje w tle
 # (odporne na wylogowanie) i od razu wraca. Na końcu pisze results/t2_ood.md
-# (werdykt: czy gałąź „epistemic → MaxPressure” ma robotę) i results/t2_ood.md z tabelą.
+# (tabela degradacji) i results/t2_ood_epistemic.md (werdykt: czy gałąź
+# „epistemic → MaxPressure” ma robotę).
 # Wznowienie: to samo polecenie — policzone punkty są pomijane.
 #
 # Zmienne: J (ile punktów naraz), DRY=1 (tylko wypisz komendy).
@@ -48,5 +49,5 @@ cat <<EOF
 Ruszyło: $N rdzeni, J=$J.
 Postęp:   tail -f $LOG/ood.log
 Stan:     $TSC degrade status t2_ood
-Wynik:    results/t2_ood.md (werdykt) + results/t2_ood.csv
+Wynik:    results/t2_ood_epistemic.md (werdykt) + results/t2_ood.md (tabela)
 EOF

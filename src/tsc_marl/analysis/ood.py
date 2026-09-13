@@ -1,4 +1,4 @@
-"""Raport testu gałęzi epistemic (plan `t2_ood`) -> `results/t2_ood.md`.
+"""Raport testu gałęzi epistemic (plan `t2_ood`) -> `results/t2_ood_epistemic.md`.
 
 Dwupoziomowy fallback z planu kieruje „epistemic↑ przy czystym wejściu” do MaxPressure.
 Bramka 2.0 pokazała, że na naszych zbiorach tej sytuacji nie widać: na lżejszym ruchu
@@ -23,6 +23,21 @@ from tsc_marl.paths import RESULTS
 from tsc_marl.robustness.degrade import Plan, base_network
 
 RULES = ("efficientmp", "advancedmp")
+ALPHA = 0.05
+#: Wzrost MI na czystym wejściu (względem ruchu treningowego), od którego uznajemy, że
+#: rozbieżność polityk REAGUJE na nowy ruch. Niżej to rząd różnic między seedami.
+MI_RISE = 0.25
+
+
+def _p_worse(vals, reference: float) -> float:
+    """p jednostronnego testu t: czy średnia seedów polityki jest WIĘKSZA (gorsza) od reguły."""
+    from scipy.stats import ttest_1samp  # noqa: PLC0415
+
+    if len(vals) < 2 or np.std(vals) == 0:
+        return float("nan")
+    return float(ttest_1samp(vals, reference, alternative="greater").pvalue)
+
+
 METRICS = ("att", "throughput", "ens_mi", "ens_disagree")
 
 
@@ -67,7 +82,8 @@ def main(plan: Plan) -> Path:
         return _write(plan, out)
 
     per = _per_seed(df)
-    lose: list[tuple[str, float]] = []
+    lose: list[tuple[str, float, float]] = []  # (sieć, Δ, p) — przegrana ISTOTNA
+    ties: list[tuple[str, float, float]] = []  # Δ > 0, ale w granicach rozrzutu seedów
     mi_rows: dict[str, dict[str, float]] = {}
     for base in dict.fromkeys(base_network(n) for n in plan.networks):
         nets = [n for n in plan.networks if base_network(n) == base]
@@ -79,17 +95,25 @@ def main(plan: Plan) -> Path:
         for net in nets:
             clean = per[(per["network"] == net) & (per["scenario"] == "clean")]
             cells = [_cell(clean[clean["controller"] == c]["att"].tolist()) for c in ctrls]
-            core = clean[clean["controller"] == "gatppo"]["att"].mean()
+            core_vals = clean[clean["controller"] == "gatppo"]["att"].dropna().to_numpy()
             rules = [clean[clean["controller"] == r]["att"].mean() for r in RULES]
             rules = [r for r in rules if r == r]
             delta = "—"
-            if core == core and rules:
-                d = core / min(rules) - 1
-                delta = f"{d:+.1%}" + (" ▲" if d > 0 else "")
+            if len(core_vals) and rules:
+                best = min(rules)  # reguły są deterministyczne — jedna liczba
+                d = core_vals.mean() / best - 1
+                p = _p_worse(core_vals, best)
+                sig = d > 0 and p < ALPHA
+                delta = f"{d:+.1%} (p {p:.2f})" + (" ▲" if sig else "")
                 if d > 0 and net != base:
-                    lose.append((net, d))
+                    (lose if sig else ties).append((net, d, p))
             out.append(f"| {traffic_label(net)} | " + " | ".join(cells) + f" | {delta} |")
-        out += ["", "▲ = rdzeń gorszy od lepszego z MaxPressure — tu gałąź (a) miałaby robotę.", ""]
+        out += [
+            "",
+            f"▲ = rdzeń ISTOTNIE gorszy od lepszego z MaxPressure (jednostronny t, p < {ALPHA}, "
+            "seedy polityki vs deterministyczna reguła) — tylko tam gałąź (a) miałaby robotę.",
+            "",
+        ]
 
         ens = per[per["controller"] == "gatppo_ens"]
         if not ens.empty:
@@ -114,59 +138,90 @@ def main(plan: Plan) -> Path:
                 )
             out.append("")
     has_core = bool((per["controller"] == "gatppo").any())
-    out += _verdict(plan, lose, mi_rows, has_core)
+    out += _verdict(plan, lose, ties, mi_rows, has_core)
     return _write(plan, out)
 
 
-def _verdict(plan: Plan, lose, mi_rows, has_core: bool = True) -> list[str]:
+def _verdict(plan: Plan, lose, ties, mi_rows, has_core: bool = True) -> list[str]:
+    """Wnioski z liczb. Logika bramki z planu: kanał OBSERWACYJNY rozstrzyga pierwszy
+    (awaria sensora → FixedTime), więc gałąź (a) potrzebuje tylko, żeby MI rosło na
+    CZYSTYM wejściu przy nowym ruchu — nie musi przebijać reakcji na szum. Musi za to
+    istnieć coś do ratowania: istotna przegrana polityki z MaxPressure."""
     out = ["## Werdykt", ""]
     if not has_core:
         out.append("1. **Brak wyników rdzenia (`gatppo`)** — pytanie 1 bez odpowiedzi.")
-    elif not lose:
-        out.append(
-            "1. **Rdzeń nie przegrywa z MaxPressure na żadnym ruchu spoza treningu.** Gałąź (a) "
-            "dwupoziomowego fallbacku nie ma czego ratować — fallback jednopoziomowy do "
-            "FixedTime jest wystarczający i uczciwszy."
-        )
-    else:
+    elif lose:
         worst = max(lose, key=lambda x: x[1])
         out.append(
-            f"1. **Rdzeń przegrywa z MaxPressure na {len(lose)} wariantach ruchu**, najmocniej "
-            f"na „{traffic_label(worst[0])}” ({worst[1]:+.1%}). Gałąź (a) ma tam robotę."
+            f"1. **Rdzeń przegrywa ISTOTNIE z MaxPressure na {len(lose)} wariantach ruchu**, "
+            f"najmocniej na „{traffic_label(worst[0])}” ({worst[1]:+.1%}, p {worst[2]:.3f}). "
+            "Gałąź (a) ma tam robotę."
         )
+    else:
+        text = "1. **Rdzeń nie przegrywa istotnie z MaxPressure na żadnym ruchu spoza treningu.**"
+        if ties:
+            text += (
+                " Remis w granicach rozrzutu seedów: "
+                + ", ".join(f"„{traffic_label(n)}” {d:+.1%} (p {p:.2f})" for n, d, p in ties)
+                + "."
+            )
+        text += (
+            " Przełączenie na MaxPressure nie ma tu nic do zyskania, więc gałąź (a) "
+            "dwupoziomowego fallbacku nie ma roboty — fallback jednopoziomowy do FixedTime."
+        )
+        out.append(text)
+    rising: list[str] = []
     if mi_rows:
-        by_base: dict[str, list[str]] = {}
-        for net in mi_rows:
-            by_base.setdefault(base_network(net), []).append(net)
-        for base, nets in by_base.items():
+        out += [
+            "",
+            "Rozbieżność 5 actorów (MI) na CZYSTYM wejściu, względem ruchu treningowego:",
+            "",
+        ]
+        for base in dict.fromkeys(base_network(n) for n in mi_rows):
             ref = mi_rows.get(base, {})
             if not ref:
                 continue
             noise = ref["mi_gauss2"] - ref["mi_clean"]
-            for net in nets:
-                if net == base:
-                    continue
+            for net in (n for n in mi_rows if base_network(n) == base and n != base):
                 shift = mi_rows[net]["mi_clean"] - ref["mi_clean"]
-                losing = any(n == net for n, _ in lose)
-                verdict = (
-                    "rośnie mocniej niż na szumie — sygnał odróżnia nowy ruch od awarii"
-                    if shift > max(noise, 0)
-                    else "rośnie słabiej niż na szumie albo spada — nie odróżnia nowego ruchu"
-                )
+                rel = shift / ref["mi_clean"] if ref["mi_clean"] else float("nan")
+                up = rel >= MI_RISE
+                if up:
+                    rising.append(net)
                 out.append(
-                    f"* `{traffic_label(net)}`{' (rdzeń przegrywa)' if losing else ''}: "
-                    f"MI {shift:+.4f} vs szum {noise:+.4f} na ruchu treningowym → {verdict}."
+                    f"* `{traffic_label(net)}`: MI {shift:+.4f} ({rel:+.0%}); dla porównania szum "
+                    f"σ=2 na ruchu treningowym {noise:+.4f} → "
+                    + ("**rośnie** — sygnał nowego ruchu istnieje" if up else "nie rośnie")
+                    + (
+                        ""
+                        if not up or shift > noise
+                        else " (słabiej niż pod szumem: bez kanału obserwacyjnego nieodróżnialny)"
+                    )
+                    + "."
                 )
+        both = [n for n, _, _ in lose if n in rising]
         out += [
             "",
-            "2. Gałąź (a) broni się tylko wtedy, gdy OBA warunki są spełnione na tym samym "
-            "wariancie ruchu: rdzeń przegrywa z MaxPressure i MI rośnie tam mocniej niż "
-            "na szumie. Każdy inny układ = fallback jednopoziomowy.",
+            "2. **Gałąź (a) broni się tylko tam, gdzie OBA warunki zachodzą na tym samym ruchu:** "
+            "istotna przegrana z MaxPressure i wzrost MI na czystym wejściu. "
+            + (
+                f"Zachodzą na: {', '.join(traffic_label(n) for n in both)}."
+                if both
+                else "Nie zachodzą nigdzie"
+                + (
+                    f" — MI rośnie na „{', '.join(traffic_label(n) for n in rising)}”, "
+                    "ale tam polityka nie przegrywa, więc nie ma czego ratować."
+                    if rising
+                    else "."
+                )
+            ),
         ]
     return out
 
 
 def _write(plan: Plan, lines: list[str]) -> Path:
-    path = RESULTS / f"{plan.name}.md"
+    # osobny plik: `tsc degrade report <plan>` pisze `<plan>.md` (tabela degradacji)
+    # i bez sufiksu jeden raport nadpisywałby drugi
+    path = RESULTS / f"{plan.name}_epistemic.md"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
