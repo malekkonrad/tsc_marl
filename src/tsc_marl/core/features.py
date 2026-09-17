@@ -53,6 +53,27 @@ STATE_VARIANTS = ("queue", "pressure", "ep", "ats")
 REWARD_VARIANTS = ("queue", "pressure")
 
 
+def engine_api(world: World) -> Any:
+    """Silnik z API CityFlow: `world.eng` w CityFlow, widok `cityflow_api` w SUMO
+    (`libsignal/sumo_world.py`). Jedno miejsce tej decyzji — rdzeń i Advanced-MP
+    czytają kolejki i pozycje pojazdów tą samą drogą na obu silnikach."""
+    return getattr(world, "cityflow_api", None) or world.eng
+
+
+def phase_mask(phase_counts: Sequence[int], n_phases: int) -> np.ndarray | None:
+    """[N, n_phases] bool — które akcje istnieją na danym skrzyżowaniu.
+
+    None, gdy wszystkie mają po `n_phases` faz (JiNan/HangZhou): maska z samych
+    jedynek niczego nie zmienia, a ścieżka bez niej zostaje bit w bit tą, na której
+    policzono GATE Fazy 1. Na sieci niejednorodnej (Kraków: 2–7 faz) bez maski
+    polityka wybrałaby fazę, której skrzyżowanie nie ma.
+    """
+    counts = np.asarray(phase_counts)
+    if (counts >= n_phases).all():
+        return None
+    return np.arange(n_phases)[None, :] < counts[:, None]
+
+
 class Structs(NamedTuple):
     """Statyka jednego skrzyżowania — nie zmienia się w trakcie symulacji, więc
     liczona raz przy budowie."""
@@ -158,9 +179,7 @@ class StateBuilder:
             # Nagroda liczy WSZYSTKIE pasy dróg wjazdowych, także skręty w prawo
             # wypadające z ruchów sterowanych — tak robi `LaneVehicleGenerator`
             # z `in_only=True`, więc nagroda zostaje porównywalna z CoLightem.
-            reward_lanes=[
-                f"{road['id']}_{i}" for road in inter.in_roads for i in range(len(road["lanes"]))
-            ],
+            reward_lanes=ats.in_road_lanes(inter),
             effective_range={
                 lane: (
                     obs_length
@@ -184,6 +203,11 @@ class StateBuilder:
         blocks = 2 if self.state == "ats" else 1
         return blocks * self.n_mov + self.n_phases
 
+    def phase_mask(self) -> np.ndarray | None:
+        """[N, n_phases] bool w kolejności skrzyżowań tego buildera — patrz `phase_mask`
+        na poziomie modułu. None na sieciach jednorodnych."""
+        return phase_mask([len(inter.phases) for inter in self.intersections], self.n_phases)
+
     # ------------------------------------------------------------------ odczyt
 
     def _snapshot(self) -> tuple[dict, dict, dict]:
@@ -191,7 +215,7 @@ class StateBuilder:
         skrzyżowania, więc wołanie ich w pętli kopiuje ten sam słownik N razy.
         Subskrypcja przez `world.get_info` nie pomoże — cache odświeża się co KROK
         symulacji (1 s), a decyzja zapada raz na Δt."""
-        eng = self.world.eng
+        eng = engine_api(self.world)
         return eng.get_lane_vehicles(), eng.get_vehicle_distance(), eng.get_vehicle_speed()
 
     def _queue(self, struct: Structs, snapshot, full_queue) -> Mapping[str, float]:

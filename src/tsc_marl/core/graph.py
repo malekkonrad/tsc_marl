@@ -168,6 +168,18 @@ class RoadNetGraph:
     def n_edges(self) -> int:
         return int(self.edge_index.shape[1])
 
+    @staticmethod
+    def bare_id(intersection_id: str) -> str:
+        """Id skrzyżowania świata → id węzła grafu.
+
+        Na SUMO graf buduje `build_index_intersection_map_sumo`, który ucina
+        prefiks `GS_` (sygnalizacje zgadnięte przez netconvert), a `world_sumo`
+        zostawia go w `inter.id`. Reguła jest przepisana z tamtej funkcji co do
+        znaku — łącznie z tym, że patrzy na `GS_` gdziekolwiek w id — bo liczy się
+        zgodność z grafem, nie elegancja. Na CityFlow to tożsamość.
+        """
+        return intersection_id if "GS_" not in intersection_id else intersection_id[3:]
+
     def order_intersections(self, world: World) -> list[Intersection]:
         """`world.intersections` w kanonicznej kolejności `node_idx`.
 
@@ -175,7 +187,7 @@ class RoadNetGraph:
         i akcji — patrz KONTRAKT KOLEJNOŚCI w docstringu modułu. Ten sam wzorzec,
         który `agent/colight.py` powtarza ręcznie przy każdym generatorze.
         """
-        return self.order(world.intersections, key=lambda inter: inter.id)
+        return self.order(world.intersections, key=lambda inter: self.bare_id(inter.id))
 
     def order(self, items: Sequence[Any], key=lambda x: x) -> list[Any]:
         """Ustaw dowolną kolekcję zaadresowaną id skrzyżowań w kolejności `node_idx`."""

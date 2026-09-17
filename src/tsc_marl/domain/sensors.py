@@ -68,7 +68,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from tsc_marl.domain.ats import road_of
+from tsc_marl.domain.ats import in_road_lanes, road_of
 
 if TYPE_CHECKING:
     from world.world_cityflow import Intersection
@@ -192,9 +192,8 @@ def failure_units(
 
     owner: dict[str, str] = {}
     for inter in intersections:
-        for road in inter.in_roads:
-            for i in range(len(road["lanes"])):
-                owner[f"{road['id']}_{i}"] = inter.id
+        for lane in in_road_lanes(inter):
+            owner[lane] = inter.id
     return {lane: owner.get(lane, lane) for lane in lanes}
 
 

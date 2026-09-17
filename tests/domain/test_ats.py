@@ -223,3 +223,20 @@ def test_nieznany_pojazd_nie_wpada_do_zadnej_polowy_ATS():
     args = ([lane], {lane: ["duch"]}, {"duch": 100.0}, {}, {lane: 200.0})
     assert ats.windowed_queue(*args, obs_length=167.0) == {lane: 0}
     assert ats.effective_running(*args, effective_range=167.0) == {lane: 0}
+
+
+def test_in_road_lanes_oba_formaty_drog():
+    """CityFlow trzyma drogę jako słownik roadnetu, world_sumo jako id krawędzi
+    z mapą pasów. Wynik ma być w obu tym samym formatem '<droga>_<indeks>' —
+    na nim stoi nagroda i właściciel detektora w `sensors.failure_units`."""
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    cityflow = SimpleNamespace(in_roads=[{"id": "road_1_1_0", "lanes": [{}, {}, {}]}])
+    assert ats.in_road_lanes(cityflow) == ["road_1_1_0_0", "road_1_1_0_1", "road_1_1_0_2"]
+
+    sumo = SimpleNamespace(
+        in_roads=["-123#4"],
+        # kolejność z getControlledLinks bywa dowolna; wyjazd nie należy do nagrody
+        road_lane_mapping={"-123#4": ["-123#4_1", "-123#4_0"], "wyjazd": ["wyjazd_0"]},
+    )
+    assert ats.in_road_lanes(sumo) == ["-123#4_0", "-123#4_1"]

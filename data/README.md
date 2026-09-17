@@ -12,6 +12,7 @@ Tylko sieci faktycznie używane w pracy (9,4 MB) — reszta zbiorów LibSignala
 |---|---|---|
 | `raw_data/jinan_3x4/` | JiNan 3×4, warianty ruchu real / 2000 / 2500 | dane z linii CoLight / Advanced-XLight |
 | `raw_data/hangzhou_4x4_advanced/` | HangZhou 4×4, warianty real / 5816 | jw. |
+| `raw_data/krakow_3w/` | Kraków, al. Trzech Wieszczów (SUMO, 25 sygnalizacji), popyt low / mid / high | OSM + `build.py` (case study, gałąź `cracow-case-study`) |
 
 Każda sieć ma wariant 4-fazowy (`roadnet_*_4phase.json`) — to jego używa protokół
 pracy, bo w nim liczą swoje wyniki papiery referencyjne. Sieci podpina się przez

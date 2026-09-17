@@ -188,21 +188,17 @@ class TrafficEnv:
         }
 
 
-def _bare_id(intersection_id: str) -> str:
-    """`world_sumo` prefiksuje id `GS_`, a graf trzyma je bez prefiksu."""
-    return intersection_id[3:] if intersection_id.startswith("GS_") else intersection_id
-
-
 def world_order(graph: RoadNetGraph, world: World) -> np.ndarray:
     """Permutacja `pozycja w world.intersections -> node_idx` (punkt 4 w docstringu).
 
     Użycie: `actions_dla_swiata = actions[world_order(...)]`. Osobna funkcja, bo to
     najgroźniejszy cichy błąd w całej pętli — akcja jednego skrzyżowania wykonana
     na drugim nie wywala niczego, po prostu uczy sieć szumu — i chcemy go testować
-    bez stawiania CityFlow.
+    bez stawiania CityFlow. Id świata → id grafu przez `RoadNetGraph.bare_id`, tę
+    samą regułę co `order_intersections` (prefiks `GS_` na SUMO).
     """
     return np.array(
-        [graph.node_id2idx[_bare_id(inter.id)] for inter in world.intersections],
+        [graph.node_id2idx[graph.bare_id(inter.id)] for inter in world.intersections],
         dtype=np.int64,
     )
 
@@ -282,7 +278,11 @@ class CoreTrainer:
         # `PPO.__post_init__` tworzy optymalizatory Adama z parametrów `ac` —
         # zbudowane przed przeniesieniem trzymałyby stan (`exp_avg`) na CPU,
         # a parametry na GPU, i pierwszy `step()` by się wywalił.
-        ac = ActorCritic.from_registry(features.ob_length, features.n_phases).to(device)
+        # Maska faz tylko na sieci niejednorodnej (Kraków). Brak kwarga, gdy None:
+        # na JiNan/HangZhou sieć ma się zbudować DOKŁADNIE jak przy GATE Fazy 1.
+        mask = features.phase_mask()
+        extra = {} if mask is None else {"phase_mask": torch.from_numpy(mask)}
+        ac = ActorCritic.from_registry(features.ob_length, features.n_phases, **extra).to(device)
         return cls(env, PPO(ac, ppo_config or PPOConfig()), cfg, run, logger)
 
     # ---------------------------------------------------------------- epizody

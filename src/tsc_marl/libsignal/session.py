@@ -89,6 +89,7 @@ def register_engine_components() -> None:
     import trainer  # noqa: F401
 
     import tsc_marl.libsignal.agents  # noqa: F401 - rejestruje NASZYCH agentów
+    import tsc_marl.libsignal.sumo_world  # noqa: F401 - nadpisuje 'sumo' w world_mapping
 
 
 def build_interfaces(config: dict[str, Any]) -> list[str]:
@@ -119,6 +120,12 @@ def build_interfaces(config: dict[str, Any]) -> list[str]:
             else param["road_file_addr"]
         )
         interface.Graph_World_Interface(roadnet)
+        if config["command"]["world"] == "sumo":
+            # graf LibSignala na sieci z OSM ma 1 krawędź na 25 węzłów (Kraków) —
+            # podmieniamy go dla WSZYSTKICH agentów grafowych, patrz `sumo_world.build_graph`
+            from tsc_marl.libsignal.sumo_world import build_graph
+
+            interface.Graph_World_Interface.graph = build_graph(roadnet)
         called.append("Graph_World_Interface")
 
     interface.Logger_path_Interface(config)

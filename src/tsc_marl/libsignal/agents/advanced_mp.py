@@ -18,6 +18,7 @@ from agent import BaseAgent
 from common.registry import Registry
 from generator import IntersectionPhaseGenerator, LaneVehicleGenerator
 
+from tsc_marl.core.features import engine_api
 from tsc_marl.domain import ats
 
 
@@ -151,10 +152,12 @@ class AdvancedMaxPressureAgent(_PressureBase):
         if self.inter_obj.current_phase_time < self.t_min:
             return self.inter_obj.current_phase
 
-        # prosto z silnika — world.get_info buforuje tylko klucze subskrybowane przez generatory
-        lane_veh = self.world.eng.get_lane_vehicles()
-        dist = self.world.eng.get_vehicle_distance()
-        spd = self.world.eng.get_vehicle_speed()
+        # prosto z silnika — world.get_info buforuje tylko klucze subskrybowane przez generatory;
+        # `engine_api`, żeby na SUMO szło przez widok CityFlow z `libsignal/sumo_world.py`
+        eng = engine_api(self.world)
+        lane_veh = eng.get_lane_vehicles()
+        dist = eng.get_vehicle_distance()
+        spd = eng.get_vehicle_speed()
 
         if self.obs_length is not None:
             q = self._windowed_queue(lane_veh, dist, spd, self.obs_length)

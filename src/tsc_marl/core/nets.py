@@ -313,13 +313,19 @@ class Actor(nn.Module):
     przepuszczonych przez softmax daje rozkład zbyt płaski i zawyżoną entropię —
     polityka uczy się wolniej i nic tego nie sygnalizuje.
 
-    MASKOWANIA FAZ TU NIE MA i na razie nie może być: w obu sieciach protokołu
-    każde skrzyżowanie ma dokładnie 8 faz (sprawdzone w `test_graph.py`), więc
-    maska byłaby macierzą jedynek. Gdy przyjdzie sieć niejednorodna (Faza 5),
-    wchodzi ADDYTYWNIE — `logits.masked_fill(~mask, -inf)`. Nigdy przez mnożenie
-    jak `MaskedOutput` z LibSignala: wyzerowany logit to `e⁰/Σ`, czyli zwykle
-    NAJWIĘKSZE prawdopodobieństwo w rozkładzie. Dla Q-wartości to wygaszenie,
+    MASKOWANIE FAZ — tylko na sieci niejednorodnej. JiNan/HangZhou mają po 8 faz
+    na każdym skrzyżowaniu (sprawdzone w `test_graph.py`), więc tam `phase_mask`
+    jest None i ścieżka zostaje bit w bit tą z GATE-a. Kraków ma 2–7 faz: bez maski
+    polityka wybrałaby fazę, której skrzyżowanie nie ma. Maska [N, n_phases], True =
+    faza istnieje, wchodzi ADDYTYWNIE — `logits.masked_fill(~mask, -inf)`. Nigdy przez
+    mnożenie jak `MaskedOutput` z LibSignala: wyzerowany logit to `e⁰/Σ`, czyli
+    zwykle NAJWIĘKSZE prawdopodobieństwo w rozkładzie. Dla Q-wartości to wygaszenie,
     dla polityki odwrotność zamierzonego efektu.
+
+    Maska jest buforem NIETRWAŁYM (`persistent=False`): nie trafia do state_dict, więc
+    checkpointy ładują się bez zmian, a na nowej sieci maskę daje świat, nie plik.
+    W minibatchu PPO wiersze idą `[t, i] → t·N + i` (`RolloutBuffer.minibatches`),
+    stąd powtórzenie maski k razy w `forward`.
     """
 
     def __init__(
@@ -329,6 +335,7 @@ class Actor(nn.Module):
         *,
         hidden: int | None = None,
         encoder: str = "gat",
+        phase_mask: Tensor | None = None,
         **encoder_kwargs: Any,
     ) -> None:
         super().__init__()  # MUSI być pierwsze: bez tego nn.Module nie ma jeszcze
@@ -361,6 +368,16 @@ class Actor(nn.Module):
         head.append(orthogonal_(nn.Linear(in_dim, n_phases), gain=0.01))
         self.head = nn.Sequential(*head)
 
+        if phase_mask is not None:
+            if phase_mask.dim() != 2 or phase_mask.shape[1] != n_phases:
+                raise ValueError(
+                    f"phase_mask musi mieć kształt [N, {n_phases}], ma {tuple(phase_mask.shape)}"
+                )
+            phase_mask = phase_mask.bool()
+            if not bool(phase_mask.any(dim=1).all()):
+                raise ValueError("phase_mask: skrzyżowanie bez żadnej dozwolonej fazy")
+        self.register_buffer("phase_mask", phase_mask, persistent=False)
+
     @classmethod
     def from_registry(cls, ob_length: int, n_phases: int, **overrides: Any) -> Actor:
         """Encoder z `colight.yml`, kształt głowy z argumentów.
@@ -373,7 +390,14 @@ class Actor(nn.Module):
         return cls(ob_length, n_phases, **{**kwargs, **overrides})
 
     def forward(self, x: Tensor, edge_index: Tensor) -> Tensor:  # [N, F] -> [N, n_phases]
-        return self.head(self.encoder(x, edge_index))
+        logits = self.head(self.encoder(x, edge_index))
+        if self.phase_mask is None:
+            return logits
+        n_nodes = self.phase_mask.shape[0]
+        if logits.shape[0] % n_nodes:
+            raise ValueError(f"{logits.shape[0]} wierszy to nie wielokrotność {n_nodes} węzłów")
+        mask = self.phase_mask.repeat(logits.shape[0] // n_nodes, 1)
+        return logits.masked_fill(~mask, float("-inf"))
 
     def extra_repr(self) -> str:
         return f"ob_length={self.ob_length}, n_phases={self.n_phases}, encoder={self.encoder_kind}"
@@ -478,11 +502,20 @@ class ActorCritic(nn.Module):
         critic_hidden: int = 128,
         critic_n_layers: int = 2,
         encoder: str = "gat",
+        phase_mask: Tensor | None = None,
         **encoder_kwargs: Any,
     ) -> None:
         super().__init__()
         critic_kwargs = {k: v for k, v in encoder_kwargs.items() if k != "n_layers"}
-        self.actor = Actor(ob_length, n_phases, hidden=hidden, encoder=encoder, **encoder_kwargs)
+        # maska faz dotyczy tylko polityki — krytyk ocenia stan, nie wybiera akcji
+        self.actor = Actor(
+            ob_length,
+            n_phases,
+            hidden=hidden,
+            encoder=encoder,
+            phase_mask=phase_mask,
+            **encoder_kwargs,
+        )
         # krytyk ZAWSZE GAT — patrz komentarz przy ENCODERS
         self.critic = Critic(
             ob_length, hidden=critic_hidden, n_layers=critic_n_layers, **critic_kwargs

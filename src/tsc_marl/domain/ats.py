@@ -36,6 +36,24 @@ def road_of(lane: str) -> str:
     return lane.rsplit("_", 1)[0]
 
 
+def in_road_lanes(inter: Intersection) -> list[str]:
+    """Wszystkie pasy dróg wjazdowych — dziedzina nagrody (jak `LaneVehicleGenerator`
+    z `in_only=True`) i właściciel detektora w `sensors.failure_units`.
+
+    Oba silniki trzymają drogi inaczej: `world_cityflow` jako słowniki roadnetu
+    (`id`, `lanes`), `world_sumo` jako id krawędzi z mapą `road_lane_mapping`
+    (pasy, przez które idzie jakikolwiek sterowany ruch). Id pasa jest w obu
+    '<droga>_<indeks>', więc reszta kodu nie musi wiedzieć, który silnik liczy.
+    """
+    lanes: list[str] = []
+    for road in inter.in_roads:
+        if isinstance(road, str):
+            lanes += sorted(inter.road_lane_mapping[road])
+        else:
+            lanes += [f"{road['id']}_{i}" for i in range(len(road["lanes"]))]
+    return lanes
+
+
 def always_green_lanelinks(inter: Intersection) -> set[tuple[str, str]]:
     """Lanelinki obecne we WSZYSTKICH fazach — w roadnetach CityFlow (JiNan,
     HangZhou) są to skręty w prawo. Nie konkurują o zielone, więc nie należą ani

@@ -168,3 +168,27 @@ def test_kontrakt_kolejnosci(advanced_colight_world):
 
     with pytest.raises(KeyError, match="brak w kolekcji"):
         g.order(world.intersections[1:], key=lambda inter: inter.id)
+
+
+def test_bare_id_regula_z_libsignala():
+    """Ta sama reguła co `build_index_intersection_map_sumo` — z nią graf, z nią świat."""
+    assert RoadNetGraph.bare_id("GS_207432959") == "207432959"
+    assert RoadNetGraph.bare_id("joinedS_1_cluster_2") == "joinedS_1_cluster_2"
+    assert RoadNetGraph.bare_id("intersection_1_1") == "intersection_1_1"  # CityFlow: tożsamość
+
+
+def test_order_intersections_zdejmuje_prefiks_sumo():
+    """Na SUMO graf ucina `GS_` (sygnalizacje zgadnięte przez netconvert), a świat
+    go zostawia. Bez tej samej reguły w `order_intersections` rdzeń na Krakowie
+    wywala się KeyError-em już przy budowie cech."""
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    path = paths.DATA / "raw_data" / "jinan_3x4" / "roadnet_3_4.json"
+    if not path.is_file():
+        pytest.skip(f"brak roadnetu {path}")
+    g = RoadNetGraph.from_roadnet(path)
+    world = SimpleNamespace(
+        intersections=[SimpleNamespace(id=f"GS_{nid}") for nid in reversed(g.node_idx2id)]
+    )
+    ordered = g.order_intersections(world)
+    assert [g.bare_id(inter.id) for inter in ordered] == list(g.node_idx2id)

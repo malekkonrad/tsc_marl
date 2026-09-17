@@ -226,11 +226,13 @@ runs/
 # cofa to zabrudzenie po każdym runie.
 
 # Duże sieci upstreamowe, gdyby ktoś je skopiował lokalnie; wersjonujemy tylko
-# jinan_3x4 i hangzhou_4x4_advanced (9,4 MB), których faktycznie używamy.
+# jinan_3x4 i hangzhou_4x4_advanced (9,4 MB), których faktycznie używamy,
+# oraz case study Krakowa (gałąź cracow-case-study, budowane przez build.py).
 data/output_data/
 data/raw_data/*
 !data/raw_data/jinan_3x4/
 !data/raw_data/hangzhou_4x4_advanced/
+!data/raw_data/krakow_3w/
 
 # Apptainer / docker save
 *.sif

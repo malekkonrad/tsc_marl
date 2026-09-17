@@ -420,6 +420,57 @@ def test_act_ksztalty_i_tryby(graph):
     assert not (proby == proby[0]).all(), "polityka nie próbkuje — sprawdź Categorical"
 
 
+def heterogeneous_mask(n_nodes: int, n_phases: int = 8) -> tuple[torch.Tensor, torch.Tensor]:
+    """(liczby faz, maska) jak na Krakowie: skrzyżowania od 2 faz do pełnych 8."""
+    counts = torch.tensor([2 + i % (n_phases - 1) for i in range(n_nodes)])
+    return counts, torch.arange(n_phases)[None, :] < counts[:, None]
+
+
+def test_maska_faz_wycina_nieistniejace_fazy(graph):
+    """Sieć niejednorodna: polityka NIE MOŻE wybrać fazy, której skrzyżowanie nie
+    ma — ani próbkując, ani argmaxem. A strata PPO musi zostać skończona: -inf
+    w logitach nie może przeciec do log_prob, entropii ani gradientu."""
+    counts, mask = heterogeneous_mask(graph.n_nodes)
+    torch.manual_seed(0)
+    ac = ActorCritic(OB_LENGTH, 8, phase_mask=mask)
+    x, ei = observations(graph), graph.edge_index
+
+    logits = ac.actor(x, ei)
+    assert torch.isneginf(logits[~mask]).all()
+    assert torch.isfinite(logits[mask]).all()
+
+    torch.manual_seed(3)
+    for _ in range(50):
+        actions, log_probs, _ = ac.act(x, ei)
+        assert (actions < counts).all()
+        assert torch.isfinite(log_probs).all()
+    assert (ac.act(x, ei, deterministic=True)[0] < counts).all()
+
+    log_probs, entropy, _ = ac.evaluate(x, ei, actions)
+    assert torch.isfinite(log_probs).all() and torch.isfinite(entropy).all()
+    (log_probs.sum() + entropy.sum()).backward()
+    for name, p in ac.actor.named_parameters():
+        assert p.grad is not None and torch.isfinite(p.grad).all(), name
+
+
+def test_maska_faz_w_minibatchu_i_poza_state_dict(graph):
+    """Minibatch PPO skleja k kroków czasu w k·N wierszy (`[t, i] → t·N + i`), więc
+    maska ma się powtórzyć k razy. I nie może trafić do checkpointu — inaczej
+    checkpointy GATE-a (bez maski) przestałyby się ładować."""
+    from tsc_marl.core.ppo import tiled_edge_index  # noqa: PLC0415
+
+    _, mask = heterogeneous_mask(graph.n_nodes)
+    k = 3
+    torch.manual_seed(0)
+    ac = ActorCritic(OB_LENGTH, 8, phase_mask=mask)
+    x = torch.randn(k * graph.n_nodes, OB_LENGTH)
+    logits = ac.actor(x, tiled_edge_index(graph.edge_index, graph.n_nodes, k))
+    assert torch.equal(torch.isneginf(logits), ~mask.repeat(k, 1))
+
+    assert not any("phase_mask" in key for key in ac.state_dict())
+    ActorCritic(OB_LENGTH, 8).load_state_dict(ac.state_dict())  # i w drugą stronę też
+
+
 @pytest.mark.slow
 def test_actorcritic_from_registry(advanced_colight_world):
     """Krytyk NIE bierze `n_layers` z configu: tam siedzi wartość actora
