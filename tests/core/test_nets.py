@@ -19,6 +19,7 @@ import math
 
 import pytest
 import torch
+from agent.colight import MultiHeadAttModel
 from torch_geometric.data import Batch, Data
 
 from tsc_marl import paths
@@ -119,6 +120,66 @@ def test_batch_pyg_nie_miesza_grafow(graph):
     assert torch.allclose(enc(batch.x, batch.edge_index), osobno, atol=1e-5)
 
 
+# ------------------------------------------------------------------ UW-attention
+
+
+def test_bez_log_rho_bit_w_bit_jak_oryginal(graph):
+    """Encoder bez log ρ musi liczyć DOKŁADNIE to, co liczył przed Krokiem 1.
+
+    `test_uw_attention.test_no_op` pilnuje tego dla jednej warstwy w izolacji;
+    tutaj chodzi o piętro wyżej: `GATEncoder` woła `block(h, edge_index, True,
+    log_rho=log_rho)`, więc gdyby `log_rho` trafiło na trzecią pozycję zamiast
+    `train`, warstwa dostałaby `True` — czyli +1 do WSZYSTKICH logitów. Softmax
+    jest na wspólną stałą niezmienniczy, więc wyjście byłoby identyczne, a
+    modulacja nie włączyłaby się nigdy (pułapka nr 2 z Kroku 1). Ten test tego
+    sam nie złapie — łapie go `test_log_rho_dociera_do_warstwy_przez_actora`
+    niżej — ale razem zamykają obie strony: bez log ρ nic się nie zmieniło,
+    z log ρ zmienia się dokładnie to, co ma.
+
+    `n_layers=2`, bo dla jednej warstwy pętla po `self.blocks` nie ma jak się
+    pomylić.
+    """
+    torch.manual_seed(0)
+    enc = GATEncoder(OB_LENGTH, n_layers=2).eval()
+    x = observations(graph)
+
+    # Referencja: te same wagi, ale w ORYGINALNEJ warstwie LibSignala.
+    h = enc.embedding_mlp(x, True)
+    for block in enc.blocks:
+        ref = MultiHeadAttModel(d=block.d, dv=block.dv, d_out=block.d_out, nv=block.nv, suffix=0)
+        ref.load_state_dict(block.state_dict())  # strict=True — klucze muszą się zgadzać
+        h = ref.eval()(h, graph.edge_index, True)
+
+    assert torch.equal(enc(x, graph.edge_index), h)
+
+
+def test_log_rho_dociera_do_warstwy_przez_actora(graph):
+    """Wygaszenie z Kroku 2, ale mierzone na wyjściu `Actor`.
+
+    Warstwa ma własny komplet testów, więc ten łapie dokładnie jedno: że log ρ
+    przeżyło drogę `Actor.forward` → `GATEncoder.forward` → `block(...)`.
+    Zgubienie go po drodze (choćby przez `self.encoder(x, edge_index)` bez
+    argumentu) nie wywala niczego — polityka liczy się dalej, tyle że modulacja
+    nie działa, a T2 mierzy rdzeń przebrany za UW-attention.
+    """
+    torch.manual_seed(0)
+    actor = Actor(OB_LENGTH, 8).eval()  # 1-hop, jak w rdzeniu
+    ei = graph.edge_index
+
+    j, i = ei[:, 3].tolist()
+    x = observations(graph)
+    x_zmienione = x.clone()
+    x_zmienione[j] = observations(graph, seed=2)[j]
+
+    log_rho = torch.zeros(ei.shape[1] + graph.n_nodes)
+    log_rho[3] = -1e9
+    assert torch.equal(actor(x, ei, log_rho=log_rho)[i], actor(x_zmienione, ei, log_rho=log_rho)[i])
+
+    # Kontrola: bez log ρ ten sam wiersz REAGUJE na sąsiada (inaczej równość wyżej
+    # dowodziłaby tylko tego, że i nigdy nie patrzyło na j).
+    assert not torch.equal(actor(x, ei)[i], actor(x_zmienione, ei)[i])
+
+
 def test_trzeci_wymiar_odrzucony(graph):
     """[B, N, F] przeszłoby przez embedding i dopiero w `message()` policzyło
     bzdury (LibSignal czyta stamtąd liczbę KRAWĘDZI). Lepiej głośno i od razu."""
@@ -191,6 +252,32 @@ def test_none_nie_widzi_sasiadow_a_mean_widzi(graph):
         enc = build_encoder(kind, OB_LENGTH).eval()
         zmiana = not torch.allclose(enc(x, graph.edge_index)[dst], enc(x2, graph.edge_index)[dst])
         assert zmiana == powinno, kind
+
+
+@pytest.mark.parametrize("kind", ["gat", "mean", "none"])
+def test_actor_dziala_w_kazdym_wariancie_encodera(graph, kind):
+    """Regresja: `Actor.forward` przekazuje `log_rho` do encodera BEZWARUNKOWO,
+    więc wariant, który tego argumentu nie przyjmuje, wywala się `TypeError` przy
+    KAŻDYM wywołaniu — także bez log ρ. Ablacja 1.6 przestaje istnieć.
+
+    Pozostałe testy wariantów wołają `build_encoder` wprost i omijają `Actor`,
+    czyli dokładnie tę ścieżkę, na której to pęka."""
+    torch.manual_seed(0)
+    actor = Actor(OB_LENGTH, 8, encoder=kind).eval()
+    assert actor(observations(graph), graph.edge_index).shape == (graph.n_nodes, 8)
+
+
+@pytest.mark.parametrize("kind", ["mean", "none"])
+def test_warianty_bez_attention_odrzucaja_log_rho(graph, kind):
+    """Odmowa ma być GŁOŚNA. `mean` waży sąsiadów po równo, `none` ich nie widzi —
+    nie ma tam wag attention do modulowania. Gdyby wariant przyjął log ρ i je
+    wyrzucił, bieg „UW-attention + mean-pool" policzyłby się do końca i dał
+    liczby wyglądające jak wynik ablacji."""
+    torch.manual_seed(0)
+    actor = Actor(OB_LENGTH, 8, encoder=kind).eval()
+    log_rho = torch.zeros(graph.edge_index.shape[1] + graph.n_nodes)
+    with pytest.raises(ValueError, match="attention"):
+        actor(observations(graph), graph.edge_index, log_rho=log_rho)
 
 
 @pytest.mark.parametrize("kind", ["gat", "mean", "none"])

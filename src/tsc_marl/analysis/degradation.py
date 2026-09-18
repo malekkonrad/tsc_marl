@@ -123,8 +123,15 @@ def aggregate(df):
     return out
 
 
-def parent_consistency(df) -> list[dict[str, Any]]:
-    """Czysty wynik ewaluatora vs ostatni test treningu — dla każdego uczonego biegu."""
+def parent_consistency(df, skip: frozenset[str] = frozenset()) -> list[dict[str, Any]]:
+    """Czysty wynik ewaluatora vs ostatni test treningu — dla każdego uczonego biegu.
+
+    `skip` = etykiety sterowników, dla których różnica jest OCZEKIWANA i nie jest
+    rozjazdem: kolumna UW-attention jedzie tym samym checkpointem, ale z modulacją
+    attention, więc na czystym z definicji NIE MUSI dać liczby z T1 co do setnej.
+    To, jak bardzo się różni, jest wynikiem (A3a) i stoi w tabeli wyżej — kontrola
+    „ewaluator mierzy tę samą politykę" dotyczy sterowników bez mechanizmu.
+    """
     import pandas as pd  # noqa: PLC0415
 
     from tsc_marl.libsignal import experiment as t1  # noqa: PLC0415
@@ -133,6 +140,8 @@ def parent_consistency(df) -> list[dict[str, Any]]:
     runs = {r.id: r for r in t1.experiment().runs()}
     clean = df[(df["scenario"] == "clean") & df["parent_run"].notna()]
     for r in clean.itertuples():
+        if r.controller in skip:
+            continue
         parent = runs.get(r.parent_run)
         path = parent.path / "metrics.csv" if parent else None
         if path is None or not path.is_file():
@@ -349,7 +358,8 @@ def main(plan: Plan) -> Path:
         p = plot(plan, agg, net, RESULTS / "figures" / f"{plan.name}_{net}.png")
         if p is not None:
             figures[net] = p
-    checks = parent_consistency(df) if not df.empty else []
+    z_mechanizmem = frozenset(c for c in plan.controllers if plan.kind(c) == "policy_uw")
+    checks = parent_consistency(df, z_mechanizmem) if not df.empty else []
     out = RESULTS / f"{plan.name}.md"
     out.write_text(to_markdown(plan, agg, checks, figures), encoding="utf-8")
     if not agg.empty:

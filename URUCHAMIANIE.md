@@ -143,6 +143,7 @@ testowi z treningu — inaczej ewaluator mierzyłby inną politykę niż tabela 
 uv run tsc dataset -n cityflow_jinan3x4_4ph --episodes 3   # zrzut BC (stan → akcja Advanced-MP)
 uv run tsc prototype                                        # bramka 2.0 -> results/gate_2_0.md
 uv run tsc obshead                                          # bramka 2.2 -> results/gate_2_2.md
+uv run tsc obshead --save --window 12 --persistence         # sama głowa -> runs/heads/ (Faza 3)
 uv run tsc severity                                         # przelicznik dotkliwości awarii
 ```
 
@@ -179,6 +180,19 @@ to ta sama komenda: gotowe punkty są pomijane, a bieg przerwany na tej maszynie
 po zapisanym `pid`. `DRY=1` tylko wypisuje komendy; `CPU_J`/`GPU_J` zmieniają
 równoległość.
 
+**UW-attention (Faza 3) — po zakończeniu `noc.sh`:**
+
+```bash
+rsync -av runs/heads/ glider:tsc_marl/runs/heads/   # z LAPTOPA: głowa + u_ref (240 kB)
+bash deploy/glider/uw.sh                            # plan t2_uw w tle
+```
+
+Głowę liczy się na laptopie (`tsc obshead --save`, ~10 s) i kopiuje RAZEM z `u_ref`:
+τ i tabela A3a są zapisane dla TEGO artefaktu, a `u_ref` z innej głowy to liczby
+w innych jednostkach (`load_reference` sprawdza odcisk pliku i odmawia). Skrypt nie
+wystartuje, jeśli brakuje artefaktu dla którejś sieci planu — inaczej punkty
+zostałyby po cichu pominięte.
+
 **Test gałęzi epistemic — po zakończeniu `noc.sh`:**
 
 ```bash
@@ -197,6 +211,10 @@ nadpisze drugi. Po liczeniu na gliderze przenieś wyniki razem z wagami:
 rsync -av glider:tsc_marl/runs/t1/ runs/t1/      # z wagami (potrzebne do degrade)
 rsync -av glider:tsc_marl/runs/t2/ runs/t2/
 ```
+
+Wyniki T2 to katalogi `runs/t2/<run_id>/` (`result.json`, `metrics.csv`, `config.resolved.yml`),
+więc przenoszą się tym samym `rsync` co reszta. Raport przelicza się z nich na laptopie
+(`uv run tsc degrade report t2_uw`) — nie trzeba go kopiować.
 
 ---
 

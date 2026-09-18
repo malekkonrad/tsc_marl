@@ -41,7 +41,10 @@ KINDS = {
 }
 #: `ensemble` = kilka actorów rdzenia naraz: decyduje pierwszy, reszta głosuje — rozbieżność
 #: ich rozkładów to epistemic W SAMEJ POLITYCE RL (test gałęzi epistemic, plan t2_ood).
-LEARNED = ("policy", "colight", "ensemble")
+#: `policy_uw` = TEN SAM checkpoint co `policy`, tylko attention dostaje log ρ z głowy
+#: obserwacyjnej (Faza 3). Modulacja jest bezparametrowa, więc kolumny „rdzeń" i
+#: „rdzeń + UW-attention" różnią się wyłącznie mechanizmem — ten sam plik z wagami.
+LEARNED = ("policy", "colight", "ensemble", "policy_uw")
 #: Sufiks wariantu ruchu w nazwie sieci (`_d0p25`, `_d1p5`, `_r2000`, `_r5816`). `{base}`
 #: w szablonie rodzica = sieć bez sufiksu, czyli sieć, NA KTÓREJ polityka się uczyła.
 VARIANT_SUFFIX = re.compile(r"_(?:d\d+(?:p\d+)?|r\d+)$")
@@ -90,8 +93,11 @@ class Plan:
         return self.controllers[controller].get("agent", controller)
 
     def kind(self, controller: str) -> str:
-        if "ensemble" in self.controllers[controller]:
+        spec = self.controllers[controller]
+        if "ensemble" in spec:
             return "ensemble"
+        if spec.get("uw"):
+            return "policy_uw"
         return KINDS[self.agent(controller)]
 
     def units(self) -> list[Unit]:
@@ -180,6 +186,8 @@ def load_plan(path: str | Path) -> Plan:
             raise SystemExit(f"plan '{p.name}': ensemble tylko z actorów rdzenia ('{label}')")
         if "ensemble" in spec and len(spec["ensemble"]) < 2:
             raise SystemExit(f"plan '{p.name}': ensemble '{label}' potrzebuje ≥ 2 seedów")
+        if spec.get("uw") and KINDS[plan.agent(label)] != "policy":
+            raise SystemExit(f"plan '{p.name}': UW-attention tylko z actorem rdzenia ('{label}')")
     slugs = [slug(s) for s in plan.scenarios]
     if len(set(slugs)) != len(slugs):
         raise SystemExit(f"plan '{p.name}': zdublowane scenariusze {slugs}")
@@ -234,7 +242,7 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, float]:
     for r in rows:
         by.setdefault(r["scenario"], []).append(r)
     for name, group in by.items():
-        for metric in ("att", "throughput", "ens_mi", "ens_disagree"):
+        for metric in ("att", "throughput", "ens_mi", "ens_disagree", "uw_spread", "uw_active"):
             if metric in group[0]:
                 out[f"{metric}__{name}"] = sum(r[metric] for r in group) / len(group)
     if "att__clean" in out:

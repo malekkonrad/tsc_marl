@@ -122,6 +122,71 @@ class PolicyController:
         return logits.argmax(-1).numpy().astype(np.int64)
 
 
+class UWPolicyController:
+    """Actor rdzenia + modulacja wiarygodnością krawędzi (Faza 3, UW-attention).
+
+    TE SAME WAGI co `PolicyController` i to jest sedno kolumny w T2: modulacja jest
+    BEZPARAMETROWA (log ρ przychodzi z zewnątrz, `state_dict` się nie zmienia), więc
+    „rdzeń" i „rdzeń + UW-attention" liczą się z jednego checkpointu z `runs/t1`.
+    Różnica między kolumnami to wyłącznie mechanizm, nie inny trening, nie inny seed.
+
+    Co się dzieje w `act`: odczyt ląduje w oknie głowy obserwacyjnej -> σ na cechę
+    -> u na ruch -> u na krawędź (średnia — kryterium (f) bramki 2.2) -> log ρ =
+    −relu(u − u_ref)/τ -> attention waży sąsiadów tą liczbą. Wszystko z TEGO SAMEGO
+    popsutego wektora stanu, który dostaje polityka: głowa nie ma dostępu do prawdy
+    ani do warstwy awarii, tak jak nie miałaby go na skrzyżowaniu.
+
+    `reset_stats` czyści bufor okna — `robustness/degrade.py` woła go na starcie
+    każdego epizodu. Bez tego pierwsze kroki epizodu liczyłyby u z odczytów sprzed
+    `world.reset()`, czyli z zupełnie innego stanu ruchu.
+    """
+
+    state_independent = False
+
+    def __init__(
+        self,
+        actor: torch.nn.Module,
+        edge_index: torch.Tensor,
+        uncertainty: Any,
+        name: str = "gatppo_uw",
+    ) -> None:
+        self.actor = actor.eval()
+        self.edge_index = edge_index
+        self.uncertainty = uncertainty
+        self.name = name
+        self.reset_stats()
+
+    def reset_stats(self) -> None:
+        self.uncertainty.reset()
+        self._spread: list[float] = []
+        self._active: list[float] = []
+
+    @torch.no_grad()
+    def act(self, obs: np.ndarray) -> np.ndarray:
+        from tsc_marl.uncertainty.obs_head import group_spread  # noqa: PLC0415
+
+        x = torch.from_numpy(np.asarray(obs, dtype=np.float32))
+        log_rho = self.uncertainty.log_rho(obs)
+        self._spread.append(group_spread(log_rho, self.edge_index, x.shape[0]))
+        self._active.append(float((log_rho < 0).float().mean()))
+        return self.actor(x, self.edge_index, log_rho=log_rho).argmax(-1).numpy().astype(np.int64)
+
+    def episode_stats(self) -> dict[str, float]:
+        """Diagnostyka „czy mechanizm w ogóle zadziałał" — bez niej pusty wynik T2
+        jest nieodróżnialny od mechanizmu, który przez cały epizod milczał.
+
+        `uw_spread` to rozstęp log ρ w grupie softmaxu, czyli JEDYNA część sygnału,
+        którą attention widzi (na stałą wspólną dla grupy jest niezmienniczy).
+        """
+        if not self._spread:
+            return {}
+        return {
+            "uw_spread": float(np.mean(self._spread)),
+            "uw_spread_p90": float(np.quantile(self._spread, 0.9)),
+            "uw_active": float(np.mean(self._active)),
+        }
+
+
 class ColightController:
     """Advanced-CoLight z checkpointu: `get_action(test=True)` agenta LibSignala.
 

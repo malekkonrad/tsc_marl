@@ -213,6 +213,39 @@ class Fitted:
         mu, sigma = self.model(z)
         return mu.numpy() * self.y_std + self.y_mean, sigma.numpy() * self.y_std
 
+    def save(self, path: str | Path, *, network: str) -> Path:
+        """Zapisz KOMPLET potrzebny do inferencji: wagi + standaryzacja + config.
+
+        Same wagi nie wystarczą i to jest cała treść tego formatu. σ wychodzi z
+        modelu w jednostkach standaryzowanych, a dopiero `y_std` robi z niego
+        „odchylenie cechy na czystym" — czyli jednostkę, w której zmierzone są
+        u_ref i τ z Kroku 4. Wczytanie wag z cudzą standaryzacją nie wywala się:
+        daje u przeskalowane o stały czynnik, więc próg przestaje znaczyć to,
+        co znaczył, a log ρ modulowałoby o złą wielkość.
+
+        `network` w pliku, bo głowa jest ZWIĄZANA Z SIECIĄ: ta z JiNan na
+        HangZhou daje AUROC 0,53 (`results/gate_2_2.md`), czyli rzut monetą
+        udający detektor. Pomyłka pliku to najcichsza awaria w całym Kroku 5.
+        """
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "format": HEAD_FORMAT,
+                "network": network,
+                "cfg": asdict(self.cfg),
+                "n_feat": int(self.n_feat),
+                "in_mean": torch.as_tensor(self.in_mean),
+                "in_std": torch.as_tensor(self.in_std),
+                "y_mean": torch.as_tensor(self.y_mean),
+                "y_std": torch.as_tensor(self.y_std),
+                "adj": None if self.adj is None else torch.as_tensor(self.adj),
+                "state_dict": self.model.state_dict(),
+            },
+            path,
+        )
+        return path
+
 
 def fit(data: Loaded, cfg: ObsConfig | None = None) -> tuple[Fitted, list[dict]]:
     cfg = cfg or ObsConfig()
@@ -255,6 +288,415 @@ def fit(data: Loaded, cfg: ObsConfig | None = None) -> tuple[Fitted, list[dict]]
             losses.append(float(loss))
         history.append({"epoch": epoch, "nll": float(np.mean(losses))})
     return Fitted(model, in_mean, in_std, y_mean, y_std, n_feat, adj, cfg), history
+
+
+# ------------------------------------------------- zapis i odczyt wytrenowanej głowy
+
+#: Wersja formatu artefaktu. Podbić, gdy zmienia się ZAWARTOŚĆ pliku (nowe pole albo
+#: inne znaczenie istniejącego). Stary plik ma wtedy polec przy wczytaniu, a nie
+#: wczytać się w połowie i dać u w innych jednostkach niż to, na czym dobrano τ.
+HEAD_FORMAT = 1
+
+
+def head_path(network: str) -> Path:
+    """Domyślne miejsce artefaktu. OSOBNY plik na sieć — patrz `Fitted.save`."""
+    from tsc_marl.paths import RUNS  # noqa: PLC0415
+
+    return RUNS / "heads" / f"obs_head__{network}.pt"
+
+
+def load_head(path: str | Path, *, network: str | None = None) -> Fitted:
+    """Odczytaj głowę zapisaną przez `Fitted.save`. -> `Fitted` w trybie eval.
+
+    `network` podany = sprawdzenie zgodności. Nie jest domyślne, bo testy i
+    analizy czytają plik bez kontekstu sieci; sterownik z Kroku 5 podaje ZAWSZE.
+    """
+    blob = torch.load(Path(path), map_location="cpu", weights_only=True)
+    if blob.get("format") != HEAD_FORMAT:
+        raise ValueError(
+            f"format artefaktu {blob.get('format')!r}, oczekiwany {HEAD_FORMAT} — "
+            "przeucz głowę (`tsc obshead --save`)"
+        )
+    if network is not None and blob["network"] != network:
+        raise ValueError(
+            f"głowa nauczona na {blob['network']!r}, a sieć to {network!r}; "
+            "głowa z JiNan na HangZhou ma AUROC 0,53 (patrz results/gate_2_2.md)"
+        )
+
+    raw = dict(blob["cfg"])
+    raw["train_scenarios"] = tuple(raw["train_scenarios"])
+    cfg = ObsConfig(**raw)
+    n_feat = int(blob["n_feat"])
+    model = ObsHead(int(blob["in_mean"].shape[0]), n_feat, cfg.hidden, cfg.min_sigma)
+    model.load_state_dict(blob["state_dict"])  # strict=True — kształty muszą się zgadzać
+    model.eval()
+    adj = None if blob["adj"] is None else blob["adj"].numpy()
+    return Fitted(
+        model,
+        blob["in_mean"].numpy(),
+        blob["in_std"].numpy(),
+        blob["y_mean"].numpy(),
+        blob["y_std"].numpy(),
+        n_feat,
+        adj,
+        cfg,
+    )
+
+
+# --------------------------------------------- poziom odniesienia u na zdrowej sieci
+
+#: Ile odchyleń ponad średnią z czystego okna to jeszcze „normalne" u tej krawędzi.
+#: NIE jest to parametr do strojenia — wybrany raz, na zrzucie BC, przed T2, z tabeli
+#: rozrzutu log ρ w grupie softmaxu (patrz `EdgeReference`). Zmiana = wiersz ablacji.
+REFERENCE_K = 2.0
+REFERENCE_FORMAT = 1
+
+
+@dataclass(frozen=True)
+class EdgeReference:
+    """u, które krawędź pokazuje, gdy NIC się nie zepsuło: `mean + k·sd` z czystego okna.
+
+    PO CO TO ISTNIEJE. u nie spada do zera na zdrowych detektorach — kolejka jest
+    nieprzewidywalna sama z siebie, więc głowa uczciwie raportuje σ > 0, RÓŻNE dla
+    różnych skrzyżowań (σ skaluje się z obciążeniem: `results/gate_2_2.md`, u na
+    czystym 0,492 w JiNan vs 0,380 na lżejszym r2000). Bez odjęcia tego poziomu
+    `log ρ = −u/τ` karze krawędź za to, że jest ruchliwa, a nie za awarię —
+    zmierzone na czystym: rozstęp log ρ w grupie softmaxu **1,13**, czyli najlepszy
+    i najgorszy sąsiad różnią się trzykrotnie na ZDROWEJ sieci. To łamie A3a
+    („no-op na czystym") i psuje porównywalność T1 z rdzeniem.
+
+    DLACZEGO `mean + 2·sd`, a nie średnia ani kwantyl. Zmierzone na tej samej
+    głowie, średni rozstęp log ρ w grupie (τ = 0,38), ogon epizodu:
+
+        odniesienie    clean    mask0p25    mask0p5    gauss2
+        średnia        1,132      1,735      1,862     3,307
+        q90            0,527      0,901      0,942     2,408
+        mean + 2·sd    0,248      0,454      0,446     1,484
+
+    `mean + 2·sd` jest jednocześnie NAJCISZSZE na czystym i ma NAJWIĘKSZY
+    kontrast awaria/czyste (mask0p25: 1,8× vs 1,5× dla średniej; gauss2: 6,0×
+    vs 2,9×). Kwantyl q90 odpada dodatkowo przez ogon: jedna krawędź miała q90
+    = 2,46, czyli stałaby się ślepa na wszystko poniżej katastrofy.
+
+    τ tej tabeli nie zmienia — skaluje wszystkie wiersze liniowo (log ρ ∝ 1/τ),
+    więc wybór odniesienia i wybór τ są niezależne.
+
+    KOLEJNOŚĆ: `u_edge` idzie w kolejności `edges`, czyli (CEL i, ŹRÓDŁO j), tak
+    jak zwraca `edge_uncertainty` — NIE w kolejności `graph.edge_index`, która
+    jest (źródło, cel) i inaczej posortowana. Przepięcie jednej na drugą to
+    Krok 4 i jedyne miejsce, gdzie ta permutacja ma prawo się wydarzyć.
+    """
+
+    u_edge: np.ndarray  # [E], w kolejności `edges`
+    u_self: np.ndarray  # [N], w kolejności węzłów — pętle własne
+    edges: tuple[tuple[int, int], ...]
+    network: str
+    k: float
+    scenario: str
+    head_sha: str
+
+    def save(self, path: str | Path) -> Path:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(
+            path,
+            format=np.array(REFERENCE_FORMAT),
+            u_edge=self.u_edge,
+            u_self=self.u_self,
+            edges=np.array(self.edges, dtype=np.int64).reshape(-1, 2),
+            network=np.array(self.network),
+            k=np.array(self.k),
+            scenario=np.array(self.scenario),
+            head_sha=np.array(self.head_sha),
+        )
+        return path
+
+
+def file_sha(path: str | Path) -> str:
+    """Odcisk artefaktu głowy — 16 znaków wystarczy, to nie jest zabezpieczenie
+    kryptograficzne, tylko wykrywacz rozjazdu „u_ref z innej głowy niż wagi"."""
+    import hashlib  # noqa: PLC0415
+
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:16]
+
+
+def reference_path(network: str) -> Path:
+    from tsc_marl.paths import RUNS  # noqa: PLC0415
+
+    return RUNS / "heads" / f"u_ref__{network}.npz"
+
+
+def edge_reference(
+    fitted: Fitted,
+    data: Loaded,
+    sources: np.ndarray,
+    *,
+    network: str,
+    head_sha: str,
+    k: float = REFERENCE_K,
+    scenario: str = "clean",
+) -> EdgeReference:
+    """Policz odniesienie na TRENINGOWEJ części czystego okna.
+
+    Treningowej, nie całej: gdyby u_ref liczyło się na tych samych krokach, na
+    których potem sprawdzamy „no-op na czystym", ta własność byłaby tautologią.
+    Ogon epizodu zostaje wolny na sprawdzenie.
+    """
+    train = data.mask(fitted.cfg.split, train=True)
+    _, sigma = fitted.predict(data, data.x[scenario])
+    u_mov = movement_uncertainty(sigma / fitted.y_std, sources.shape[1])  # [T, N, n_mov]
+    u_edge, edges = edge_uncertainty(u_mov, sources, "mean")
+
+    e, s = u_edge[train], u_mov[train].mean(-1)  # pętla własna: ŚREDNIA PO WSZYSTKICH
+    return EdgeReference(  # ruchach węzła, też tych z brzegu sieci (decyzja 2 Kroku 4)
+        u_edge=e.mean(0) + k * e.std(0),
+        u_self=s.mean(0) + k * s.std(0),
+        edges=tuple((int(i), int(j)) for i, j in edges),
+        network=network,
+        k=float(k),
+        scenario=scenario,
+        head_sha=head_sha,
+    )
+
+
+def load_reference(
+    path: str | Path, *, network: str | None = None, head: str | Path | None = None
+) -> EdgeReference:
+    """Odczytaj odniesienie. `head` podana = sprawdzenie, że pasuje do TYCH wag."""
+    blob = np.load(Path(path), allow_pickle=False)
+    if int(blob["format"]) != REFERENCE_FORMAT:
+        raise ValueError(f"format u_ref {int(blob['format'])}, oczekiwany {REFERENCE_FORMAT}")
+    ref = EdgeReference(
+        u_edge=blob["u_edge"],
+        u_self=blob["u_self"],
+        edges=tuple((int(i), int(j)) for i, j in blob["edges"]),
+        network=str(blob["network"]),
+        k=float(blob["k"]),
+        scenario=str(blob["scenario"]),
+        head_sha=str(blob["head_sha"]),
+    )
+    if network is not None and ref.network != network:
+        raise ValueError(f"u_ref policzone na {ref.network!r}, a sieć to {network!r}")
+    if head is not None and (sha := file_sha(head)) != ref.head_sha:
+        raise ValueError(
+            f"u_ref policzone inną głową (odcisk {ref.head_sha}, plik ma {sha}) — "
+            "u jest w jednostkach TEJ głowy, więc próg przestaje cokolwiek znaczyć; "
+            "przelicz: `tsc obshead --save`"
+        )
+    return ref
+
+
+# ------------------------------------------------------- u -> log ρ (wejście warstwy)
+
+#: Skala modulacji: ile jednostek NADMIARU u (ponad `EdgeReference`) to jeden nat
+#: w logicie attention. Dobrane na zrzucie BC regułą zapisaną PRZED T2: „scenariusz
+#: gauss2 ma dawać średni rozstęp log ρ w grupie softmaxu równy ln 10", czyli
+#: najbardziej i najmniej wiarygodny sąsiad różnią się tam dziesięciokrotnie.
+#: Wyszło 0,245 → zaokrąglone. Co z tego wychodzi na pozostałych scenariuszach
+#: (ogon epizodu, JiNan, głowa okno 12 + trwałość):
+#:
+#:     scenariusz              średni rozstęp   mediana   q90
+#:     clean                   0,38  (×1,5)      0,00     0,00
+#:     mask0p25                0,69  (×2,0)      0,00     2,34
+#:     mask0p25_intersection   0,48  (×1,6)      0,00     1,36
+#:     mask0p5                 0,68  (×2,0)      0,00     2,28
+#:     gauss1                  0,89  (×2,4)      0,00     3,38
+#:     gauss2                  2,26  (×9,5)      0,00     7,41
+#:     drift0p3                0,55  (×1,7)      0,00     0,92
+#:
+#: MEDIANA ZERO wszędzie, łącznie z awariami: mechanizm jest RZADKI w czasie —
+#: milczy, dopóki u nie wyjdzie ponad własną normę krawędzi, i reaguje na wyskoki.
+#: Na czystym nawet q90 = 0, czyli w ≥90% kroków modulacji NIE MA wcale; średnia
+#: 0,38 bierze się z rzadkich pików. To jest A3a zmierzone, nie założone.
+#: `drift0p3` dostaje 0,55 mimo AUROC 0,536 — głowa dryfu nie wykrywa, więc to
+#: modulacja w dużej mierze przypadkowa. Do zapisania w rozdziale 4.
+DEFAULT_TAU = 0.25
+
+
+def log_rho(
+    u_edge: np.ndarray,
+    u_self: np.ndarray,
+    ref: EdgeReference,
+    edge_index: torch.Tensor,
+    *,
+    tau: float = DEFAULT_TAU,
+) -> torch.Tensor:
+    """u -> log ρ [E + N] w kolejności `edge_index` PO `add_self_loops`.
+
+        log ρ = −relu(u − u_ref) / τ
+
+    `relu`, nie samo odejmowanie: krawędź spokojniejsza niż zwykle ma zostać przy
+    wadze normalnej, a nie dostać premię. Attention widzi tylko różnice względne,
+    więc premia za ciszę byłaby kolejnym kanałem zmieniającym zachowanie na
+    czystym — a A3a mówi, że na czystym ma nie być zmiany.
+
+    PUŁAPKA KOLEJNOŚCI, jedyny powód, dla którego ta funkcja w ogóle istnieje.
+    `ref.edges` (za `edge_uncertainty`) to pary **(CEL i, ŹRÓDŁO j)**, posortowane
+    po celu. `edge_index` to kolumny **(ŹRÓDŁO, CEL)** w kolejności LibSignala.
+    Trzy rzeczy naraz: para odwrócona, sortowanie inne, a zbiór krawędzi na
+    naszych sieciach jest SYMETRYCZNY — więc pomyłka w kolejności pary NIE rzuci
+    `KeyError`. Lookup się uda i przypisze niepewność krawędzi j→i kolumnie i→j:
+    pełny, poprawnie długi wektor, w którym każda wartość siedzi na krawędzi
+    przeciwnej do swojej. Nic tego nie zgłosi. Stąd jawny słownik i test, który
+    ustawia u na JEDNEJ krawędzi i sprawdza, w której kolumnie wylądowało.
+
+    Pętle własne dokleja się na końcu w kolejności węzłów, bo tak robi
+    `add_self_loops` — kontrakt `UncertaintyWeightedAttention`.
+    """
+    if u_edge.shape != ref.u_edge.shape or u_self.shape != ref.u_self.shape:
+        raise ValueError(
+            f"u ma kształty {u_edge.shape}/{u_self.shape}, a odniesienie "
+            f"{ref.u_edge.shape}/{ref.u_self.shape}"
+        )
+    if edge_index.shape[0] != 2:
+        raise ValueError(f"edge_index ma być [2, E], jest {tuple(edge_index.shape)}")
+    if tau <= 0:
+        raise ValueError(f"τ musi być dodatnie, jest {tau}")
+
+    kolumny = [(int(src), int(dst)) for src, dst in edge_index.t().tolist()]
+    gdzie = {(i, j): k for k, (i, j) in enumerate(ref.edges)}
+    try:  # (źródło, cel) -> szukamy u krawędzi (cel, źródło)
+        order = [gdzie[(dst, src)] for src, dst in kolumny]
+    except KeyError as brak:
+        raise ValueError(
+            f"krawędź {brak.args[0]!r} z edge_index nie ma swojego u w odniesieniu "
+            f"({len(ref.edges)} krawędzi) — u_ref policzone na innej sieci albo na "
+            "innym zestawie ruchów (patrz `drop_always_green` w `movement_sources`)"
+        ) from brak
+    if len(set(order)) != len(ref.edges):
+        raise ValueError(
+            f"edge_index pokrywa {len(set(order))} z {len(ref.edges)} krawędzi odniesienia"
+        )
+
+    nadmiar_e = np.maximum(u_edge - ref.u_edge, 0.0)[order]
+    nadmiar_s = np.maximum(u_self - ref.u_self, 0.0)
+    out = -np.concatenate([nadmiar_e, nadmiar_s]) / tau
+    return torch.from_numpy(out.astype(np.float32))
+
+
+def group_spread(log_rho: torch.Tensor, edge_index: torch.Tensor, n_nodes: int) -> float:
+    """Średni rozstęp (max − min) log ρ w GRUPIE SOFTMAXU węzła: krawędzie wchodzące
+    do i plus jego pętla własna.
+
+    To jest jedyna uczciwa miara „ile mechanizm w ogóle robi". Sam poziom log ρ nie
+    mówi nic, bo softmax jest niezmienniczy na stałą wspólną dla grupy (test 3 z
+    Kroku 2) — wspólne przesunięcie całej grupy warstwa ignoruje. Liczy się WYŁĄCZNIE
+    rozpiętość wewnątrz grupy: 0 = attention nie widzi różnicy, ln 10 ≈ 2,3 = najlepszy
+    i najgorszy sąsiad różnią się dziesięciokrotnie. Na tej mierze dobrane jest τ.
+    """
+    lr = log_rho.detach().numpy()
+    cel = np.concatenate([edge_index[1].numpy(), np.arange(n_nodes)])
+    grupy = [lr[cel == n] for n in range(n_nodes)]
+    return float(np.mean([g.max() - g.min() for g in grupy if len(g)]))
+
+
+class OnlineUncertainty:
+    """Głowa w pętli sterowania: bufor okna -> u -> log ρ, jeden krok na raz.
+
+    Offline głowa dostaje cały epizod naraz i indeksuje okno przez `window_index`.
+    W pętli sterowania nie ma „całego epizodu" — jest bufor ostatnich odczytów. Ta
+    klasa robi z bufora DOKŁADNIE to samo wejście, które zbudowałby tryb offline,
+    i o to chodzi w jej testach: `build_inputs` przyjmuje dowolne [T, N, F], więc
+    podajemy bufor jako T = `window` z NAJNOWSZYM ODCZYTEM W WIERSZU 0 i indeksem
+    okna `[0, 1, …, k−1]` przyciętym do długości bufora.
+
+    ROZGRZEWKA. Na starcie epizodu bufor jest krótszy niż okno. Offline `window_index`
+    przycina wtedy do początku epizodu (powtarza najstarszy dostępny indeks) — i my
+    musimy powtórzyć to CO DO INDEKSU, nie „jakoś rozsądnie". Inaczej pierwsze kroki
+    każdego epizodu mają inny rozkład u niż ten, na którym policzone jest `u_ref`,
+    a mechanizm zaczyna epizod od wygaszania losowych sąsiadów.
+
+    CZYSZCZENIE BUFORA to nie higiena, tylko poprawność: odczyt sprzed `world.reset()`
+    opisuje zupełnie inny stan ruchu. Sterownik woła `reset()` z `reset_stats()`,
+    który `robustness/degrade.py` odpala na starcie każdego epizodu.
+    """
+
+    def __init__(
+        self,
+        head: Fitted,
+        ref: EdgeReference,
+        sources: np.ndarray,
+        edge_index: torch.Tensor,
+        *,
+        tau: float = DEFAULT_TAU,
+    ) -> None:
+        if sources.shape[0] != int(edge_index.max()) + 1:
+            raise ValueError(
+                f"sources ma {sources.shape[0]} węzłów, edge_index widzi "
+                f"{int(edge_index.max()) + 1}"
+            )
+        self.head, self.ref, self.sources, self.edge_index, self.tau = (
+            head,
+            ref,
+            sources,
+            edge_index,
+            tau,
+        )
+        self.n_nodes = int(sources.shape[0])
+        self.n_mov = int(sources.shape[1])
+        self.adj = neighbor_matrix(edge_index.numpy(), self.n_nodes) if head.cfg.neighbors else None
+        self.n_persist = head.n_feat if head.cfg.persistence else 0
+        self._buf: list[np.ndarray] = []
+
+    def reset(self) -> None:
+        self._buf.clear()
+
+    @torch.no_grad()
+    def log_rho(self, obs: np.ndarray) -> torch.Tensor:
+        """Dołóż odczyt do okna i policz log ρ [E + N] dla TEGO kroku."""
+        obs = np.asarray(obs, dtype=np.float32)
+        if obs.shape[0] != self.n_nodes:
+            raise ValueError(f"obserwacja ma {obs.shape[0]} wierszy, graf ma {self.n_nodes}")
+        self._buf.insert(0, obs)  # najnowszy z przodu — tak indeksuje `window_index`
+        del self._buf[self.head.cfg.window :]
+
+        hist = np.stack(self._buf)  # [m, N, F], m ≤ window, wiersz 0 = najnowszy
+        # PEŁNA macierz okien [m, k], nie jeden wiersz: gałąź sąsiadów w `build_inputs`
+        # liczy się dla CAŁEGO `x` (`einsum` po wymiarze czasu), więc przy jednym
+        # wierszu `win` kawałki wyjścia mają różną wysokość i `concatenate` pada.
+        # Liczymy wszystkie m wierszy (MLP na 12 wierszach to nic) i bierzemy wiersz 0.
+        m, k = len(self._buf), self.head.cfg.window
+        win = np.minimum(np.arange(m)[:, None] + np.arange(k)[None, :], m - 1)
+        z = build_inputs(hist, win, self.adj, self.n_persist)[:1]  # [1, N, D]
+        if z.shape[-1] != self.head.in_mean.shape[0]:
+            raise ValueError(
+                f"wejście głowy ma szerokość {z.shape[-1]}, a głowa uczyła się na "
+                f"{self.head.in_mean.shape[0]} — inna konfiguracja okna/sąsiadów/trwałości"
+            )
+
+        z = (z - self.head.in_mean) / self.head.in_std
+        self.head.model.eval()
+        _, sigma = self.head.model(torch.from_numpy(z.astype(np.float32)))
+        # przez `y_std` tam i z powrotem, DOKŁADNIE jak `Fitted.predict` + `evaluate`:
+        # u ma być w tych samych jednostkach co `u_ref`, co do ostatniego bitu
+        s_std = (sigma.numpy() * self.head.y_std) / self.head.y_std
+        u_mov = movement_uncertainty(s_std, self.n_mov)  # [1, N, n_mov]
+        u_edge, _ = edge_uncertainty(u_mov, self.sources, "mean")  # [1, E]
+        return log_rho(u_edge[0], u_mov[0].mean(-1), self.ref, self.edge_index, tau=self.tau)
+
+
+def train_head(
+    network: str = "cityflow_jinan3x4_4ph",
+    cfg: ObsConfig | None = None,
+    out: str | Path | None = None,
+) -> tuple[Path, Path]:
+    """Głowa + jej poziom odniesienia na zrzucie BC -> (ścieżka głowy, ścieżka u_ref).
+
+    Oba naraz i zawsze, bo rozjazd między nimi jest cichy: u_ref z innej głowy to
+    liczby w innych jednostkach, a nie błąd, który coś zgłosi. Osobno od `run()`,
+    bo `run()` liczy całą bramkę razem z deep ensemble z 2.0.
+    """
+    from tsc_marl.paths import RUNS  # noqa: PLC0415
+    from tsc_marl.uncertainty import prototype as P  # noqa: PLC0415
+
+    P.cap_threads()
+    base = load(RUNS / "bc" / f"advancedmp__{network}__ep3" / "dataset.npz")
+    fitted, _ = fit(base, cfg or ObsConfig())
+    head = fitted.save(out or head_path(network), network=network)
+
+    sources = movement_sources(network, base.dead["clean"].shape[-1])
+    ref = edge_reference(fitted, base, sources, network=network, head_sha=file_sha(head))
+    return head, ref.save(reference_path(network))
 
 
 # ---------------------------------------------------------------- metryki

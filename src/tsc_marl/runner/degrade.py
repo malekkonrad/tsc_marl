@@ -25,7 +25,14 @@ from typing import Any
 
 from tsc_marl import libsignal
 from tsc_marl.paths import REPO_ROOT, RUNS
-from tsc_marl.robustness.degrade import EXPERIMENT, LEARNED, Plan, Unit, load_plan
+from tsc_marl.robustness.degrade import (
+    EXPERIMENT,
+    LEARNED,
+    Plan,
+    Unit,
+    base_network,
+    load_plan,
+)
 
 
 def experiment():
@@ -139,6 +146,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
+def build_uncertainty(plan: Plan, unit: Unit, env):
+    """Głowa obserwacyjna + jej `u_ref` dla TEJ sieci (`tsc obshead --save`).
+
+    Artefakty są związane z siecią: głowa z JiNan na HangZhou ma AUROC 0,53
+    (`results/gate_2_2.md`), więc `load_head`/`load_reference` dostają nazwę sieci
+    i mają prawo krzyknąć. Wariant popytu (`_d0p25`) czyta głowę sieci BAZOWEJ —
+    tej, na której zrzucono BC — bo taka jest też konwencja rodzica w `runs/t1`.
+    Uwaga do rozdziału 4: `u_ref` jest skalibrowane na obciążeniu zrzutu, więc przy
+    cięższym ruchu niż w zrzucie u rośnie wszędzie i `relu` wygeneruje nadmiar bez
+    awarii; przy lżejszym — zje go (brak fałszywych alarmów).
+    """
+    from tsc_marl.uncertainty import obs_head as oh  # noqa: PLC0415
+
+    net = base_network(unit.network)
+    head, ref = oh.head_path(net), oh.reference_path(net)
+    if not head.is_file() or not ref.is_file():
+        raise SystemExit(
+            f"brak głowy obserwacyjnej dla '{net}' ({head.name}, {ref.name}) — "
+            f"policz ją: tsc obshead -n {net} --save --window 12 --persistence"
+        )
+    fitted = oh.load_head(head, network=net)
+    reference = oh.load_reference(ref, network=net, head=head)
+    sources = oh.movement_sources(net, env.features.n_mov)
+    tau = float(plan.controllers[unit.controller]["uw"].get("tau", oh.DEFAULT_TAU))
+    return oh.OnlineUncertainty(fitted, reference, sources, env.graph.edge_index, tau=tau)
+
+
 def build_controller(plan: Plan, unit: Unit, env, config, agents, ckpts: list[Path]):
     import numpy as np  # noqa: PLC0415
     import torch  # noqa: PLC0415
@@ -149,7 +183,7 @@ def build_controller(plan: Plan, unit: Unit, env, config, agents, ckpts: list[Pa
     kind = plan.kind(unit.controller)
     feats = env.features
     model = config["model"]
-    if kind in ("policy", "ensemble"):
+    if kind in ("policy", "ensemble", "policy_uw"):
         from tsc_marl.core.nets import ActorCritic  # noqa: PLC0415
 
         actors = []
@@ -161,6 +195,13 @@ def build_controller(plan: Plan, unit: Unit, env, config, agents, ckpts: list[Pa
             actors.append(ac.actor)
         if kind == "ensemble":
             return c.EnsembleController(actors, env.graph.edge_index, name=unit.controller)
+        if kind == "policy_uw":
+            return c.UWPolicyController(
+                actors[0],
+                env.graph.edge_index,
+                build_uncertainty(plan, unit, env),
+                name=unit.controller,
+            )
         return c.PolicyController(actors[0], env.graph.edge_index, name=unit.controller)
     if kind == "colight":
         (agent,) = agents

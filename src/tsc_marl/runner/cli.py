@@ -98,6 +98,9 @@ def obshead(
     mask_variants: bool = typer.Option(
         False, help="porównaj warianty na martwych detektorach -> results/gate_2_2_masks.md"
     ),
+    save: bool = typer.Option(
+        False, help="ucz SAMĄ głowę (bez bramki) i zapisz artefakt -> runs/heads/"
+    ),
 ) -> None:
     """Bramka prototypu 2.2 — głowa obserwacyjna (per ruch → krawędź) -> results/gate_2_2.md."""
     from tsc_marl.uncertainty import obs_head as module
@@ -108,6 +111,10 @@ def obshead(
     cfg = module.ObsConfig(
         window=window, neighbors=neighbors, epochs=epochs, persistence=persistence
     )
+    if save:
+        for path in module.train_head(network, cfg):
+            print(path)
+        return
     print(module.run(cfg, network=network))
 
 
