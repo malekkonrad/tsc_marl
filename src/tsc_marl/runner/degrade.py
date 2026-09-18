@@ -84,7 +84,11 @@ def checkpoint(plan: Plan, unit: Unit, parent) -> Path | None:
     if parent is None:
         return None
     kind = plan.kind(unit.controller)
-    if kind in ("policy", "ensemble"):
+    # `policy_uw` MUSI tu być: to ten sam checkpoint rdzenia co `policy` (modulacja jest
+    # bezparametrowa). Bez tego wpadał w gałąź LibSignala i szukał wag pod
+    # `engine/tsc/cityflow_gatppo/.../model/*.pt`, czyli w układzie, którego rdzeń
+    # nigdy nie zapisuje — punkt był POMIJANY z komunikatem „brak wag", zamiast paść.
+    if kind in ("policy", "ensemble", "policy_uw"):
         return parent.path / "engine" / "core.pt"
     from tsc_marl.runner.evaluate import available_checkpoints, engine_run_dir  # noqa: PLC0415
 

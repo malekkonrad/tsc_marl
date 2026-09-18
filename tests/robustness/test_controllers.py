@@ -138,6 +138,53 @@ def test_fixedtime_liczony_tylko_na_czystym(tmp_path):
     assert [d.slug(s) for s in specs] == ["clean"]
 
 
+def plan_uw(tmp_path, agent: str = "gatppo"):
+    """Plan z dodatkową kolumną UW. Wstrzyknięte PODMIANĄ w blok `controllers`,
+    bo `extra` w `plan_file` dokleja się na końcu pliku, czyli pod `scenarios`."""
+    p = plan_file(tmp_path)
+    p.write_text(
+        p.read_text().replace(
+            "fixedtime: {}",
+            "fixedtime: {}\n"
+            f"  {agent}_uw:\n"
+            f"    agent: {agent}\n"
+            "    seeds: [0, 1]\n"
+            "    uw: {tau: 0.25}",
+        )
+    )
+    return p
+
+
+def test_plan_uw_to_osobny_rodzaj_ale_ten_sam_rodzic(tmp_path):
+    """Kolumna UW jedzie TYM SAMYM checkpointem co rdzeń — modulacja jest
+    bezparametrowa, więc różnica między kolumnami to wyłącznie mechanizm."""
+    plan = d.load_plan(plan_uw(tmp_path))
+    assert plan.kind("gatppo_uw") == "policy_uw" and plan.kind("gatppo") == "policy"
+    assert plan.parent_id(d.Unit("gatppo_uw", "siec_a", 1)) == "gatppo__siec_a__s1_y5"
+    assert len([u for u in plan.units() if u.controller == "gatppo_uw"]) == 4  # 2 sieci × 2 seedy
+
+
+def test_uw_szuka_wag_tam_gdzie_rdzen(tmp_path):
+    """Regresja. `checkpoint()` rozgałęzia się po `kind`, a nie po agencie — gdy
+    `policy_uw` wypadnie z tej gałęzi, leci do układu katalogów LibSignala, którego
+    rdzeń nigdy nie zapisuje. Punkt jest wtedy POMIJANY z komunikatem „brak wag",
+    czyli plan liczy się dalej BEZ kolumny, dla której powstał."""
+    from tsc_marl.runner.degrade import checkpoint  # noqa: PLC0415
+
+    plan = d.load_plan(plan_uw(tmp_path))
+    parent = SimpleNamespace(path=tmp_path / "rodzic", params={"network": "siec_a"})
+    sciezki = {
+        ctrl: checkpoint(plan, d.Unit(ctrl, "siec_a", 0), parent)
+        for ctrl in ("gatppo", "gatppo_uw")
+    }
+    assert sciezki["gatppo_uw"] == sciezki["gatppo"] == tmp_path / "rodzic" / "engine" / "core.pt"
+
+
+def test_plan_uw_tylko_z_actorem_rdzenia(tmp_path):
+    with pytest.raises(SystemExit, match="UW-attention"):
+        d.load_plan(plan_uw(tmp_path, agent="efficientmp"))
+
+
 def test_plan_odrzuca_nieznany_sterownik_i_pole(tmp_path):
     p = plan_file(tmp_path)
     p.write_text(p.read_text().replace("fixedtime: {}", "fixedtime: {}\n  rakieta: {}"))
