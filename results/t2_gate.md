@@ -26,20 +26,19 @@ FixedTime (niezależny od odczytów): **507.0 s**.
 
 ![krzywe degradacji cityflow_jinan3x4_4ph](figures/t2_gate_cityflow_jinan3x4_4ph.png)
 
-## Krzywa zapasu: próg bramki × scenariusz
+## Mechanizmy × scenariusz
 
 Δ ATT [s] względem `rdzeń GAT+PPO+CTDE`, sparowana po (seed, losowanie); w nawiasie odsetek par (decyzja, węzeł) przejętych przez regułę. **pogrubienie** = |t| ≥ 2.8. Δ < 0 = bramka lepsza.
 
-Próg to ułamek pasów wjazdowych węzła w awarii, od którego oddaje sterowanie regule — im wyżej, tym bramka ostrożniejsza.
 
 ### cityflow_jinan3x4_4ph
 
-| próg | `clean` | `mask0p1` | `mask0p25` | `mask0p25_intersection` | `mask0p5` | `mask0p75` |
+| mechanizm | `clean` | `mask0p1` | `mask0p25` | `mask0p25_intersection` | `mask0p5` | `mask0p75` |
 |---|---:|---:|---:|---:|---:|---:|
-| 0.25 | +0.0 (0%) | +11.2 (15%) | +11.2 (63%) | **-120.4** (27%) | **-238.8** (93%) | **-402.5** (98%) |
-| 0.50 | +0.0 (0%) | +6.3 (2%) | +4.1 (7%) | **-120.4** (27%) | **-241.5** (62%) | **-402.6** (97%) |
-| 0.75 | +0.0 (0%) | +0.0 (0%) | +0.0 (0%) | **-120.4** (27%) | **-59.5** (10%) | **-314.7** (65%) |
-| 1.00 | +0.0 (0%) | +0.0 (0%) | +0.0 (0%) | **-120.4** (27%) | +0.0 (0%) | -24.0 (5%) |
+| bramka, próg 0,25 | +0.0 (0%) | +11.2 (15%) | +11.2 (63%) | **-120.4** (27%) | **-238.8** (93%) | **-402.5** (98%) |
+| bramka, próg 0,50 | +0.0 (0%) | +6.3 (2%) | +4.1 (7%) | **-120.4** (27%) | **-241.5** (62%) | **-402.6** (97%) |
+| bramka, próg 0,75 | +0.0 (0%) | +0.0 (0%) | +0.0 (0%) | **-120.4** (27%) | **-59.5** (10%) | **-314.7** (65%) |
+| bramka, próg 1,00 | +0.0 (0%) | +0.0 (0%) | +0.0 (0%) | **-120.4** (27%) | +0.0 (0%) | -24.0 (5%) |
 
 ## Kontrola: ewaluator mierzy tę samą politykę co T1
 

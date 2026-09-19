@@ -61,6 +61,12 @@ COLORS = {
     "gatppo_gate_oracle": "#7a4fd6",
     "gatppo_gate_rule": "#1baf7a",
     "gatppo_gate_uq": "#eda100",
+    # sweep τ (t2_uw_tau): znowu JEDEN parametr rosnący, więc rampa — od słabej
+    # modulacji (jasna) do najsilniejszej (ciemna). Uwaga na kierunek: NIŻSZE τ
+    # znaczy SILNIEJSZA modulacja, więc ciemny = mała liczba.
+    "gatppo_uw_t0p25": "#f3a6bd",
+    "gatppo_uw_t0p10": "#d63f6e",
+    "gatppo_uw_t0p05": "#8c1c40",
 }
 LABELS = {
     "gatppo": "rdzeń GAT+PPO+CTDE",
@@ -80,6 +86,9 @@ LABELS = {
     "gatppo_gate_oracle": "bramka: wyrocznia (sufit)",
     "gatppo_gate_rule": "bramka: reguła (trwałość)",
     "gatppo_gate_uq": "bramka: UQ (głowa)",
+    "gatppo_uw_t0p25": "UW-attention, τ = 0,25",
+    "gatppo_uw_t0p10": "UW-attention, τ = 0,10",
+    "gatppo_uw_t0p05": "UW-attention, τ = 0,05",
 }
 INK, INK2, MUTED = "#0b0b0b", "#52514e", "#898781"
 GRID, AXIS, SURFACE = "#e1e0d9", "#c3c2b7", "#fcfcfb"
@@ -168,6 +177,7 @@ TITLES = {
     "t2_ood": "T2 na ruchu spoza treningu",
     "t2_gate": "T2 z bramką fallbacku",
     "t2_gate_real": "T2 z bramką realną (reguła vs UQ)",
+    "t2_uw_tau": "T2 — sweep τ dla UW-attention",
 }
 
 #: Próg |t| dla różnicy parowanej. 2,8 ≈ poprawka Bonferroniego na ~26 porównań
@@ -408,37 +418,36 @@ def _sweep_section(plan: Plan, df, pary: list[tuple[str, str]]) -> list[str]:
     Czytać po KIERUNKU, nie po pojedynczym `t`: przy kilkunastu komórkach jedna
     przekroczy próg przypadkiem, a spójność znaku w kolumnie „lepszy w" nie.
     """
-    progi = []
-    for mechanizm, _ in pary:
-        spec = plan.controllers[mechanizm].get("gate", {})
-        progi.append((float(spec.get("threshold", 0.5)), mechanizm))
-    progi.sort()
+    # Wiersze po KOLUMNIE, nie po progu. Plan bywa sweepem jednego parametru
+    # (`t2_gate`: cztery progi) albo zestawem RÓŻNYCH mechanizmów (`t2_gate_real`:
+    # reguła, UQ, wyrocznia). Klucz po progu sklejał te drugie w jeden wiersz —
+    # `rule` i `uq` nie mają progu w planie, więc obie lądowały pod 0,5 i jedna
+    # nadpisywała drugą, znikając z raportu bez śladu.
+    mechanizmy = [m for m, _ in pary]
     baza = pary[0][1]
 
     lines = [
-        "## Krzywa zapasu: próg bramki × scenariusz",
+        "## Mechanizmy × scenariusz",
         "",
         f"Δ ATT [s] względem `{LABELS.get(baza, baza)}`, sparowana po (seed, losowanie); "
         "w nawiasie odsetek par (decyzja, węzeł) przejętych przez regułę. "
         f"**pogrubienie** = |t| ≥ {T_THRESHOLD}. Δ < 0 = bramka lepsza.",
         "",
-        "Próg to ułamek pasów wjazdowych węzła w awarii, od którego oddaje sterowanie "
-        "regule — im wyżej, tym bramka ostrożniejsza.",
         "",
     ]
     for net in plan.networks:
-        kolejnosc, wiersze = None, {}
-        for prog, mechanizm in progi:
+        kolejnosc, wiersze = None, []
+        for mechanizm in mechanizmy:
             pary_df = paired_delta(df, mechanizm, baza)
             if pary_df.empty:
                 continue
             sub = pary_df[pary_df["network"] == net]
             if sub.empty:
                 continue
-            wiersze[prog] = (
-                sub.set_index("scenario"),
-                mechanism_diagnostics(plan, mechanizm, ("gate_share",)),
+            diag = mechanism_diagnostics(
+                plan, mechanizm, ("gate_share", "gate_precision", "gate_recall")
             )
+            wiersze.append((mechanizm, sub.set_index("scenario"), diag))
             if kolejnosc is None:
                 kolejnosc = [
                     s for s in (slug(x) for x in plan.scenarios) if s in sub["scenario"].values
@@ -448,10 +457,10 @@ def _sweep_section(plan: Plan, df, pary: list[tuple[str, str]]) -> list[str]:
         lines += [
             f"### {net}",
             "",
-            "| próg | " + " | ".join(f"`{s}`" for s in kolejnosc) + " |",
+            "| mechanizm | " + " | ".join(f"`{s}`" for s in kolejnosc) + " |",
             "|---|" + "---:|" * len(kolejnosc),
         ]
-        for prog, (sub, diag) in sorted(wiersze.items()):
+        for mechanizm, sub, diag in wiersze:
             komorki = []
             for scen in kolejnosc:
                 r = sub.loc[scen]
@@ -459,7 +468,34 @@ def _sweep_section(plan: Plan, df, pary: list[tuple[str, str]]) -> list[str]:
                 share = diag.get((net, scen), {}).get("gate_share")
                 udzial = "" if share is None else f" ({share:.0%})"
                 komorki.append(f"{mocny}{r['delta']:+.1f}{mocny}{udzial}")
-            lines.append(f"| {prog:.2f} | " + " | ".join(komorki) + " |")
+            lines.append(f"| {LABELS.get(mechanizm, mechanizm)} | " + " | ".join(komorki) + " |")
+
+        # Jakość detekcji — tylko dla bramek, które mają odniesienie (wyrocznia jako
+        # diagnostyka). Rozdziela „detektor jest słaby" od „przełączanie mało daje".
+        detekcja = [(m, d) for m, _, d in wiersze if any("gate_recall" in v for v in d.values())]
+        if detekcja:
+            lines += [
+                "",
+                "Jakość detekcji względem wyroczni (precyzja / czułość; „—” = nie było "
+                "czego wykrywać albo bramka nie strzeliła):",
+                "",
+                "| mechanizm | " + " | ".join(f"`{s}`" for s in kolejnosc) + " |",
+                "|---|" + "---:|" * len(kolejnosc),
+            ]
+            for mechanizm, diag in detekcja:
+                komorki = []
+                for scen in kolejnosc:
+                    d = diag.get((net, scen), {})
+                    p_, r_ = d.get("gate_precision"), d.get("gate_recall")
+                    komorki.append(
+                        "—"
+                        if p_ is None and r_ is None
+                        else f"{'—' if p_ is None else f'{p_:.2f}'} / "
+                        f"{'—' if r_ is None else f'{r_:.2f}'}"
+                    )
+                lines.append(
+                    f"| {LABELS.get(mechanizm, mechanizm)} | " + " | ".join(komorki) + " |"
+                )
         lines.append("")
     return lines
 
