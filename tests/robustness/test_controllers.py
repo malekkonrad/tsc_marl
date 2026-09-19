@@ -185,6 +185,75 @@ def test_plan_uw_tylko_z_actorem_rdzenia(tmp_path):
         d.load_plan(plan_uw(tmp_path, agent="efficientmp"))
 
 
+# --------------------------------------- jawna kolumna odniesienia (`baseline:`)
+
+
+def plan_trzy_ramiona(tmp_path, baseline: str = "gatppo_fail"):
+    """Plan w układzie `t2_train_uw`: DWIE kolumny bez mechanizmu (trening na
+    czystym i trening z awariami) plus jedna z nim."""
+    p = plan_uw(tmp_path)
+    return _write(
+        p,
+        p.read_text()
+        .replace(
+            "fixedtime: {}",
+            "fixedtime: {}\n"
+            "  gatppo_fail:\n"
+            "    agent: gatppo\n"
+            "    seeds: [0, 1]\n"
+            "    parent: '{agent}__{network}__s{seed}_y{yellow}__p1_fail'",
+        )
+        .replace("    uw: {tau: 0.25}", f"    uw: {{tau: 0.25}}\n    baseline: {baseline}"),
+    )
+
+
+def _write(path, text):
+    path.write_text(text)
+    return path
+
+
+def test_baseline_wskazuje_ramie_kontrolne(tmp_path):
+    """Bez `baseline:` raport sparowałby kolumnę UW z PIERWSZĄ kolumną `policy`,
+    czyli z treningiem na czystym — i mierzyłby trening z awariami RAZEM
+    z mechanizmem zamiast samego mechanizmu. Tabela wychodzi, tylko odpowiada
+    na inne pytanie; nic tego nie zgłasza."""
+    from tsc_marl.analysis.degradation import mechanism_pairs  # noqa: PLC0415
+
+    plan = d.load_plan(plan_trzy_ramiona(tmp_path))
+    assert plan.baseline("gatppo_uw") == "gatppo_fail"
+    assert mechanism_pairs(plan) == [("gatppo_uw", "gatppo_fail")]
+
+    bez = d.load_plan(plan_uw(tmp_path))
+    assert bez.baseline("gatppo_uw") is None
+    assert mechanism_pairs(bez) == [("gatppo_uw", "gatppo")]  # domyśl zostaje
+
+
+def test_baseline_musi_istniec(tmp_path):
+    with pytest.raises(SystemExit, match="baseline"):
+        d.load_plan(plan_trzy_ramiona(tmp_path, baseline="nie_ma_takiego"))
+    with pytest.raises(SystemExit, match="sam siebie"):
+        d.load_plan(plan_trzy_ramiona(tmp_path, baseline="gatppo_uw"))
+
+
+def test_plan_t2_train_uw_sie_laduje():
+    """Plan z repo, nie z tmp_path: trzy ramiona, jawne odniesienie, rodzice
+    wskazujący na suite'y `p1_fail` / `p1_uw`."""
+    from tsc_marl.analysis.degradation import mechanism_pairs  # noqa: PLC0415
+
+    plan = d.load_plan("t2_train_uw")
+    assert plan.kind("gatppo_fail_uw") == "policy_uw"
+    assert plan.kind("gatppo_fail") == "policy"
+    assert mechanism_pairs(plan) == [("gatppo_fail_uw", "gatppo_fail")]
+    unit = d.Unit("gatppo_fail_uw", "cityflow_jinan3x4_4ph", 1)
+    assert plan.parent_id(unit) == "gatppo__cityflow_jinan3x4_4ph__s1_y5__p1_uw"
+    inne = d.Unit("gatppo_fail", "cityflow_jinan3x4_4ph", 1)
+    assert plan.parent_id(inne) == "gatppo__cityflow_jinan3x4_4ph__s1_y5__p1_fail"
+    # ramię 1 zostaje przy domyślnym rodzicu, czyli biegu z `p1_gate`
+    assert plan.parent_id(d.Unit("gatppo", "cityflow_jinan3x4_4ph", 1)) == (
+        "gatppo__cityflow_jinan3x4_4ph__s1_y5"
+    )
+
+
 def test_plan_odrzuca_nieznany_sterownik_i_pole(tmp_path):
     p = plan_file(tmp_path)
     p.write_text(p.read_text().replace("fixedtime: {}", "fixedtime: {}\n  rakieta: {}"))

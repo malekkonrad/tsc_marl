@@ -87,6 +87,8 @@ Gotowe siatki:
 | `p1_abl_meanpool` | ablacja: actor z mean-pool (GraphSAGE) zamiast GAT — GPU |
 | `p1_abl_nognn` | ablacja: actor bez sąsiadów (MLP) — GPU |
 | `p1_abl_state_{queue,pressure,ep}` | ablacja stanu zamiast ATS — GPU |
+| `p1_fail` | Faza 3: rdzeń trenowany z awariami, BEZ UW (ramię kontrolne) — GPU |
+| `p1_uw` | Faza 3: rdzeń trenowany z awariami I z UW-attention — GPU |
 
 Punkty liczą się **równolegle** flagą `-j`:
 
@@ -159,7 +161,7 @@ Wagi treningów żyją tylko na gliderze (kopie `runs/t1` na laptopie są bez `*
 
 | co | gdzie | dlaczego |
 |---|---|---|
-| `entry: core` (gatppo, ablacje `p1_abl_*`) | glider | GPU |
+| `entry: core` (gatppo, ablacje `p1_abl_*`, `p1_fail`, `p1_uw`) | glider | GPU |
 | `tsc degrade run` dla uczonych | glider | potrzebuje wag |
 | `t1_learned`, `t1_learned_paper` | dowolna, CPU | LibSignal nie ma obsługi GPU |
 | `tsc prototype`, `obshead`, `dataset`, reguły w `degrade` | laptop | CPU, minuty |
@@ -192,6 +194,41 @@ Głowę liczy się na laptopie (`tsc obshead --save`, ~10 s) i kopiuje RAZEM z `
 w innych jednostkach (`load_reference` sprawdza odcisk pliku i odmawia). Skrypt nie
 wystartuje, jeśli brakuje artefaktu dla którejś sieci planu — inaczej punkty
 zostałyby po cichu pominięte.
+
+**Trening polityki Z mechanizmem (Faza 3 §3) — po zakończeniu `noc.sh`:**
+
+```bash
+rsync -av runs/heads/ glider:tsc_marl/runs/heads/   # z LAPTOPA, jeśli jeszcze nie ma
+bash deploy/glider/train_uw.sh                      # 2 treningi + T2 w tle
+```
+
+Odpowiada na pytanie, którego `t2_uw` nie rozstrzygnęło: modulacji nie da się
+**dokleić** do gotowej polityki — ale czy polityka **trenowana** z log ρ nauczyłaby
+się na nim polegać. Trzy ramiona, bo bez ramienia kontrolnego poprawę dałoby się
+przypisać samemu treningowi z awariami:
+
+| ramię | co | gdzie |
+|---|---|---|
+| 1 | rdzeń trenowany na czystym | `p1_gate` (liczy `noc.sh`) |
+| 2 | rdzeń trenowany **z awariami**, bez UW | `p1_fail` |
+| 3 | rdzeń trenowany z awariami **i z UW** | `p1_uw` |
+| — | T2 na wszystkich trzech | `t2_train_uw` → `results/t2_train_uw.md` |
+
+Raport czyta się dwoma odczytami: **2 vs 1** = ile daje sam trening z awariami,
+**3 vs 2** = ile daje mechanizm ponad to. Kolumna odniesienia jest w planie jawna
+(`baseline: gatppo_fail`) — bez tego raport sparowałby ramię 3 z ramieniem 1 i mierzył
+obie przyczyny naraz.
+
+Awarie w treningu wstrzykuje `model.failure_mix` (blok `overrides` w obu suite'ach,
+**identyczny** — pilnuje tego test). Scenariusz losuje się na epizod ze strumienia
+niezależnego od `--seed`, żeby oba ramiona widziały ten sam harmonogram. Skala
+domyślna to wersja minimalna: JiNan × 3 seedy × 2 ramiona = 6 biegów; poszerzenie to
+dopisanie sieci/seedów do `grid` (policzone punkty zostają pominięte).
+
+Czy mechanizm w ogóle żyje w treningu — kolumny `uw_spread` / `uw_active`
+w `runs/t1/gatppo__*__p1_uw/metrics.csv` (`split=train`). Na starcie będą wysokie,
+bo nieuczona polityka korkuje sieć i `u` wychodzi ponad `u_ref` wszędzie (`u_ref` jest
+skalibrowane na zrzucie BC — ograniczenie opisane w `robustness/training.py`).
 
 **Test gałęzi epistemic — po zakończeniu `noc.sh`:**
 

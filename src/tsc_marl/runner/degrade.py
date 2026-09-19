@@ -161,20 +161,14 @@ def build_uncertainty(plan: Plan, unit: Unit, env):
     cięższym ruchu niż w zrzucie u rośnie wszędzie i `relu` wygeneruje nadmiar bez
     awarii; przy lżejszym — zje go (brak fałszywych alarmów).
     """
-    from tsc_marl.uncertainty import obs_head as oh  # noqa: PLC0415
+    from tsc_marl.robustness.training import online_uncertainty  # noqa: PLC0415
 
-    net = base_network(unit.network)
-    head, ref = oh.head_path(net), oh.reference_path(net)
-    if not head.is_file() or not ref.is_file():
-        raise SystemExit(
-            f"brak głowy obserwacyjnej dla '{net}' ({head.name}, {ref.name}) — "
-            f"policz ją: tsc obshead -n {net} --save --window 12 --persistence"
-        )
-    fitted = oh.load_head(head, network=net)
-    reference = oh.load_reference(ref, network=net, head=head)
-    sources = oh.movement_sources(net, env.features.n_mov)
-    tau = float(plan.controllers[unit.controller]["uw"].get("tau", oh.DEFAULT_TAU))
-    return oh.OnlineUncertainty(fitted, reference, sources, env.graph.edge_index, tau=tau)
+    return online_uncertainty(
+        base_network(unit.network),
+        env.features.n_mov,
+        env.graph.edge_index,
+        tau=plan.controllers[unit.controller]["uw"].get("tau"),
+    )
 
 
 def build_controller(plan: Plan, unit: Unit, env, config, agents, ckpts: list[Path]):
