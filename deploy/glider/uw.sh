@@ -17,7 +17,10 @@
 set -u
 cd "$(dirname "$0")/../.."
 TSC=.venv/bin/tsc
-N=$(nproc)
+# OMP_NUM_THREADS= przed `nproc`: ta zmienna JEST przez nproc honorowana, a kolejki
+# startują przez `setsid nohup bash "$0" …`, czyli w potomku, który dziedziczy nasz
+# własny eksport. Bez tego `nproc` zwraca 1 i J spada do minimum (2) na 32 rdzeniach.
+N=$(OMP_NUM_THREADS= OMP_THREAD_LIMIT= nproc)
 J=${J:-$(( N / 5 > 2 ? N / 5 : 2 ))}
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
 

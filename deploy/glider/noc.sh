@@ -17,7 +17,10 @@
 set -u
 cd "$(dirname "$0")/../.."
 TSC=.venv/bin/tsc
-N=$(nproc)
+# OMP_NUM_THREADS= przed `nproc`: ta zmienna JEST przez nproc honorowana, a kolejki
+# startują przez `setsid nohup bash "$0" …`, czyli w potomku, który dziedziczy nasz
+# własny eksport. Bez tego `nproc` zwraca 1 i J spada do minimum (2) na 32 rdzeniach.
+N=$(OMP_NUM_THREADS= OMP_THREAD_LIMIT= nproc)
 # CityFlow bierze 4 wątki na symulację, torch dostaje 2 — stąd ~6 wątków na punkt
 CPU_J=${CPU_J:-$(( N / 6 > 2 ? N / 6 : 2 ))}
 GPU_J=${GPU_J:-2}
