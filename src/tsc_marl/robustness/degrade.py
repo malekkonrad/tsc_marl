@@ -271,8 +271,15 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, float]:
             "att", "throughput", "ens_mi", "ens_disagree", "uw_spread", "uw_active",
             "gate_share", "gate_switches", "gate_precision", "gate_recall",
         ):  # fmt: skip
-            if metric in group[0]:
-                out[f"{metric}__{name}"] = sum(r[metric] for r in group) / len(group)
+            # Średnia po losowaniach, w których metryka BYŁA OKREŚLONA — sprawdzanie
+            # samego `group[0]` zakładało, że wszystkie wiersze mają ten sam komplet
+            # kluczy. `gate_precision`/`gate_recall` tego nie spełniają: przy części
+            # losowań mianownik nie istnieje (nie było czego wykrywać), więc klucza
+            # nie ma. Skutkiem był `KeyError` po POLICZENIU całego punktu — wszystkie
+            # epizody przeliczone, wynik wyrzucony w ostatniej linii.
+            wartosci = [r[metric] for r in group if metric in r]
+            if wartosci:
+                out[f"{metric}__{name}"] = sum(wartosci) / len(wartosci)
     if "att__clean" in out:
         out["att"] = out["att__clean"]
     return out

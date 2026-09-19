@@ -563,3 +563,18 @@ def test_diagnostyka_detekcji_liczy_sie_wzgledem_wyroczni():
     stats = sterownik.episode_stats()
     assert stats["gate_precision"] == pytest.approx(0.5)  # 1 trafiony z 2 wskazanych
     assert stats["gate_recall"] == pytest.approx(0.5)  # 1 z 2 faktycznie zepsutych
+
+
+def test_summarize_usrednia_metryki_obecne_tylko_w_czesci_losowan():
+    """`gate_precision`/`gate_recall` są emitowane WARUNKOWO — przy losowaniu, w którym
+    nie było czego wykrywać, mianownik nie istnieje i klucza nie ma. Sprawdzanie
+    obecności w pierwszym wierszu grupy zakładało jednolity komplet kluczy i kończyło
+    się `KeyError` po policzeniu CAŁEGO punktu: 35 epizodów przeliczonych, wynik
+    wyrzucony w ostatniej linii (zmierzone na gliderze, 6 punktów)."""
+    rows = [
+        {"scenario": "mask0p5", "draw": 0, "att": 700.0, "gate_recall": 0.4},
+        {"scenario": "mask0p5", "draw": 1, "att": 800.0},  # brak mianownika
+    ]
+    out = d.summarize(rows)
+    assert out["att__mask0p5"] == pytest.approx(750.0)
+    assert out["gate_recall__mask0p5"] == pytest.approx(0.4)  # średnia z OKREŚLONYCH
