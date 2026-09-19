@@ -123,6 +123,98 @@ def aggregate(df):
     return out
 
 
+#: Tytuł raportu zależy od planu — „T2 bez mechanizmu" było zaszyte na sztywno i
+#: kłamało w raportach `t2_ablations` (ablacje agregacji) oraz `t2_uw` (plan istnieje
+#: WYŁĄCZNIE po to, żeby zmierzyć mechanizm).
+TITLES = {
+    "t2_nomech": "T2 bez mechanizmu",
+    "t2_ablations": "T2 dla ablacji agregacji",
+    "t2_uw": "T2 z UW-attention",
+    "t2_ood": "T2 na ruchu spoza treningu",
+}
+
+#: Próg |t| dla różnicy parowanej. 2,8 ≈ poprawka Bonferroniego na ~26 porównań
+#: (13 scenariuszy × 2 sieci) przy α = 0,05 — bo tabelę czyta się CAŁĄ i wybranie
+#: z niej najładniejszego wiersza po fakcie jest testowaniem wielokrotnym.
+T_THRESHOLD = 2.8
+
+
+def mechanism_pairs(plan: Plan) -> list[tuple[str, str]]:
+    """[(kolumna z mechanizmem, kolumna odniesienia)] — pary liczone Z TEGO SAMEGO
+    checkpointu. Dla UW-attention modulacja jest bezparametrowa, więc `agent` obu
+    kolumn jest ten sam i różni je wyłącznie mechanizm."""
+    out = []
+    for label in plan.controllers:
+        if plan.kind(label) != "policy_uw":
+            continue
+        baza = [
+            c
+            for c in plan.controllers
+            if plan.kind(c) == "policy" and plan.agent(c) == plan.agent(label)
+        ]
+        if baza:
+            out.append((label, baza[0]))
+    return out
+
+
+def mechanism_diagnostics(plan: Plan, controller: str) -> dict[tuple[str, str], dict[str, float]]:
+    """(sieć, scenariusz) -> średnie `uw_spread` i `uw_active` po seedach.
+
+    Te liczby siedzą w `result.json` (metryki epizodu sterownika), nie w `metrics.csv`,
+    i bez nich raport NIE ODRÓŻNIA „mechanizm nie pomógł" od „mechanizm nie wystartował".
+    To jest różnica między wynikiem a brakiem wyniku.
+    """
+    from runlog import Experiment  # noqa: PLC0415
+
+    zebrane: dict[tuple[str, str], dict[str, list[float]]] = {}
+    exp = Experiment(EXPERIMENT, root=RUNS)
+    for run in exp.runs():
+        if run.status != "ok" or not run.id.endswith(f"__{plan.name}"):
+            continue
+        if run.params.get("controller") != controller:
+            continue
+        net = run.params["network"]
+        for key, value in run.result.items():
+            for metric in ("uw_spread", "uw_active"):
+                if key.startswith(f"{metric}__"):
+                    scen = key[len(metric) + 2 :]
+                    zebrane.setdefault((net, scen), {}).setdefault(metric, []).append(float(value))
+    return {k: {m: float(np.mean(v)) for m, v in d.items()} for k, d in zebrane.items()}
+
+
+def paired_delta(df, mechanizm: str, baza: str):
+    """Różnica ATT sparowana po (sieć, scenariusz, seed, losowanie).
+
+    Dlaczego parowanie, a nie ±std z tabeli: obie kolumny jadą TYM SAMYM checkpointem
+    i TYMI SAMYMI losowaniami awarii (`draw` wybiera, które detektory padły), więc
+    rozrzut między seedami i między losowaniami jest WSPÓLNY dla obu i w różnicy się
+    skraca. Porównanie nieparowane topi efekt rzędu 1 s w odchyleniu rzędu 30 s —
+    i odwrotnie, potrafi pokazać różnicę 3%, która po sparowaniu jest szumem.
+    """
+    import pandas as pd  # noqa: PLC0415
+    from scipy.stats import ttest_1samp  # noqa: PLC0415
+
+    sub = df[df["controller"].isin([mechanizm, baza])]
+    wide = sub.pivot_table(
+        index=["network", "scenario", "seed", "draw"], columns="controller", values="att"
+    ).dropna()
+    if wide.empty:
+        return pd.DataFrame()
+    wide["delta"] = wide[mechanizm] - wide[baza]
+    out = []
+    for (net, scen), g in wide.groupby(["network", "scenario"]):
+        d = g["delta"].to_numpy()
+        t, pval = (
+            ttest_1samp(d, 0.0) if len(d) > 1 and d.std() > 0 else (float("nan"), float("nan"))
+        )
+        out.append({
+            "network": net, "scenario": scen, "n": len(d),
+            "delta": float(d.mean()), "sd": float(d.std(ddof=1)) if len(d) > 1 else 0.0,
+            "t": float(t), "p": float(pval), "lepszy": int((d < 0).sum()),
+        })  # fmt: skip
+    return pd.DataFrame(out)
+
+
 def parent_consistency(df, skip: frozenset[str] = frozenset()) -> list[dict[str, Any]]:
     """Czysty wynik ewaluatora vs ostatni test treningu — dla każdego uczonego biegu.
 
@@ -167,12 +259,77 @@ def _spec_by_slug(plan: Plan) -> dict[str, FailureSpec]:
     return {slug(s): s for s in plan.scenarios}
 
 
-def to_markdown(plan: Plan, agg, checks: list[dict[str, Any]], figures: dict[str, Path]) -> str:
+def _mechanism_section(plan: Plan, df, mechanizm: str, baza: str) -> list[str]:
+    """Dwie tabele, które rozstrzygają o wyniku planu z mechanizmem: CZY zadziałał
+    i CZY zmienił ATT. Bez pierwszej druga jest nieinterpretowalna."""
+    diag = mechanism_diagnostics(plan, mechanizm)
+    pary = paired_delta(df, mechanizm, baza) if df is not None and not df.empty else None
+    if not diag and (pary is None or pary.empty):
+        return []
+
+    etykieta = LABELS.get(mechanizm, mechanizm)
+    lines = [
+        f"## Mechanizm: {etykieta} vs {LABELS.get(baza, baza)}",
+        "",
+        "Obie kolumny liczą się z TEGO SAMEGO checkpointu i tych samych losowań awarii "
+        "(`draw` wybiera, które detektory padły), więc porównujemy je **parami**, nie przez "
+        "±std z tabeli wyżej: wspólny rozrzut między seedami i losowaniami skraca się "
+        "w różnicy. `Δ` < 0 = mechanizm lepszy. `|t| ≥ "
+        f"{T_THRESHOLD}` to próg po poprawce na tyle porównań, ile ma ta tabela.",
+        "",
+        "`uw_spread` = średni rozstęp log ρ w GRUPIE SOFTMAXU węzła, czyli jedyna część "
+        "sygnału, którą attention widzi (na stałą wspólną dla grupy jest niezmienniczy). "
+        "0 = warstwa nie widzi różnicy między sąsiadami, ln 10 ≈ 2,3 = różnią się 10×. "
+        "`uw_active` = odsetek krawędzi z niezerowym log ρ.",
+        "",
+    ]
+    for net in plan.networks:
+        wiersze = pary[pary["network"] == net] if pary is not None and not pary.empty else None
+        if wiersze is None or wiersze.empty:
+            continue
+        kolejnosc = [s for s in (slug(x) for x in plan.scenarios) if s in set(wiersze["scenario"])]
+        lines += [
+            f"### {net}",
+            "",
+            "| scenariusz | uw_spread | uw_active | Δ ATT [s] | sd | t | lepszy w |",
+            "|---|---:|---:|---:|---:|---:|---:|",
+        ]
+        for scen in kolejnosc:
+            r = wiersze[wiersze["scenario"] == scen].iloc[0]
+            d = diag.get((net, scen), {})
+            spread = f"{d['uw_spread']:.2f}" if "uw_spread" in d else "—"
+            active = f"{d['uw_active']:.1%}" if "uw_active" in d else "—"
+            mocny = "**" if abs(r["t"]) >= T_THRESHOLD else ""
+            lines.append(
+                f"| `{scen}` | {spread} | {active} | {mocny}{r['delta']:+.2f}{mocny} | "
+                f"{r['sd']:.1f} | {r['t']:+.2f} | {int(r['lepszy'])}/{int(r['n'])} |"
+            )
+        istotne = wiersze[wiersze["t"].abs() >= T_THRESHOLD]
+        lines += [
+            "",
+            (
+                "* Żaden scenariusz nie przekracza progu — mechanizm jest wobec ATT **neutralny**."
+                if istotne.empty
+                else "* Powyżej progu: "
+                + ", ".join(
+                    f"`{r.scenario}` ({r.delta:+.2f} s, t = {r.t:+.2f}, lepszy w "
+                    f"{int(r.lepszy)}/{int(r.n)} parach)"
+                    for r in istotne.itertuples()
+                )
+            ),
+            "",
+        ]
+    return lines
+
+
+def to_markdown(
+    plan: Plan, agg, checks: list[dict[str, Any]], figures: dict[str, Path], df=None
+) -> str:
     specs = _spec_by_slug(plan)
     order = [slug(s) for s in plan.scenarios]
     ctrls = [c for c in plan.controllers if c != "fixedtime"]
     lines = [
-        f"# T2 bez mechanizmu — plan `{plan.name}`",
+        f"# {TITLES.get(plan.name, 'T2')} — plan `{plan.name}`",
         "",
         f"Tryb {plan.mode} (yellow={plan.yellow}), {plan.draws} losowań awarii na scenariusz, "
         "ewaluacja ZAMROŻONYCH sterowników (`tsc degrade`). Wszystkie czytają tę samą warstwę "
@@ -221,6 +378,9 @@ def to_markdown(plan: Plan, agg, checks: list[dict[str, Any]], figures: dict[str
         lines += _findings(sub, present, ft_att, specs)
         if net in figures:
             lines += ["", f"![krzywe degradacji {net}](figures/{figures[net].name})", ""]
+
+    for mechanizm, baza in mechanism_pairs(plan):
+        lines += _mechanism_section(plan, df, mechanizm, baza)
 
     if checks:
         worst = max(abs(c["diff"]) for c in checks)
@@ -361,7 +521,7 @@ def main(plan: Plan) -> Path:
     z_mechanizmem = frozenset(c for c in plan.controllers if plan.kind(c) == "policy_uw")
     checks = parent_consistency(df, z_mechanizmem) if not df.empty else []
     out = RESULTS / f"{plan.name}.md"
-    out.write_text(to_markdown(plan, agg, checks, figures), encoding="utf-8")
+    out.write_text(to_markdown(plan, agg, checks, figures, df), encoding="utf-8")
     if not agg.empty:
         agg.to_csv(RESULTS / f"{plan.name}.csv", index=False)
     return out
