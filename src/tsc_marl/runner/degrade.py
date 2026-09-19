@@ -190,7 +190,9 @@ def build_uncertainty(plan: Plan, unit: Unit, env):
     fitted = oh.load_head(head, network=net)
     reference = oh.load_reference(ref, network=net, head=head)
     sources = oh.movement_sources(net, env.features.n_mov)
-    tau = float(plan.controllers[unit.controller]["uw"].get("tau", oh.DEFAULT_TAU))
+    # `.get("uw", {})`, bo tę samą głowę wywołuje bramka UQ, która τ nie używa —
+    # τ skaluje modulację log ρ, a bramce potrzebne jest samo u na ruch.
+    tau = float(plan.controllers[unit.controller].get("uw", {}).get("tau", oh.DEFAULT_TAU))
     return oh.OnlineUncertainty(fitted, reference, sources, env.graph.edge_index, tau=tau)
 
 
@@ -215,11 +217,39 @@ def fixed_cycle(spec: dict[str, Any]) -> int:
     return int(yaml.safe_load((CONFIGS / "tsc" / "fixedtime.yml").read_text())["model"]["t_fixed"])
 
 
-def build_gate(spec: dict[str, Any], env):
-    """Sygnał bramki z planu. `kind` waliduje `load_plan`, więc tu tylko wybór."""
-    from tsc_marl.robustness import controllers as c  # noqa: PLC0415
+def build_gate(spec: dict[str, Any], plan: Plan, unit: Unit, env):
+    """Sygnał bramki z planu. `kind` waliduje `load_plan`, więc tu tylko wybór.
 
-    return c.OracleGate(env, threshold=float(spec.get("threshold", 0.5)))
+    Progi bramek REALNYCH nie pochodzą z planu, tylko z artefaktu skalibrowanego na
+    czystym oknie zrzutu BC (`tsc obshead --save`) — tak jak `u_ref` i τ. Plan może
+    je nadpisać, ale wtedy jest to jawna decyzja, która wchodzi do odcisku biegu.
+    """
+    from tsc_marl.robustness import controllers as c  # noqa: PLC0415
+    from tsc_marl.uncertainty import obs_head as oh  # noqa: PLC0415
+
+    kind = spec.get("kind")
+    if kind == "oracle":
+        return c.OracleGate(env, threshold=float(spec.get("threshold", 0.5)))
+
+    net = base_network(unit.network)
+    sciezka = oh.gate_path(net)
+    if not sciezka.is_file():
+        raise SystemExit(
+            f"brak progów bramki dla '{net}' ({sciezka.name}) — policz je: "
+            f"tsc obshead -n {net} --save --window 12 --persistence"
+        )
+    progi = oh.load_gates(sciezka, network=net, head=oh.head_path(net))
+    if kind == "rule":
+        return c.RuleGate(
+            window=progi.window,
+            threshold=float(spec.get("threshold", progi.rule)),
+            n_mov=env.features.n_mov,
+        )
+    return c.UQGate(
+        build_uncertainty(plan, unit, env),
+        u_mov_ref=progi.u_mov_ref,
+        threshold=float(spec.get("threshold", progi.uq)),
+    )
 
 
 def build_controller(plan: Plan, unit: Unit, env, config, agents, ckpts: list[Path]):
@@ -257,10 +287,22 @@ def build_controller(plan: Plan, unit: Unit, env, config, agents, ckpts: list[Pa
             )
         if kind == "policy_gate":
             spec = plan.controllers[unit.controller]["gate"]
+            # Wyrocznia jako DIAGNOSTYKA bramki realnej: precyzja i czułość rozdzielają
+            # „detektor jest słaby" od „przełączanie mało daje". Nigdy nie dotyka decyzji.
+            wyrocznia = (
+                None
+                if spec.get("kind") == "oracle"
+                # 0,5 = „połowa wlotów martwa" jako definicja oślepienia do
+                # diagnostyki; 0,75 dawało przy maskach pasowych zbiór pusty.
+                else c.OracleGate(env, threshold=float(spec.get("oracle_threshold", 0.5)))
+            )
             return c.GatedController(
                 c.PolicyController(actors[0], env.graph.edge_index),
                 c.FixedTimeController(feats.intersections, t_fixed=fixed_cycle(spec)),
-                build_gate(spec, env),
+                build_gate(spec, plan, unit, env),
+                k_on=int(spec.get("k_on", 1)),
+                k_off=int(spec.get("k_off", 1)),
+                oracle=wyrocznia,
                 name=unit.controller,
             )
         return c.PolicyController(actors[0], env.graph.edge_index, name=unit.controller)

@@ -246,7 +246,10 @@ def degrade_status(plan: str = typer.Argument(...)) -> None:
 
     for w in degrade.status(load_plan(plan)):
         att = f"{w['att_clean']:.1f}" if w["att_clean"] is not None else "—"
-        aktualny = "" if w["aktualny"] else "  NIEAKTUALNY (--replace)"
+        # marker TYLKO dla biegu, który istnieje, ale ma inne parametry — brakujący
+        # policzy się sam, bez `--replace`, i mylące byłoby sugerowanie inaczej
+        przestarzaly = w["status"] != "brak" and not w["aktualny"]
+        aktualny = "  NIEAKTUALNY (--replace)" if przestarzaly else ""
         print(f"{w['run_id']:64s} {w['status']:8s} {att:>7s}  ← {w['rodzic']}{aktualny}")
 
 

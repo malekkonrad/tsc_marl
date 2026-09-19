@@ -48,8 +48,10 @@ KINDS = {
 #: z polityki ALBO z reguły, zależnie od bramki (Faza 3, dolny poziom fallbacku).
 LEARNED = ("policy", "colight", "ensemble", "policy_uw", "policy_gate")
 #: Rodzaje bramek. `oracle` czyta prawdę z warstwy awarii i jest GÓRNYM
-#: OGRANICZENIEM, nie sterownikiem do wdrożenia; `rule` i `uq` dojdą w Krokach 8–9.
-GATE_KINDS = ("oracle",)
+#: OGRANICZENIEM, nie sterownikiem do wdrożenia. `rule` (licznik zamrożonych
+#: detektorów) i `uq` (głowa obserwacyjna) są wdrażalne i mierzy się je WZGLĘDEM
+#: wyroczni — ta ablacja rozstrzyga, czy głowa niepewności zarabia na siebie.
+GATE_KINDS = ("oracle", "rule", "uq")
 #: Klucze spec sterownika, które zmieniają MECHANIZM, a nie tylko etykietę kolumny:
 #: `uw` niesie τ modulacji, `gate` — rodzaj bramki, próg i długość cyklu reguły.
 #: MUSZĄ wejść do odcisku biegu (`unit_params`), inaczej sweep po τ albo po progu
@@ -266,8 +268,8 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, float]:
         by.setdefault(r["scenario"], []).append(r)
     for name, group in by.items():
         for metric in (
-            "att", "throughput", "ens_mi", "ens_disagree",
-            "uw_spread", "uw_active", "gate_share", "gate_switches",
+            "att", "throughput", "ens_mi", "ens_disagree", "uw_spread", "uw_active",
+            "gate_share", "gate_switches", "gate_precision", "gate_recall",
         ):  # fmt: skip
             if metric in group[0]:
                 out[f"{metric}__{name}"] = sum(r[metric] for r in group) / len(group)

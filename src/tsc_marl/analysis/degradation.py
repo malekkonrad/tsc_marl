@@ -55,6 +55,12 @@ COLORS = {
     "gatppo_gate_t0p50": "#8f66dd",
     "gatppo_gate_t0p75": "#6a3fc4",
     "gatppo_gate_t1p00": "#452a8a",
+    # bramki realne (t2_gate_real): wyrocznia zostaje fioletowa jak sweep, a dwa
+    # sygnały wdrażalne dostają własne barwy — tu to SĄ różne mechanizmy, nie
+    # nastawienia jednego, więc kategorialnie, a nie rampą.
+    "gatppo_gate_oracle": "#7a4fd6",
+    "gatppo_gate_rule": "#1baf7a",
+    "gatppo_gate_uq": "#eda100",
 }
 LABELS = {
     "gatppo": "rdzeń GAT+PPO+CTDE",
@@ -71,6 +77,9 @@ LABELS = {
     "gatppo_gate_t0p50": "bramka, próg 0,50",
     "gatppo_gate_t0p75": "bramka, próg 0,75",
     "gatppo_gate_t1p00": "bramka, próg 1,00",
+    "gatppo_gate_oracle": "bramka: wyrocznia (sufit)",
+    "gatppo_gate_rule": "bramka: reguła (trwałość)",
+    "gatppo_gate_uq": "bramka: UQ (głowa)",
 }
 INK, INK2, MUTED = "#0b0b0b", "#52514e", "#898781"
 GRID, AXIS, SURFACE = "#e1e0d9", "#c3c2b7", "#fcfcfb"
@@ -105,6 +114,13 @@ def load(plan: Plan, metrics: tuple[str, ...] = ("att", "throughput")):
         wide = m.pivot_table(index=["split", "step"], columns="metric", values="value")
         wide = wide.reset_index().rename(columns={"split": "scenario", "step": "draw"})
         p = run.params
+        # Tylko kolumny TEGO planu. Filtr po sufiksie `__<plan>` nie wystarcza:
+        # przemianowanie kolumny (np. `gatppo_gate` -> `gatppo_gate_t0p50` przy
+        # sweepie progu) zostawia w `runs/t2` biegi ze starą nazwą i pasującym
+        # sufiksem. Wchodziły do ramki jako widmowa kolumna i wywalały wykres na
+        # `plan.kind()` — a w tabelach były niewidoczne, bo te iterują po planie.
+        if p["controller"] not in plan.controllers:
+            continue
         wide["controller"], wide["network"], wide["seed"] = p["controller"], p["network"], p["seed"]
         wide["parent_run"] = p.get("parent_run")
         frames.append(wide)
@@ -151,6 +167,7 @@ TITLES = {
     "t2_uw": "T2 z UW-attention",
     "t2_ood": "T2 na ruchu spoza treningu",
     "t2_gate": "T2 z bramką fallbacku",
+    "t2_gate_real": "T2 z bramką realną (reguła vs UQ)",
 }
 
 #: Próg |t| dla różnicy parowanej. 2,8 ≈ poprawka Bonferroniego na ~26 porównań
@@ -189,10 +206,13 @@ DIAGNOSTICS = {
         "`uw_active` = odsetek krawędzi z niezerowym log ρ.",
     ),
     "policy_gate": (
-        ("gate_share", "gate_switches"),
+        ("gate_share", "gate_switches", "gate_precision", "gate_recall"),
         "`gate_share` = odsetek par (decyzja, węzeł), w których sterowanie przejęła "
         "reguła. `gate_switches` = liczba ZMIAN trybu na węzłach w epizodzie — to one "
-        "psują ruch (przełączenie resetuje fazę), a nie sam udział.",
+        "psują ruch (przełączenie resetuje fazę), a nie sam udział. `gate_precision` "
+        "i `gate_recall` liczą się względem WYROCZNI (prawda z warstwy awarii, "
+        "wyłącznie diagnostycznie) i rozdzielają „detektor jest słaby” od "
+        "„przełączanie mało daje” — dwie rzeczy, które samo ATT skleja.",
     ),
 }
 
@@ -249,8 +269,12 @@ def paired_delta(df, mechanizm: str, baza: str):
         t, pval = (
             ttest_1samp(d, 0.0) if len(d) > 1 and d.std() > 0 else (float("nan"), float("nan"))
         )
+        # REMISY liczone osobno i WYŁĄCZONE z „lepszy w". Przy bramce fallbacku remis
+        # to najczęstszy wynik — mechanizm nie strzelił, epizod poszedł identycznie —
+        # a wliczony do mianownika udawałby przegraną: wiersz z Δ = +0,0 pokazywał
+        # „lepszy w 0/15", co czyta się jak porażkę zamiast jak brak zmiany.
         out.append({
-            "network": net, "scenario": scen, "n": len(d),
+            "network": net, "scenario": scen, "n": len(d), "remis": int((d == 0).sum()),
             "delta": float(d.mean()), "sd": float(d.std(ddof=1)) if len(d) > 1 else 0.0,
             "t": float(t), "p": float(pval), "lepszy": int((d < 0).sum()),
         })  # fmt: skip
@@ -354,7 +378,7 @@ def _mechanism_section(plan: Plan, df, mechanizm: str, baza: str) -> list[str]:
             t = "—" if not np.isfinite(r["t"]) else f"{r['t']:+.2f}"
             lines.append(
                 f"| `{scen}` | {' | '.join(komorki)} | {mocny}{r['delta']:+.2f}{mocny} | "
-                f"{r['sd']:.1f} | {t} | {int(r['lepszy'])}/{int(r['n'])} |"
+                f"{r['sd']:.1f} | {t} | {int(r['lepszy'])}/{int(r['n'] - r['remis'])} |"
             )
         istotne = wiersze[wiersze["t"].abs() >= T_THRESHOLD]
         lines += [

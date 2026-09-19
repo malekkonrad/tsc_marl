@@ -14,6 +14,11 @@
 # na tej maszynie (martwy proces w `running`) runlog liczy od nowa.
 #
 # Zmienne: CPU_J / GPU_J / T2_J (ile punktów naraz), DRY=1 (tylko wypisz komendy).
+# PODZIAŁ WŁASNOŚCI: glider liczy BIEGI (`runs/`), raporty robi laptop (`results/`).
+# Raport to sekundy liczenia z `runs/`, a `results/` jest katalogiem WERSJONOWANYM,
+# którego właścicielem jest laptop — generowanie go tutaj dwa razy zablokowało
+# `git pull` („untracked working tree files would be overwritten by merge”) i za
+# każdym razem trzeba było ręcznie odkładać pliki na bok.
 set -u
 cd "$(dirname "$0")/../.."
 TSC=.venv/bin/tsc
@@ -56,9 +61,7 @@ t2_queue() {
   fi
   for p in $T2_PLANS; do
     run degrade run "$p" -j "$T2_J"
-    run degrade report "$p"
   done
-  run table
 }
 
 case "${1:-}" in
@@ -90,4 +93,5 @@ Ruszyło: $N rdzeni, GPU_J=$GPU_J, CPU_J=$CPU_J, T2_J=$T2_J, OMP_NUM_THREADS=$OM
 Postęp:   tail -f $LOG/gpu.log $LOG/cpu.log $LOG/t2.log
 Stan:     $TSC suite status p1_gate ; $TSC degrade status t2_ablations
 Stop:     pkill -f 'deploy/glider/noc.sh' ; pkill -f 'tsc (suite|degrade) run'
+Raporty:  na LAPTOPIE po synchronizacji — rsync -av glider:tsc_marl/runs/ runs/ ; tsc table
 EOF

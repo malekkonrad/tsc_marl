@@ -462,3 +462,104 @@ def test_przelaczenia_sa_liczone_na_wezlach():
     env.features = features({"2_a", "2_b"})  # jeden węzeł wchodzi, drugi wychodzi
     sterownik.act(None)
     assert sterownik.episode_stats() == {"gate_share": 0.25, "gate_switches": 2.0}
+
+
+# ------------------------------------------- bramki realne: reguła, UQ, histereza
+
+N_MOV, OKNO = 2, 3
+
+
+def obserwacje(kroki, *, zamrozony=()):
+    """[T, N=2, 5]: 2 ruchy × 2 cechy + one-hot. Węzeł 0 zdrowy (odczyty rosną),
+    węzeł 1 ma zamrożone ruchy podane w `zamrozony`."""
+    x = np.zeros((kroki, 2, 5), np.float32)
+    for t in range(kroki):
+        x[t, :, :4] = t + 1.0
+        for m in zamrozony:
+            x[t, 1, m] = 7.0  # EP ruchu m stoi
+            x[t, 1, N_MOV + m] = 0.0  # demand ruchu m stoi (zero)
+    return x
+
+
+def test_regula_widzi_zamrozony_detektor_a_nie_zdrowy():
+    """Kryterium reguły: WSZYSTKIE cechy ruchu stoją przez całe okno. Węzeł 1 ma oba
+    ruchy zamrożone (ułamek 1,0), węzeł 0 żaden (0,0) — przy progu 0,5 przełącza się
+    tylko ten pierwszy. Akcje obu sterowników są różne, więc test nie przechodzi
+    trywialnie."""
+    bramka = c.RuleGate(window=OKNO, threshold=0.5, n_mov=N_MOV)
+    x = obserwacje(OKNO, zamrozony=(0, 1))
+    for t in range(OKNO):
+        maska = bramka.mask(x[t])
+    assert maska.tolist() == [False, True]
+
+
+def test_regula_milczy_na_rozgrzewce():
+    """Przy niepełnym buforze okno jest przycięte i KAŻDY ruch wygląda na zamrożony —
+    bez strażnika bramka przełączyłaby całą sieć na starcie każdego epizodu. Ta sama
+    pułapka zatruła kalibrację progu (kwantyl wychodził 1,0), stąd `full_window`."""
+    bramka = c.RuleGate(window=OKNO, threshold=0.5, n_mov=N_MOV)
+    x = obserwacje(OKNO, zamrozony=(0, 1))
+    assert bramka.mask(x[0]).tolist() == [False, False]  # 1 z 3 odczytów
+    assert bramka.mask(x[1]).tolist() == [False, False]  # 2 z 3
+    assert bramka.mask(x[2]).tolist() == [False, True]  # pełne okno
+
+
+def test_regula_czysci_bufor_na_resecie():
+    bramka = c.RuleGate(window=OKNO, threshold=0.5, n_mov=N_MOV)
+    x = obserwacje(OKNO, zamrozony=(0, 1))
+    for t in range(OKNO):
+        bramka.mask(x[t])
+    bramka.reset()
+    assert bramka.mask(x[0]).tolist() == [False, False]
+
+
+def test_uq_porownuje_ruchy_z_wlasna_norma():
+    """Bramka UQ ma tę samą POSTAĆ sygnału co reguła — ułamek podejrzanych ruchów —
+    więc ablacja porównuje kryterium, a nie dwie różne statystyki."""
+    u = np.array([[0.1, 0.1], [0.9, 0.9]])  # węzeł 1 powyżej normy w obu ruchach
+    online = SimpleNamespace(movements=lambda obs: u, ready=True, reset=lambda: None)
+    bramka = c.UQGate(online, u_mov_ref=np.full((2, 2), 0.5), threshold=0.5)
+    assert bramka.mask(None).tolist() == [False, True]
+
+    online.ready = False  # rozgrzewka — jak w regule
+    assert bramka.mask(None).tolist() == [False, False]
+
+
+def test_histereza_opoznia_wejscie_i_wyjscie():
+    """`k_on` kolejnych decyzji na wejście, `k_off` na wyjście. Bez tego bramka
+    o szumiącym sygnale migocze co decyzję, a każde przełączenie resetuje fazę.
+    Pierwsza decyzja przechodzi bez wygładzania — nie ma czego wygładzać."""
+    sygnal = iter(
+        [
+            [False],  # start: polityka
+            [True],  # 1. powyżej progu — za mało (k_on=2)
+            [True],  # 2. — wchodzi
+            [False],  # 1. poniżej — za mało (k_off=3)
+            [False],  # 2. — wciąż reguła
+            [False],  # 3. — wychodzi
+        ]
+    )
+    bramka = SimpleNamespace(mask=lambda obs: np.array(next(sygnal)), reset=lambda: None)
+    polityka = SimpleNamespace(act=lambda obs: np.array([POLITYKA]))
+    regula = SimpleNamespace(act=lambda obs: np.array([REGULA]))
+    sterownik = c.GatedController(polityka, regula, bramka, k_on=2, k_off=3)
+
+    akcje = [int(sterownik.act(None)[0]) for _ in range(6)]
+    assert akcje == [POLITYKA, POLITYKA, REGULA, REGULA, REGULA, POLITYKA]
+    assert sterownik.episode_stats()["gate_switches"] == 2.0
+
+
+def test_diagnostyka_detekcji_liczy_sie_wzgledem_wyroczni():
+    """Precyzja i czułość rozdzielają „detektor jest słaby" od „przełączanie mało
+    daje". Wyrocznia jest tu WYŁĄCZNIE diagnostyką — jej maska nie może wpłynąć na
+    akcje, więc test sprawdza też, że decyzja idzie z bramki właściwej."""
+    bramka = SimpleNamespace(mask=lambda obs: np.array([True, True, False]), reset=lambda: None)
+    wyrocznia = SimpleNamespace(mask=lambda obs: np.array([True, False, True]), reset=lambda: None)
+    polityka = SimpleNamespace(act=lambda obs: np.full(3, POLITYKA))
+    regula = SimpleNamespace(act=lambda obs: np.full(3, REGULA))
+    sterownik = c.GatedController(polityka, regula, bramka, oracle=wyrocznia)
+
+    assert sterownik.act(None).tolist() == [REGULA, REGULA, POLITYKA]  # maska BRAMKI
+    stats = sterownik.episode_stats()
+    assert stats["gate_precision"] == pytest.approx(0.5)  # 1 trafiony z 2 wskazanych
+    assert stats["gate_recall"] == pytest.approx(0.5)  # 1 z 2 faktycznie zepsutych

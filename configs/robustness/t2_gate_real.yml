@@ -1,0 +1,74 @@
+# T2 dla BRAMKI REALNEJ — ile z sufitu wyroczni zbiera sygnał policzalny z odczytów.
+#
+# Wyrocznia (`t2_gate`) pokazała zapas: −120 s przy `mask0p25_intersection`, −242 s
+# przy `mask0p5`, −403 s przy `mask0p75`, przy zerowej szkodzie na czystym. Ale czyta
+# prawdę z warstwy awarii, więc nie jest sterownikiem. Ten plan mierzy dwie bramki
+# WDRAŻALNE przeciwko tamtemu sufitowi:
+#
+#   rule — ułamek ruchów węzła, których odczyty stoją w miejscu przez całe okno.
+#          Licznik zamrożonych detektorów; łapie `zero` i `hold` jednym kryterium.
+#   uq   — ułamek ruchów, których u przekracza własną normę z czystego okna (głowa
+#          obserwacyjna, artefakty z `runs/heads/`).
+#
+# TO JEST ABLACJA, KTÓRA ROZSTRZYGA O GŁOWIE NIEPEWNOŚCI W CAŁEJ PRACY. UW-attention
+# jej istnienia nie obronił (results/t2_uw.md: mechanizm zadziałał, ATT neutralne).
+# Jeśli licznik zamrożeń bramkuje równie dobrze, wniosek brzmi „do wykrycia martwego
+# detektora wystarczy trwałość odczytu" i tak trzeba go napisać.
+#
+# OBA SYGNAŁY MAJĄ TĘ SAMĄ POSTAĆ (ułamek podejrzanych ruchów) i progi skalibrowane
+# TYM SAMYM kryterium na czystym oknie zrzutu BC: ≤0,5% decyzji z fałszywym
+# przełączeniem (`GATE_FALSE_ALARM`). Inaczej porównywalibyśmy gotowość do strzelania,
+# a nie jakość sygnałów. Progi są w artefakcie `runs/heads/gate_ref__<sieć>.npz`,
+# nie w tym pliku — plan ich nie nadpisuje.
+#
+# HIPOTEZY ZAPISANE PRZED POMIAREM (na podstawie zrzutu BC, nie T2):
+#  1. `zero`-maski: reguła blisko wyroczni (odsetek przełączeń 52,6% vs 62% przy
+#     mask0p5, 25,0% vs 27% przy mask0p25_intersection). UQ dużo słabiej (14,8%).
+#  2. `hold`: reguła powinna trzymać (zamrożenie to jej kryterium), ale z OPÓŹNIENIEM
+#     do 12 decyzji — tyle trwa zapełnienie okna. Wyrocznia przełącza natychmiast,
+#     więc różnica ATT zmierzy koszt tego opóźnienia.
+#  3. `gauss`: UQ MA TAM MASOWO MYLIĆ. σ rośnie przy szumie, gdzie detektory żyją,
+#     a polityka bije FixedTime (319 s vs 507 s). Na zrzucie BC: 88% decyzji powyżej
+#     progu przy gauss2, wobec 0% dla reguły. Scenariusze `gauss` są w planie WŁAŚNIE
+#     po to, żeby ten tryb porażki było widać, a nie żeby go ominąć.
+#
+# HISTEREZA (k_on/k_off) dotyczy tylko bramek realnych — sygnał wyroczni jest stały
+# w epizodzie. Wchodzi do odcisku biegu, więc jej zmiana unieważnia wynik.
+#
+# DIAGNOSTYKA `gate_precision` / `gate_recall` liczy się względem wyroczni z progiem
+# `oracle_threshold` (domyślnie 0,5 = „połowa wlotów węzła martwa"). To jest DEFINICJA
+# oślepienia przyjęta do oceny detektora i jest niezależna od progu, na którym pracuje
+# kolumna-wyrocznia (0,75). Ostrzejszy próg dawał przy maskach pasowych zbiór pusty
+# i obie metryki stawały się nieokreślone. Prawda z warstwy awarii NIE dotyka decyzji.
+#
+# WYMAGA: tsc obshead -n <sieć> --save --window 12 --persistence
+name: t2_gate_real
+mode: realistic
+draws: 5
+timeout: 7200
+
+networks: [cityflow_jinan3x4_4ph]
+
+controllers:
+  gatppo: {seeds: [0, 1, 2]}
+  gatppo_gate_rule:
+    agent: gatppo
+    seeds: [0, 1, 2]
+    gate: {kind: rule, k_on: 3, k_off: 6}
+  gatppo_gate_uq:
+    agent: gatppo
+    seeds: [0, 1, 2]
+    gate: {kind: uq, k_on: 3, k_off: 6}
+  gatppo_gate_oracle:
+    agent: gatppo
+    seeds: [0, 1, 2]
+    gate: {kind: oracle, threshold: 0.75}
+  fixedtime: {}
+
+scenarios:
+  - {kind: gauss, level: 2.0}
+  - {kind: mask, level: 0.25}
+  - {kind: mask, level: 0.5}
+  - {kind: mask, level: 0.25, unit: intersection}
+  - {kind: mask, level: 0.25, substitution: hold, onset: 60}
+  - {kind: mask, level: 0.5, substitution: hold, onset: 60}

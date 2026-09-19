@@ -14,6 +14,11 @@
 # results/t2_uw.md + results/t2_uw.csv. Wznowienie: to samo polecenie.
 #
 # Zmienne: J (ile punktów naraz), DRY=1 (tylko wypisz komendy).
+# PODZIAŁ WŁASNOŚCI: glider liczy BIEGI (`runs/`), raporty robi laptop (`results/`).
+# Raport to sekundy liczenia z `runs/`, a `results/` jest katalogiem WERSJONOWANYM,
+# którego właścicielem jest laptop — generowanie go tutaj dwa razy zablokowało
+# `git pull` („untracked working tree files would be overwritten by merge”) i za
+# każdym razem trzeba było ręcznie odkładać pliki na bok.
 set -u
 cd "$(dirname "$0")/../.."
 TSC=.venv/bin/tsc
@@ -33,7 +38,6 @@ run() {
 
 if [ "${1:-}" = "_run" ]; then
   run degrade run t2_uw -j "$J"
-  run degrade report t2_uw
   exit
 fi
 
@@ -67,5 +71,6 @@ cat <<EOF2
 Ruszyło: $N rdzeni, J=$J.
 Postęp:   tail -f $LOG/uw.log
 Stan:     $TSC degrade status t2_uw
-Wynik:    results/t2_uw.md + results/t2_uw.csv
+Wynik:    runs/t2/*__t2_uw/ — raport zrób NA LAPTOPIE, po synchronizacji:
+          rsync -av glider:tsc_marl/runs/t2/ runs/t2/ && tsc degrade report t2_uw
 EOF2

@@ -81,6 +81,26 @@ def window_index(episode: np.ndarray, k: int) -> np.ndarray:
     return np.maximum(t[:, None] - np.arange(k)[None, :], start[:, None])
 
 
+def full_window(episode: np.ndarray, k: int) -> np.ndarray:
+    """[T] bool — kroki, w których okno `k` MIEŚCI SIĘ w epizodzie.
+
+    Na rozgrzewce `window_index` powtarza indeks początku epizodu, więc każda cecha
+    „nie zmienia się" i `suspicious_movements` widzi wszystkie ruchy jako podejrzane.
+    Przy kalibracji progu to nie jest drobiazg: ogon rozkładu na CZYSTYM zapełnia się
+    wtedy jedynkami i kwantyl 99,5% wychodzi 1,0 — próg, przy którym bramka nie
+    strzela już nigdy, nawet przy połowie martwych detektorów (zmierzone).
+
+    Ta sama reguła obowiązuje bramkę w pętli sterowania (bufor musi mieć pełne okno),
+    więc liczy ją jedna funkcja dla obu stron.
+    """
+    t = np.arange(len(episode))
+    first: dict[int, int] = {}
+    for i, e in enumerate(episode.tolist()):
+        first.setdefault(e, i)
+    start = np.array([first[e] for e in episode.tolist()])
+    return (t - start) >= (k - 1)
+
+
 def neighbor_matrix(edge_index: np.ndarray, n: int) -> np.ndarray:
     """[N, N] — wiersz i uśrednia węzły, z których krawędź WCHODZI do i (upstream).
     Węzeł bez sąsiadów dostaje zera, nie dzielenie przez zero."""
@@ -574,6 +594,29 @@ def log_rho(
     return torch.from_numpy(out.astype(np.float32))
 
 
+def suspicious_movements(x: np.ndarray, win: np.ndarray, n_mov: int) -> np.ndarray:
+    """[T, N, n_mov] bool — ruch, którego WSZYSTKIE cechy stoją w miejscu przez całe okno.
+
+    Jedno kryterium zamiast dwóch, bo „martwy z podstawieniem `zero`" jest szczególnym
+    przypadkiem „stały": zero też się nie zmienia. To samo łapie `hold` (zamrożony
+    ostatni odczyt), czyli awarię, która nie zostawia śladu w samej WARTOŚCI.
+
+    SŁABOŚĆ WBUDOWANA, nie do naprawienia progiem: pusty wlot o małym ruchu raportuje
+    zero przez wiele decyzji i jest ZDROWY. Reguła nie ma jak ich odróżnić — i to jest
+    dokładnie to, co głowa (per krawędź, z `u_ref`) może umieć, a reguła nie. Stąd
+    ablacja `rule` vs `uq` w Kroku 9.
+
+    Wymaga PEŁNEGO okna: przy krótszym `win` powtarza indeksy początku epizodu, więc
+    „bez zmiany" rośnie sztucznie (patrz `persistence_features`). Strażnik rozgrzewki
+    jest po stronie bramki, nie tutaj.
+    """
+    n_feat = (x.shape[-1] // n_mov) * n_mov  # bez one-hotu fazy
+    xs = np.stack([x[win[:, j]][..., :n_feat] for j in range(win.shape[1])])  # [k, T, N, f]
+    stale = (xs.max(0) - xs.min(0)) < 1e-6  # [T, N, f]
+    bloki = [stale[..., b * n_mov : (b + 1) * n_mov] for b in range(n_feat // n_mov)]
+    return np.logical_and.reduce(bloki)  # ruch podejrzany = WSZYSTKIE jego cechy stoją
+
+
 def group_spread(log_rho: torch.Tensor, edge_index: torch.Tensor, n_nodes: int) -> float:
     """Średni rozstęp (max − min) log ρ w GRUPIE SOFTMAXU węzła: krawędzie wchodzące
     do i plus jego pętla własna.
@@ -641,9 +684,29 @@ class OnlineUncertainty:
     def reset(self) -> None:
         self._buf.clear()
 
+    @property
+    def ready(self) -> bool:
+        """Czy bufor ma PEŁNE okno. Na rozgrzewce okno jest przycięte (powtórzone
+        indeksy), więc sygnały liczone z trwałości są zafałszowane — bramka musi
+        wtedy milczeć. Modulacja log ρ może działać dalej, bo głowa uczyła się
+        z tym samym artefaktem."""
+        return len(self._buf) >= self.head.cfg.window
+
+    @torch.no_grad()
+    def movements(self, obs: np.ndarray) -> np.ndarray:
+        """Dołóż odczyt do okna i policz u NA RUCH [N, n_mov] dla TEGO kroku."""
+        return self._u_mov(obs)
+
     @torch.no_grad()
     def log_rho(self, obs: np.ndarray) -> torch.Tensor:
         """Dołóż odczyt do okna i policz log ρ [E + N] dla TEGO kroku."""
+        u_mov = self._u_mov(obs)
+        u_edge, _ = edge_uncertainty(u_mov[None], self.sources, "mean")  # [1, E]
+        return log_rho(u_edge[0], u_mov.mean(-1), self.ref, self.edge_index, tau=self.tau)
+
+    def _u_mov(self, obs: np.ndarray) -> np.ndarray:
+        """Wspólny rdzeń: bufor -> cechy -> σ -> u na ruch. Jedno miejsce, bo bramka
+        UQ i modulacja log ρ liczą to samo i nie wolno im się rozjechać."""
         obs = np.asarray(obs, dtype=np.float32)
         if obs.shape[0] != self.n_nodes:
             raise ValueError(f"obserwacja ma {obs.shape[0]} wierszy, graf ma {self.n_nodes}")
@@ -670,17 +733,141 @@ class OnlineUncertainty:
         # przez `y_std` tam i z powrotem, DOKŁADNIE jak `Fitted.predict` + `evaluate`:
         # u ma być w tych samych jednostkach co `u_ref`, co do ostatniego bitu
         s_std = (sigma.numpy() * self.head.y_std) / self.head.y_std
-        u_mov = movement_uncertainty(s_std, self.n_mov)  # [1, N, n_mov]
-        u_edge, _ = edge_uncertainty(u_mov, self.sources, "mean")  # [1, E]
-        return log_rho(u_edge[0], u_mov[0].mean(-1), self.ref, self.edge_index, tau=self.tau)
+        return movement_uncertainty(s_std, self.n_mov)[0]  # [N, n_mov]
+
+
+#: Dopuszczalny odsetek FAŁSZYWYCH przełączeń na czystym oknie. Próg bramki to
+#: kwantyl (1 − ta liczba) rozkładu sygnału na czystym — wspólne kryterium dla
+#: reguły i UQ, żeby ablacja porównywała JAKOŚĆ SYGNAŁÓW, a nie gotowość do
+#: strzelania. Fałszywe przełączenie kosztuje 70% (296 s polityki vs 507 s FixedTime),
+#: więc 0,5% decyzji to i tak hojnie.
+GATE_FALSE_ALARM = 0.005
+GATE_FORMAT = 1
+
+
+@dataclass(frozen=True)
+class GateReference:
+    """Progi bramek, skalibrowane na CZYSTYM oknie zrzutu BC — nie na T2.
+
+    Ta sama dyscyplina co przy `u_ref` i τ: kryterium („≤ `false_alarm` decyzji z
+    fałszywym przełączeniem") jest zapisane PRZED pomiarem, progi liczone na części
+    treningowej, sprawdzane na ogonie. Inaczej byłoby to strojenie bramki na zbiorze,
+    na którym potem raportujemy jej wynik.
+
+    OBA SYGNAŁY MAJĄ TĘ SAMĄ POSTAĆ: ułamek ruchów węzła uznanych za podejrzane.
+    Różni je wyłącznie kryterium podejrzliwości — `rule` pyta „czy cechy tego ruchu
+    stoją w miejscu przez całe okno" (`suspicious_movements`), `uq` pyta „czy u tego
+    ruchu przekracza jego własną normę z czystego okna" (`u_mov_ref`). Inaczej
+    ablacja byłaby ustawiona: liczba podejrzanych ruchów kontra średnia po węźle to
+    dwie różne statystyki, a nie dwa różne sygnały.
+    """
+
+    rule: float
+    uq: float
+    #: [N, n_mov] — `mean + k·sd` u RUCHU na czystym oknie. Per ruch, nie per węzeł:
+    #: pytanie bramki brzmi „ile moich detektorów zwariowało", a nie „jak bardzo
+    #: niepewny jestem średnio".
+    u_mov_ref: np.ndarray
+    false_alarm: float
+    window: int
+    network: str
+    head_sha: str
+
+    def save(self, path: str | Path) -> Path:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(
+            path,
+            format=np.array(GATE_FORMAT),
+            rule=np.array(self.rule),
+            uq=np.array(self.uq),
+            u_mov_ref=self.u_mov_ref,
+            false_alarm=np.array(self.false_alarm),
+            window=np.array(self.window),
+            network=np.array(self.network),
+            head_sha=np.array(self.head_sha),
+        )
+        return path
+
+
+def gate_path(network: str) -> Path:
+    from tsc_marl.paths import RUNS  # noqa: PLC0415
+
+    return RUNS / "heads" / f"gate_ref__{network}.npz"
+
+
+def load_gates(
+    path: str | Path, *, network: str | None = None, head: str | Path | None = None
+) -> GateReference:
+    blob = np.load(Path(path), allow_pickle=False)
+    if int(blob["format"]) != GATE_FORMAT:
+        raise ValueError(f"format progów bramki {int(blob['format'])}, oczekiwany {GATE_FORMAT}")
+    ref = GateReference(
+        rule=float(blob["rule"]),
+        uq=float(blob["uq"]),
+        u_mov_ref=blob["u_mov_ref"],
+        false_alarm=float(blob["false_alarm"]),
+        window=int(blob["window"]),
+        network=str(blob["network"]),
+        head_sha=str(blob["head_sha"]),
+    )
+    if network is not None and ref.network != network:
+        raise ValueError(f"progi policzone na {ref.network!r}, a sieć to {network!r}")
+    if head is not None and (sha := file_sha(head)) != ref.head_sha:
+        raise ValueError(
+            f"próg UQ policzony inną głową (odcisk {ref.head_sha}, plik ma {sha}) — "
+            "u jest w jednostkach TEJ głowy; przelicz: `tsc obshead --save`"
+        )
+    return ref
+
+
+def calibrate_gates(
+    fitted: Fitted,
+    ref: EdgeReference,
+    data: Loaded,
+    sources: np.ndarray,
+    *,
+    network: str,
+    head_sha: str,
+    false_alarm: float = GATE_FALSE_ALARM,
+    scenario: str = "clean",
+) -> GateReference:
+    """Progi obu bramek z jednego kwantyla rozkładu sygnału na czystym.
+
+    `ref` (odniesienie krawędziowe) nie jest tu używane — zostaje w sygnaturze, bo
+    wołający i tak je ma, a przyszłe warianty bramki (np. po krawędziach sąsiadów)
+    będą go potrzebować.
+    """
+    # tylko kroki z PEŁNYM oknem — inaczej rozgrzewka wpycha do ogona same jedynki
+    train = data.mask(fitted.cfg.split, train=True) & full_window(data.episode, fitted.cfg.window)
+    win = window_index(data.episode, fitted.cfg.window)
+    n_mov = sources.shape[1]
+
+    rule = suspicious_movements(data.x[scenario], win, n_mov).mean(-1)  # [T, N]
+
+    _, sigma = fitted.predict(data, data.x[scenario])
+    u_mov = movement_uncertainty(sigma / fitted.y_std, n_mov)  # [T, N, n_mov]
+    czyste = u_mov[train]
+    u_mov_ref = czyste.mean(0) + REFERENCE_K * czyste.std(0)  # [N, n_mov]
+    uq = (u_mov >= u_mov_ref).mean(-1)  # ułamek podejrzanych ruchów — jak w regule
+
+    return GateReference(
+        rule=float(np.quantile(rule[train], 1.0 - false_alarm)),
+        uq=float(np.quantile(uq[train], 1.0 - false_alarm)),
+        u_mov_ref=u_mov_ref,
+        false_alarm=float(false_alarm),
+        window=int(fitted.cfg.window),
+        network=network,
+        head_sha=head_sha,
+    )
 
 
 def train_head(
     network: str = "cityflow_jinan3x4_4ph",
     cfg: ObsConfig | None = None,
     out: str | Path | None = None,
-) -> tuple[Path, Path]:
-    """Głowa + jej poziom odniesienia na zrzucie BC -> (ścieżka głowy, ścieżka u_ref).
+) -> tuple[Path, Path, Path]:
+    """Komplet artefaktów Fazy 3 -> (głowa, u_ref, progi bramek).
 
     Oba naraz i zawsze, bo rozjazd między nimi jest cichy: u_ref z innej głowy to
     liczby w innych jednostkach, a nie błąd, który coś zgłosi. Osobno od `run()`,
@@ -695,8 +882,10 @@ def train_head(
     head = fitted.save(out or head_path(network), network=network)
 
     sources = movement_sources(network, base.dead["clean"].shape[-1])
-    ref = edge_reference(fitted, base, sources, network=network, head_sha=file_sha(head))
-    return head, ref.save(reference_path(network))
+    sha = file_sha(head)
+    ref = edge_reference(fitted, base, sources, network=network, head_sha=sha)
+    progi = calibrate_gates(fitted, ref, base, sources, network=network, head_sha=sha)
+    return head, ref.save(reference_path(network)), progi.save(gate_path(network))
 
 
 # ---------------------------------------------------------------- metryki

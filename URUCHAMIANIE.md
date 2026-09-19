@@ -204,6 +204,12 @@ treningowym, lżejszym (JiNan ×0,25, inny wzorzec) i cięższym (realny HangZho
 pojazdów). Werdykt w `results/t2_ood_epistemic.md`: czy polityka przegrywa z MaxPressure na nowym
 ruchu i czy rozbieżność actorów rośnie tam mocniej niż pod szumem detektorów.
 
+**Podział własności: glider liczy BIEGI (`runs/`), raporty robi laptop (`results/`).**
+Skrypty z `deploy/glider/` celowo nie wołają `tsc degrade report` ani `tsc table` —
+`results/` jest katalogiem wersjonowanym, więc generowanie go na gliderze kończy się
+zablokowanym `git pull` („untracked working tree files would be overwritten"). Raport
+to sekundy liczenia z `runs/`, więc nic na tym nie tracisz.
+
 Nie licz tego samego `run_id` na obu maszynach — przy synchronizacji jeden katalog
 nadpisze drugi. Po liczeniu na gliderze przenieś wyniki razem z wagami:
 
