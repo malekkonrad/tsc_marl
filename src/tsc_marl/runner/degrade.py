@@ -178,22 +178,18 @@ def build_uncertainty(plan: Plan, unit: Unit, env):
     cięższym ruchu niż w zrzucie u rośnie wszędzie i `relu` wygeneruje nadmiar bez
     awarii; przy lżejszym — zje go (brak fałszywych alarmów).
     """
-    from tsc_marl.uncertainty import obs_head as oh  # noqa: PLC0415
+    from tsc_marl.robustness.training import online_uncertainty  # noqa: PLC0415
 
-    net = base_network(unit.network)
-    head, ref = oh.head_path(net), oh.reference_path(net)
-    if not head.is_file() or not ref.is_file():
-        raise SystemExit(
-            f"brak głowy obserwacyjnej dla '{net}' ({head.name}, {ref.name}) — "
-            f"policz ją: tsc obshead -n {net} --save --window 12 --persistence"
-        )
-    fitted = oh.load_head(head, network=net)
-    reference = oh.load_reference(ref, network=net, head=head)
-    sources = oh.movement_sources(net, env.features.n_mov)
-    # `.get("uw", {})`, bo tę samą głowę wywołuje bramka UQ, która τ nie używa —
+    # Ładowanie artefaktów przez `robustness.training.online_uncertainty` — wspólne
+    # z treningiem, żeby dwie kopie nie rozjechały się przy zmianie nazw plików.
+    # `.get("uw", {})`, bo tę samą głowę wywołuje bramka UQ, która τ nie używa:
     # τ skaluje modulację log ρ, a bramce potrzebne jest samo u na ruch.
-    tau = float(plan.controllers[unit.controller].get("uw", {}).get("tau", oh.DEFAULT_TAU))
-    return oh.OnlineUncertainty(fitted, reference, sources, env.graph.edge_index, tau=tau)
+    return online_uncertainty(
+        base_network(unit.network),
+        env.features.n_mov,
+        env.graph.edge_index,
+        tau=plan.controllers[unit.controller].get("uw", {}).get("tau"),
+    )
 
 
 def fixed_cycle(spec: dict[str, Any]) -> int:

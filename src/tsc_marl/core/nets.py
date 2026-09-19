@@ -522,10 +522,21 @@ class ActorCritic(nn.Module):
         kwargs = {"encoder": encoder_kind(), **GATEncoder.registry_kwargs()}
         return cls(ob_length, n_phases, **{**kwargs, **overrides})
 
-    def distribution(self, x: Tensor, edge_index: Tensor) -> Categorical:
+    def distribution(
+        self, x: Tensor, edge_index: Tensor, *, log_rho: Tensor | None = None
+    ) -> Categorical:
         """Rozkład nad fazami. Każdy WIERSZ to osobny agent — przy współdzielonych
-        wagach 12 skrzyżowań × T kroków to po prostu 12·T próbek w batchu."""
-        return Categorical(logits=self.actor(x, edge_index))
+        wagach 12 skrzyżowań × T kroków to po prostu 12·T próbek w batchu.
+
+        `log_rho` JEST TU OD FAZY 3 (trening polityki Z mechanizmem). Do T2
+        modulacja doklejała się po fakcie, w `robustness/controllers.py`, i
+        `ActorCritic` nie musiał o niej wiedzieć. Trening musi: przez ten sam
+        `distribution` idzie i rollout (`act`), i strata polityki (`evaluate`),
+        więc podanie log ρ tylko w jednym z nich dałoby ratio ≠ 1 w pierwszej
+        epoce PPO — czyli update liczony z gradientu INNEJ sieci niż ta, która
+        zbierała dane. Bez wyjątku, bez ostrzeżenia; łapie to test.
+        """
+        return Categorical(logits=self.actor(x, edge_index, log_rho=log_rho))
 
     def act(
         self,
@@ -534,14 +545,18 @@ class ActorCritic(nn.Module):
         *,
         deterministic: bool = False,
         batch: Tensor | None = None,
+        log_rho: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor]:
         """Rollout: -> (akcje [N], log_prob [N], wartości [N]).
 
         `deterministic=True` to argmax i tryb EWALUACJI (kolumna T1
         „GAT+PPO+CTDE (deterministic)"); w treningu zawsze próbkujemy, bo
         eksploracja w PPO bierze się właśnie stąd, nie z epsilon-greedy.
+
+        `log_rho` idzie WYŁĄCZNIE do actora — krytyk go nie dostaje i to jest
+        decyzja z docstringu `Critic`, nie przeoczenie.
         """
-        dist = self.distribution(x, edge_index)
+        dist = self.distribution(x, edge_index, log_rho=log_rho)
         actions = dist.logits.argmax(-1) if deterministic else dist.sample()
         return actions, dist.log_prob(actions), self.critic(x, edge_index, batch)
 
@@ -551,14 +566,21 @@ class ActorCritic(nn.Module):
         edge_index: Tensor,
         actions: Tensor,
         batch: Tensor | None = None,
+        *,
+        log_rho: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor]:
         """Update: -> (log_prob [N], entropia [N], wartości [N]) dla ZADANYCH akcji.
 
         W pierwszej epoce PPO `exp(log_prob - log_prob_stary)` musi wyjść dokładnie
         1.0. Jeśli nie wychodzi, to nie jest problem uczenia, tylko rozjazd między
         ścieżką `act` a `evaluate` — pilnuje tego test.
+
+        `log_rho` MUSI tu być tym samym wektorem, który widział `act` w tamtym
+        kroku — dlatego bufor rolloutu go ZAPISUJE, a nie przelicza. Głowa
+        obserwacyjna widzi OKNO ostatnich odczytów, więc przeliczenie po fakcie
+        z samego `x` dałoby inną liczbę przy tej samej obserwacji.
         """
-        dist = self.distribution(x, edge_index)
+        dist = self.distribution(x, edge_index, log_rho=log_rho)
         return dist.log_prob(actions), dist.entropy(), self.critic(x, edge_index, batch)
 
     def value(self, x: Tensor, edge_index: Tensor, batch: Tensor | None = None) -> Tensor:

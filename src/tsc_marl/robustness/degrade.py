@@ -115,6 +115,17 @@ class Plan:
             return "policy_gate"
         return KINDS[self.agent(controller)]
 
+    def baseline(self, controller: str) -> str | None:
+        """Kolumna, z którą raport ma SPAROWAĆ ten sterownik, gdy domyślny wybór
+        („pierwsza kolumna `policy` tego samego agenta") byłby zły.
+
+        Potrzebne od planu `t2_train_uw`: są tam DWA ramiona bez mechanizmu
+        (trening na czystym i trening z awariami), oba z agentem `gatppo`, więc
+        domyśl trafiłby w pierwsze i mierzył trening razem z mechanizmem zamiast
+        samego mechanizmu. Różnica jest cicha — tabela wychodzi, tylko odpowiada
+        na inne pytanie."""
+        return self.controllers[controller].get("baseline")
+
     def units(self) -> list[Unit]:
         """Uczone sterowniki × ich seedy; reguły MP i FixedTime są deterministyczne,
         więc liczone raz (seed 0) — N seedów dałoby N identycznych liczb."""
@@ -213,6 +224,14 @@ def load_plan(path: str | Path) -> Plan:
                     f"plan '{p.name}': bramka '{label}' ma kind="
                     f"{spec['gate'].get('kind')!r}, dozwolone: {GATE_KINDS}"
                 )
+        baza = spec.get("baseline")
+        if baza is not None and baza not in plan.controllers:
+            raise SystemExit(
+                f"plan '{p.name}': '{label}' wskazuje baseline '{baza}', którego nie ma "
+                f"w `controllers` ({sorted(plan.controllers)})"
+            )
+        if baza is not None and baza == label:
+            raise SystemExit(f"plan '{p.name}': '{label}' wskazuje sam siebie jako baseline")
     slugs = [slug(s) for s in plan.scenarios]
     if len(set(slugs)) != len(slugs):
         raise SystemExit(f"plan '{p.name}': zdublowane scenariusze {slugs}")

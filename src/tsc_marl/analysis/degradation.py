@@ -67,6 +67,10 @@ COLORS = {
     "gatppo_uw_t0p25": "#f3a6bd",
     "gatppo_uw_t0p10": "#d63f6e",
     "gatppo_uw_t0p05": "#8c1c40",
+    # ramiona 2 i 3 z planu `t2_train_uw` — sloty 6 i 8 palety, dobrane tak, żeby
+    # odróżniały się od rdzenia (slot 1) także w symulacji CVD
+    "gatppo_fail": "#00a3a3",
+    "gatppo_fail_uw": "#a8442c",
 }
 LABELS = {
     "gatppo": "rdzeń GAT+PPO+CTDE",
@@ -89,6 +93,8 @@ LABELS = {
     "gatppo_uw_t0p25": "UW-attention, τ = 0,25",
     "gatppo_uw_t0p10": "UW-attention, τ = 0,10",
     "gatppo_uw_t0p05": "UW-attention, τ = 0,05",
+    "gatppo_fail": "rdzeń trenowany z awariami",
+    "gatppo_fail_uw": "rdzeń z awariami + UW-attention",
 }
 INK, INK2, MUTED = "#0b0b0b", "#52514e", "#898781"
 GRID, AXIS, SURFACE = "#e1e0d9", "#c3c2b7", "#fcfcfb"
@@ -178,6 +184,7 @@ TITLES = {
     "t2_gate": "T2 z bramką fallbacku",
     "t2_gate_real": "T2 z bramką realną (reguła vs UQ)",
     "t2_uw_tau": "T2 — sweep τ dla UW-attention",
+    "t2_train_uw": "T2 dla polityki trenowanej z mechanizmem",
 }
 
 #: Próg |t| dla różnicy parowanej. 2,8 ≈ poprawka Bonferroniego na ~26 porównań
@@ -193,6 +200,14 @@ def mechanism_pairs(plan: Plan) -> list[tuple[str, str]]:
     out = []
     for label in plan.controllers:
         if plan.kind(label) not in ("policy_uw", "policy_gate"):
+            continue
+        # `baseline:` z planu wygrywa z domyślem. Domyśl („pierwsza kolumna `policy`
+        # tego samego agenta") jest dobry tam, gdzie kolumna bez mechanizmu jest
+        # jedna (`t2_uw`), i zły tam, gdzie są dwie (`t2_train_uw`: trening na
+        # czystym i trening z awariami). Patrz `Plan.baseline`.
+        jawna = plan.baseline(label)
+        if jawna:
+            out.append((label, jawna))
             continue
         baza = [
             c
@@ -348,11 +363,19 @@ def _mechanism_section(plan: Plan, df, mechanizm: str, baza: str) -> list[str]:
     lines = [
         f"## Mechanizm: {etykieta} vs {LABELS.get(baza, baza)}",
         "",
-        "Obie kolumny liczą się z TEGO SAMEGO checkpointu i tych samych losowań awarii "
-        "(`draw` wybiera, które detektory padły), więc porównujemy je **parami**, nie przez "
-        "±std z tabeli wyżej: wspólny rozrzut między seedami i losowaniami skraca się "
-        "w różnicy. `Δ` < 0 = mechanizm lepszy. `|t| ≥ "
-        f"{T_THRESHOLD}` to próg po poprawce na tyle porównań, ile ma ta tabela.",
+        (
+            "Obie kolumny liczą się z TEGO SAMEGO checkpointu i tych samych losowań awarii "
+            "(`draw` wybiera, które detektory padły), więc porównujemy je **parami**, nie "
+            "przez ±std z tabeli wyżej: wspólny rozrzut między seedami i losowaniami skraca "
+            "się w różnicy."
+            if plan.baseline(mechanizm) is None
+            else "Kolumny mają RÓŻNE checkpointy (osobne treningi), więc parujemy po "
+            "(sieć, scenariusz, seed, losowanie): wspólne zostają ruch i wzorzec awarii, "
+            "rozrzut między seedami wchodzi do różnicy. Kolumna odniesienia jest wskazana "
+            f"w planie (`baseline: {plan.baseline(mechanizm)}`), a nie domyślona."
+        )
+        + " `Δ` < 0 = mechanizm lepszy. `|t| ≥ "
+        + f"{T_THRESHOLD}` to próg po poprawce na tyle porównań, ile ma ta tabela.",
         "",
         wyjasnienie,
         "",
