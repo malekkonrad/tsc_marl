@@ -8,7 +8,7 @@ Komórka = ATT [s], średnia po losowaniach, potem po seedach polityki (± std p
 
 FixedTime (niezależny od odczytów): **507.0 s**.
 
-| scenariusz | rdzeń GAT+PPO+CTDE (n=5) | gatppo_uw (n=5) |
+| scenariusz | rdzeń GAT+PPO+CTDE (n=5) | rdzeń + UW-attention (n=5) |
 |---|---:|---:|
 | `clean` | 295.8 ± 1.2 | 295.7 ± 0.9 |
 | `gauss1` | 304.1 ± 1.2 (+2.8%) | 304.2 ± 0.6 (+2.9%) |
@@ -25,7 +25,7 @@ FixedTime (niezależny od odczytów): **507.0 s**.
 | `drift0p5` | 331.0 ± 4.6 (+11.9%) | 332.9 ± 9.2 (+12.6%) |
 
 * **rdzeń GAT+PPO+CTDE** — najgorszy scenariusz `mask0p5_intersection`: 746.5 s (+152.4%). Gorzej niż FixedTime w 3 scenariuszach: `mask0p25_intersection`, `mask0p5`, `mask0p5_intersection`.
-* **gatppo_uw** — najgorszy scenariusz `mask0p5_intersection`: 742.2 s (+151.0%). Gorzej niż FixedTime w 3 scenariuszach: `mask0p25_intersection`, `mask0p5`, `mask0p5_intersection`.
+* **rdzeń + UW-attention** — najgorszy scenariusz `mask0p5_intersection`: 742.2 s (+151.0%). Gorzej niż FixedTime w 3 scenariuszach: `mask0p25_intersection`, `mask0p5`, `mask0p5_intersection`.
 
 
 ![krzywe degradacji cityflow_jinan3x4_4ph](figures/t2_uw_cityflow_jinan3x4_4ph.png)
@@ -34,7 +34,7 @@ FixedTime (niezależny od odczytów): **507.0 s**.
 
 FixedTime (niezależny od odczytów): **568.9 s**.
 
-| scenariusz | rdzeń GAT+PPO+CTDE (n=5) | gatppo_uw (n=5) |
+| scenariusz | rdzeń GAT+PPO+CTDE (n=5) | rdzeń + UW-attention (n=5) |
 |---|---:|---:|
 | `clean` | 317.5 ± 0.7 | 317.5 ± 0.5 |
 | `gauss1` | 345.7 ± 1.3 (+8.9%) | 346.0 ± 1.4 (+9.0%) |
@@ -51,12 +51,12 @@ FixedTime (niezależny od odczytów): **568.9 s**.
 | `drift0p5` | 338.7 ± 2.5 (+6.7%) | 337.0 ± 3.3 (+6.1%) |
 
 * **rdzeń GAT+PPO+CTDE** — najgorszy scenariusz `mask0p5`: 686.6 s (+116.2%). Gorzej niż FixedTime w 2 scenariuszach: `mask0p5`, `mask0p5_intersection`.
-* **gatppo_uw** — najgorszy scenariusz `mask0p5`: 688.2 s (+116.7%). Gorzej niż FixedTime w 2 scenariuszach: `mask0p5`, `mask0p5_intersection`.
+* **rdzeń + UW-attention** — najgorszy scenariusz `mask0p5`: 688.2 s (+116.7%). Gorzej niż FixedTime w 2 scenariuszach: `mask0p5`, `mask0p5_intersection`.
 
 
 ![krzywe degradacji cityflow_hangzhou4x4_4ph](figures/t2_uw_cityflow_hangzhou4x4_4ph.png)
 
-## Mechanizm: gatppo_uw vs rdzeń GAT+PPO+CTDE
+## Mechanizm: rdzeń + UW-attention vs rdzeń GAT+PPO+CTDE
 
 Obie kolumny liczą się z TEGO SAMEGO checkpointu i tych samych losowań awarii (`draw` wybiera, które detektory padły), więc porównujemy je **parami**, nie przez ±std z tabeli wyżej: wspólny rozrzut między seedami i losowaniami skraca się w różnicy. `Δ` < 0 = mechanizm lepszy. `|t| ≥ 2.8` to próg po poprawce na tyle porównań, ile ma ta tabela.
 

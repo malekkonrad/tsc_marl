@@ -138,7 +138,7 @@ def test_fixedtime_liczony_tylko_na_czystym(tmp_path):
     assert [d.slug(s) for s in specs] == ["clean"]
 
 
-def plan_uw(tmp_path, agent: str = "gatppo"):
+def plan_uw(tmp_path, agent: str = "gatppo", tau: float = 0.25):
     """Plan z dodatkową kolumną UW. Wstrzyknięte PODMIANĄ w blok `controllers`,
     bo `extra` w `plan_file` dokleja się na końcu pliku, czyli pod `scenarios`."""
     p = plan_file(tmp_path)
@@ -149,7 +149,7 @@ def plan_uw(tmp_path, agent: str = "gatppo"):
             f"  {agent}_uw:\n"
             f"    agent: {agent}\n"
             "    seeds: [0, 1]\n"
-            "    uw: {tau: 0.25}",
+            f"    uw: {{tau: {tau}}}",
         )
     )
     return p
@@ -180,9 +180,123 @@ def test_uw_szuka_wag_tam_gdzie_rdzen(tmp_path):
     assert sciezki["gatppo_uw"] == sciezki["gatppo"] == tmp_path / "rodzic" / "engine" / "core.pt"
 
 
+def test_sciezka_wag_nie_zalezy_od_rodzaju_sterownika(tmp_path, monkeypatch):
+    """Przyczyna źródłowa pułapki wyżej: format pliku z wagami zależy od AGENTA
+    (kto trenował), a nie od rodzaju sterownika (jak zbudować sterownik z tych wag).
+
+    Dopóki warunek w `checkpoint()` był wyliczanką rodzajów, każda nowa nakładka na
+    rdzeń — ensemble, UW-attention, bramki Fazy 3 — musiała pamiętać, żeby się do niej
+    dopisać, a zapomnienie kończyło się CICHYM pominięciem całej kolumny. Test udaje
+    rodzaj, którego jeszcze nie ma: wagi i tak mają się rozwiązać na `core.pt`."""
+    from tsc_marl.runner.degrade import checkpoint  # noqa: PLC0415
+
+    plan = d.load_plan(plan_uw(tmp_path))
+    monkeypatch.setattr(type(plan), "kind", lambda self, ctrl: "policy_jeszcze_nie_istnieje")
+    parent = SimpleNamespace(path=tmp_path / "rodzic", params={"network": "siec_a"})
+    unit = d.Unit("gatppo_uw", "siec_a", 0)
+    assert checkpoint(plan, unit, parent) == tmp_path / "rodzic" / "engine" / "core.pt"
+
+
+def test_odcisk_biegu_widzi_parametry_mechanizmu(tmp_path):
+    """Zmiana τ (albo progu bramki) MUSI dać inny odcisk biegu.
+
+    `is_done` porównuje `params_hash`, a nie treść planu. Dopóki parametry
+    mechanizmu były poza odciskiem, sweep po τ liczył pierwszą wartość, a każdą
+    następną pomijał z komunikatem „pomijam (jest wynik)" — i zwracał trzy razy tę
+    samą liczbę pod trzema etykietami. To ten sam błąd, przed którym ostrzega
+    docstring `FailureSpec`: spec żyjący poza odciskiem nie unieważnia wyniku.
+
+    Kolumna BEZ mechanizmu ma zostać nietknięta — inaczej dopisanie pola
+    unieważniłoby policzone biegi rdzenia."""
+    from runlog import params_hash  # noqa: PLC0415
+    from tsc_marl.runner.degrade import unit_params  # noqa: PLC0415
+
+    rodzic = [SimpleNamespace(id="rodzic", meta={"params_hash": "abc"})]
+
+    def odcisk(plan, ctrl):
+        return params_hash(unit_params(plan, d.Unit(ctrl, "siec_a", 0), rodzic))
+
+    katalogi = [tmp_path / "a", tmp_path / "b"]
+    for k in katalogi:
+        k.mkdir()
+    maly = d.load_plan(plan_uw(katalogi[0], tau=0.25))
+    duzy = d.load_plan(plan_uw(katalogi[1], tau=0.50))
+    assert odcisk(maly, "gatppo_uw") != odcisk(duzy, "gatppo_uw")
+    assert odcisk(maly, "gatppo") == odcisk(duzy, "gatppo")
+
+
 def test_plan_uw_tylko_z_actorem_rdzenia(tmp_path):
     with pytest.raises(SystemExit, match="UW-attention"):
         d.load_plan(plan_uw(tmp_path, agent="efficientmp"))
+
+
+def plan_gate(tmp_path, **gate):
+    spec = ", ".join(f"{k}: {v}" for k, v in ({"kind": "oracle"} | gate).items())
+    p = plan_file(tmp_path)
+    p.write_text(
+        p.read_text().replace(
+            "fixedtime: {}",
+            "fixedtime: {}\n"
+            "  gatppo_gate:\n"
+            "    agent: gatppo\n"
+            "    seeds: [0, 1]\n"
+            f"    gate: {{{spec}}}",
+        )
+    )
+    return p
+
+
+def test_plan_bramka_to_osobny_rodzaj_ale_ten_sam_rodzic(tmp_path):
+    """Jak przy UW: kolumna z bramką jedzie TYM SAMYM checkpointem co rdzeń, bo
+    bramka nie zmienia wag — przełącza tylko, czy akcja węzła idzie z polityki."""
+    plan = d.load_plan(plan_gate(tmp_path))
+    assert plan.kind("gatppo_gate") == "policy_gate"
+    assert plan.parent_id(d.Unit("gatppo_gate", "siec_a", 1)) == "gatppo__siec_a__s1_y5"
+    assert d.KINDS[plan.agent("gatppo_gate")] == "policy"  # stąd wagi w `core.pt`
+
+
+def test_plan_odrzuca_bramke_z_literowka_w_kind(tmp_path):
+    """Nieznany `kind` nie ma prawa po cichu zbudować wyroczni: to ona jest górnym
+    ograniczeniem, więc pomylona z bramką realną zawyżyłaby wynik o różnicę między
+    idealną a rzeczywistą detekcją — czyli o to, co ten plan ma zmierzyć."""
+    with pytest.raises(SystemExit, match="kind"):
+        d.load_plan(plan_gate(tmp_path, kind="wyrocznia"))
+
+
+def test_plan_bramka_tylko_z_actorem_rdzenia(tmp_path):
+    p = plan_gate(tmp_path)
+    p.write_text(p.read_text().replace("agent: gatppo", "agent: efficientmp"))
+    with pytest.raises(SystemExit, match="bramka"):
+        d.load_plan(p)
+
+
+def test_sweep_progu_daje_rozne_odciski(tmp_path):
+    """Sweep stoi i upada na odcisku: cztery kolumny różnią się WYŁĄCZNIE progiem,
+    więc bez `MECHANISM_KEYS` w `params_hash` miałyby ten sam odcisk co kolumna
+    policzona wcześniej i `is_done` pominąłby je z komunikatem „jest wynik" —
+    dostałbyś krzywą zapasu złożoną z czterech kopii tej samej liczby.
+
+    Druga asercja pilnuje odwrotnej strony: kolumna BEZ mechanizmu ma odcisk
+    niezależny od progów, czyli policzone punkty rdzenia zostają policzone."""
+    from runlog import params_hash  # noqa: PLC0415
+    from tsc_marl.runner.degrade import unit_params  # noqa: PLC0415
+
+    rodzic = [SimpleNamespace(id="rodzic", meta={"params_hash": "abc"})]
+    plany = []
+    for i, prog in enumerate((0.25, 0.5, 0.75, 1.0)):
+        katalog = tmp_path / f"p{i}"
+        katalog.mkdir()
+        plany.append(d.load_plan(plan_gate(katalog, threshold=prog)))
+
+    odciski = {
+        params_hash(unit_params(plan, d.Unit("gatppo_gate", "siec_a", 0), rodzic)) for plan in plany
+    }
+    assert len(odciski) == 4
+
+    rdzen = {
+        params_hash(unit_params(plan, d.Unit("gatppo", "siec_a", 0), rodzic)) for plan in plany
+    }
+    assert len(rdzen) == 1
 
 
 def test_plan_odrzuca_nieznany_sterownik_i_pole(tmp_path):
@@ -232,3 +346,119 @@ def test_evaluate_czysty_raz_awaria_n_razy():
     summary = d.summarize(rows)
     assert summary["att__clean"] == summary["att"] == 4.0
     assert summary["att__gauss1"] == pytest.approx(5.0)
+
+
+# -------------------------------------------------- bramka fallbacku (wyrocznia)
+
+POLITYKA, REGULA = 3, 7  # akcje muszą się RÓŻNIĆ, inaczej testy przechodzą trywialnie
+
+
+def features(broken=(), *, live=True, sensors=True, n=4, prefix=""):
+    """Atrapa `StateBuilder`: tylko to, co czyta bramka. `sensors=False` = czysty
+    scenariusz (warstwa awarii powstaje wyłącznie dla aktywnego `FailureSpec`).
+    `prefix` zmienia NAZWY pasów przy tej samej liczbie węzłów — tak testuje się
+    unieważnienie cache pas→węzeł."""
+    return SimpleNamespace(
+        n_nodes=n,
+        structs=[SimpleNamespace(in_lanes=[f"{prefix}{i}_{c}" for c in "ab"]) for i in range(n)],
+        sensors=SimpleNamespace(broken=frozenset(broken), live=live) if sensors else None,
+    )
+
+
+def gated(env, **kwargs):
+    polityka = SimpleNamespace(act=lambda obs: np.full(env.features.n_nodes, POLITYKA))
+    regula = SimpleNamespace(act=lambda obs: np.full(env.features.n_nodes, REGULA))
+    return c.GatedController(polityka, regula, c.OracleGate(env, **kwargs))
+
+
+def test_bramka_na_czystym_nie_rusza_polityki():
+    """Na czystym scenariuszu `sensors is None` i sterownik ma być NIEODRÓŻNIALNY
+    od samej polityki — ten sam warunek co `test_no_op` dla UW-attention, i z tego
+    samego powodu: bez niego wynik na czystym nie jest porównywalny z T1, a każda
+    różnica pod awarią przestaje być przypisywalna do bramki."""
+    env = SimpleNamespace(features=features(sensors=False))
+    sterownik = gated(env)
+    assert sterownik.act(None).tolist() == [POLITYKA] * 4
+    assert sterownik.episode_stats() == {"gate_share": 0.0, "gate_switches": 0.0}
+
+
+def test_bramka_trafia_w_osleplony_wezel_a_nie_w_sasiada():
+    """Sedno kroku. Węzeł 1 ma OBA pasy wjazdowe martwe (2/2), węzeł 2 jeden (1/2),
+    reszta zero — przy progu 0,5 przełączyć mają się 1 i 2.
+
+    Test nie przechodzi trywialnie, bo akcje polityki i reguły są różne (3 vs 7):
+    gdyby maska była pusta albo odwrócona, wektor wyjściowy byłby inny. Gdyby oba
+    sterowniki zwracały to samo, asercja byłaby prawdziwa dla KAŻDEJ maski."""
+    env = SimpleNamespace(features=features({"1_a", "1_b", "2_a"}))
+    assert gated(env).act(None).tolist() == [POLITYKA, REGULA, REGULA, POLITYKA]
+
+
+def test_prog_jest_nieostry_i_dziala_w_obie_strony():
+    """Rozstrzygnięcie remisu z docstringu `OracleGate`: `>=`, czyli „co najmniej
+    połowa detektorów martwa". Przy `unit: lane` i `mask0p5` co czwarty węzeł siada
+    dokładnie na tej granicy, więc konwencja ma tu realne skutki — i ma być
+    sprawdzona, a nie tylko opisana. Próg jest parametrem (sweep), więc druga
+    asercja pilnuje, że faktycznie działa, a nie jest ozdobą konstruktora."""
+    env = SimpleNamespace(features=features({"2_a"}))  # węzeł 2: dokładnie 1/2
+    assert gated(env).act(None).tolist() == [POLITYKA, POLITYKA, REGULA, POLITYKA]
+    assert gated(env, threshold=0.6).act(None).tolist() == [POLITYKA] * 4
+
+
+def test_bramka_milczy_przed_onsetem():
+    """`SensorModel.reset()` losuje `broken` na starcie epizodu, ale przed `onset`
+    `_measure` zwraca CZYSTE wartości — detektory jeszcze żyją. Bramka pytająca
+    tylko o `broken` przełączyłaby się od kroku 0 i scenariusze `mask*_hold_t60`
+    mierzyłyby coś innego, niż jest w planie (a są tam celowo: `hold` to awaria
+    bez śladu, na której rule-gate nie wygra trywialnie)."""
+    env = SimpleNamespace(features=features({"1_a", "1_b"}, live=False))
+    assert gated(env).act(None).tolist() == [POLITYKA] * 4
+
+
+def test_bramka_widzi_podmiane_scenariusza():
+    """`robustness/degrade.py` podmienia `env.features` przy KAŻDYM scenariuszu,
+    a sterownik powstaje raz. Gdyby bramka zapamiętała `features` albo `sensors`
+    w konstruktorze, czytałaby do końca biegu warstwę z pierwszego scenariusza —
+    a pierwszy jest zawsze `clean` (`load_plan` dokleja go na początek), czyli
+    bramka nie strzeliłaby ANI RAZU i wyrocznia wyszłaby „bez efektu".
+
+    Drugi przebieg ma INNE NAZWY PASÓW przy tej samej liczbie węzłów: gdyby cache
+    mapowania pas→węzeł przeżył podmianę, żaden pas z nowego `broken` by się do
+    niego nie dopasował i maska wyszłaby pusta. Liczba węzłów zostaje, bo scenariusz
+    podmienia warstwę awarii, a nie sieć."""
+    env = SimpleNamespace(features=features({"1_a", "1_b"}))
+    sterownik = gated(env)
+    assert sterownik.act(None).tolist() == [POLITYKA, REGULA, POLITYKA, POLITYKA]
+
+    env.features = features({"X0_a", "X0_b"}, prefix="X")
+    assert sterownik.act(None).tolist() == [REGULA, POLITYKA, POLITYKA, POLITYKA]
+
+
+def test_reset_stats_czysci_takze_bramke():
+    """Delegacja, która przy wyroczni jest no-opem, a przy bramce UQ będzie
+    warunkiem poprawności: tamta trzyma okno ostatnich odczytów i bez czyszczenia
+    weszłaby w nowy epizod z danymi sprzed `world.reset()`. `degrade.evaluate`
+    woła `reset_stats` na starcie epizodu — to jedyny moment, w którym bramka
+    może się dowiedzieć, że epizod się zmienił."""
+    wolania = []
+    bramka = SimpleNamespace(
+        mask=lambda obs: np.zeros(2, dtype=bool), reset=lambda: wolania.append(1)
+    )
+    polityka = SimpleNamespace(act=lambda obs: np.full(2, POLITYKA))
+    sterownik = c.GatedController(polityka, polityka, bramka)
+    assert wolania == [1]  # konstruktor woła reset_stats
+
+    sterownik.act(None)
+    sterownik.reset_stats()
+    assert wolania == [1, 1] and sterownik.episode_stats() == {}
+
+
+def test_przelaczenia_sa_liczone_na_wezlach():
+    """`gate_switches` liczy ZMIANY trybu, bo to one psują ruch (przełączenie
+    resetuje fazę), a nie sam odsetek węzłów w regule. Bez tej metryki raport nie
+    odróżni bramki stabilnej od migoczącej przy tym samym `gate_share`."""
+    env = SimpleNamespace(features=features({"1_a", "1_b"}))
+    sterownik = gated(env)
+    sterownik.act(None)
+    env.features = features({"2_a", "2_b"})  # jeden węzeł wchodzi, drugi wychodzi
+    sterownik.act(None)
+    assert sterownik.episode_stats() == {"gate_share": 0.25, "gate_switches": 2.0}

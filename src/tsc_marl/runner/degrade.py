@@ -27,7 +27,9 @@ from tsc_marl import libsignal
 from tsc_marl.paths import REPO_ROOT, RUNS
 from tsc_marl.robustness.degrade import (
     EXPERIMENT,
+    KINDS,
     LEARNED,
+    MECHANISM_KEYS,
     Plan,
     Unit,
     base_network,
@@ -83,13 +85,20 @@ def checkpoint(plan: Plan, unit: Unit, parent) -> Path | None:
     `save_model(e=episodes)` — więc „ostatni" checkpoint to ta sama chwila uczenia."""
     if parent is None:
         return None
-    kind = plan.kind(unit.controller)
-    # `policy_uw` MUSI tu być: to ten sam checkpoint rdzenia co `policy` (modulacja jest
-    # bezparametrowa). Bez tego wpadał w gałąź LibSignala i szukał wag pod
-    # `engine/tsc/cityflow_gatppo/.../model/*.pt`, czyli w układzie, którego rdzeń
-    # nigdy nie zapisuje — punkt był POMIJANY z komunikatem „brak wag", zamiast paść.
-    if kind in ("policy", "ensemble", "policy_uw"):
+    # Rozgałęzienie po AGENCIE, nie po rodzaju sterownika — i to jest tu cała treść.
+    # Format pliku z wagami zależy od tego, KTO trenował: nasz `train_core` pisze
+    # `engine/core.pt`, trener LibSignala rozkłada katalogi `engine/tsc/…/model/*.pt`.
+    # Rodzaj sterownika mówi co innego: JAK zbudować sterownik z tych wag. Nakładki na
+    # rdzeń (`ensemble`, `policy_uw`, bramki z Fazy 3) mają własny rodzaj, ale agenta
+    # `gatppo` i wagi w `core.pt`.
+    #
+    # Warunek po rodzaju był wyliczanką i dwa razy z niej wypadła nowa nakładka. Objaw
+    # jest cichy: brak wag NIE jest błędem, tylko pominięciem punktu (żeby jeden
+    # nieprzetrenowany seed nie wywalał planu), więc plan liczy się dalej BEZ kolumny,
+    # dla której powstał, i raport wychodzi z kompletem tabel o jedną kolumnę uboższy.
+    if KINDS[plan.agent(unit.controller)] == "policy":
         return parent.path / "engine" / "core.pt"
+
     from tsc_marl.runner.evaluate import available_checkpoints, engine_run_dir  # noqa: PLC0415
 
     agent = plan.agent(unit.controller)
@@ -119,6 +128,14 @@ def unit_params(plan: Plan, unit: Unit, parents: list[Any]) -> dict[str, Any]:
         "draws": plan.draws,
         "scenarios": [s.as_dict() for s in plan.scenarios_for(unit)],
     }
+    # Parametry mechanizmu (τ modulacji, próg bramki) ZMIENIAJĄ liczony wynik, więc
+    # należą do tożsamości biegu. Bez nich `is_done` widzi ten sam odcisk po zmianie
+    # progu i wypisuje „pomijam (jest wynik)" — sweep zwróciłby trzy razy tę samą
+    # liczbę pod trzema etykietami.
+    spec = plan.controllers[unit.controller]
+    mechanizm = {k: spec[k] for k in MECHANISM_KEYS if k in spec}
+    if mechanizm:
+        params["mechanism"] = mechanizm
     if parents:
         # uczony: tożsamość niesie rodzic (jego odcisk obejmuje config i trening)
         params["parent_run"] = parents[0].id
@@ -177,6 +194,34 @@ def build_uncertainty(plan: Plan, unit: Unit, env):
     return oh.OnlineUncertainty(fitted, reference, sources, env.graph.edge_index, tau=tau)
 
 
+def fixed_cycle(spec: dict[str, Any]) -> int:
+    """Długość cyklu reguły, do której bramka przełącza węzeł.
+
+    `t_fixed` NIE MA w configu polityki — mieszka wyłącznie w `configs/tsc/fixedtime.yml`
+    (sprawdzone), a jednostka z bramką biegnie jako `agent: gatppo`, więc sięgnięcie po
+    `config["model"]["t_fixed"]` poleciałoby `KeyError` w środku biegu.
+
+    Domyślnie czytamy TEN SAM plik, z którego bierze go kolumna `fixedtime` — inaczej
+    zdanie „bramka dogania FixedTime" porównywałoby dwa różnie sparametryzowane
+    FixedTime. Wartość w spec planu nadpisuje i wchodzi do odcisku biegu
+    (`MECHANISM_KEYS`), więc zmiana cyklu unieważnia wynik, tak jak powinna.
+    """
+    if "t_fixed" in spec:
+        return int(spec["t_fixed"])
+    import yaml  # noqa: PLC0415
+
+    from tsc_marl.paths import CONFIGS  # noqa: PLC0415
+
+    return int(yaml.safe_load((CONFIGS / "tsc" / "fixedtime.yml").read_text())["model"]["t_fixed"])
+
+
+def build_gate(spec: dict[str, Any], env):
+    """Sygnał bramki z planu. `kind` waliduje `load_plan`, więc tu tylko wybór."""
+    from tsc_marl.robustness import controllers as c  # noqa: PLC0415
+
+    return c.OracleGate(env, threshold=float(spec.get("threshold", 0.5)))
+
+
 def build_controller(plan: Plan, unit: Unit, env, config, agents, ckpts: list[Path]):
     import numpy as np  # noqa: PLC0415
     import torch  # noqa: PLC0415
@@ -187,7 +232,11 @@ def build_controller(plan: Plan, unit: Unit, env, config, agents, ckpts: list[Pa
     kind = plan.kind(unit.controller)
     feats = env.features
     model = config["model"]
-    if kind in ("policy", "ensemble", "policy_uw"):
+    # Po AGENCIE, nie po rodzaju — ta sama zasada co w `checkpoint()`: wagi rdzenia
+    # wczytuje się tak samo dla każdej nakładki na niego, a wyliczanka rodzajów już
+    # dwa razy przepuściła nową (objaw: `policy_gate` leciał przez wszystkie gałęzie
+    # do FixedTime i wywalał się na `t_fixed`, którego config polityki nie ma).
+    if KINDS[plan.agent(unit.controller)] == "policy":
         from tsc_marl.core.nets import ActorCritic  # noqa: PLC0415
 
         actors = []
@@ -204,6 +253,14 @@ def build_controller(plan: Plan, unit: Unit, env, config, agents, ckpts: list[Pa
                 actors[0],
                 env.graph.edge_index,
                 build_uncertainty(plan, unit, env),
+                name=unit.controller,
+            )
+        if kind == "policy_gate":
+            spec = plan.controllers[unit.controller]["gate"]
+            return c.GatedController(
+                c.PolicyController(actors[0], env.graph.edge_index),
+                c.FixedTimeController(feats.intersections, t_fixed=fixed_cycle(spec)),
+                build_gate(spec, env),
                 name=unit.controller,
             )
         return c.PolicyController(actors[0], env.graph.edge_index, name=unit.controller)
@@ -365,16 +422,27 @@ def run_plan(plan: Plan, jobs: int = 1, replace: bool = False, stagger: float = 
 
 
 def status(plan: Plan) -> list[dict[str, Any]]:
+    """Stan punktów planu. `aktualny` = to, czym kieruje się `run` (porównanie
+    odcisku parametrów), a nie samo istnienie katalogu.
+
+    Rozróżnienie nie jest kosmetyczne: po dołożeniu scenariusza albo zmianie progu
+    bramki katalog dalej istnieje ze statusem `ok`, ale `run` policzy ten punkt od
+    nowa — i rozbije się o `RunIdCollision`, bo `runlog` nie nadpisuje biegu o innych
+    parametrach. Bez tej kolumny widziałeś „ok" i nie wiedziałeś, że potrzebujesz
+    `--replace`. Wzór z `suite.status`, gdzie ta kolumna jest od początku.
+    """
     libsignal.bootstrap()
     exp = experiment()
     rows = []
     for unit in plan.units():
         parent = parent_view(plan, unit)
         view = next((r for r in exp.runs() if r.id == plan.run_id(unit)), None)
+        parents, _, _ = resolve_parents(plan, unit)
         rows.append(
             {
                 "run_id": plan.run_id(unit),
                 "status": "brak" if view is None else view.status,
+                "aktualny": exp.is_done(plan.run_id(unit), unit_params(plan, unit, parents)),
                 "rodzic": plan.parent_id(unit) if parent is None else parent.id,
                 "att_clean": view.result.get("att__clean") if view else None,
             }

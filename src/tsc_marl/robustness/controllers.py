@@ -34,6 +34,23 @@ class Controller(Protocol):
     def act(self, obs: np.ndarray) -> np.ndarray: ...
 
 
+class Gate(Protocol):
+    """Sygnał bramki fallbacku: [N] bool, True = ten węzeł oddaje sterowanie regule.
+
+    Trzy implementacje różnią się WYŁĄCZNIE sposobem liczenia maski — wyrocznia
+    (prawda z warstwy awarii, górne ograniczenie), reguła (utknięte/zerowe odczyty
+    z okna) i UQ (głowa obserwacyjna). Powłoka `GatedController` jest jedna, więc
+    histereza, diagnostyka i test no-op piszą się raz dla wszystkich trzech.
+
+    `obs` w sygnaturze `mask` bywa nieużywane (wyrocznia czyta warstwę awarii, nie
+    obserwację) i tak ma zostać: powłoka woła każdą bramkę tak samo.
+    """
+
+    def mask(self, obs: np.ndarray) -> np.ndarray: ...
+
+    def reset(self) -> None: ...
+
+
 class PressureController:
     """Efficient-MP (`w1=None`) albo Advanced-MP (Alg. 1) liczony z wektora stanu.
 
@@ -185,6 +202,130 @@ class UWPolicyController:
             "uw_spread_p90": float(np.quantile(self._spread, 0.9)),
             "uw_active": float(np.mean(self._active)),
         }
+
+
+class GatedController:
+    """Polityka + reguła pod jedną bramką: akcja KAŻDEGO węzła z jednego albo drugiego.
+
+    DLACZEGO OWIJA ZWYKŁĄ POLITYKĘ, a nie `UWPolicyController`: kolumna w T2 ma się
+    różnić od kolumny rdzenia DOKŁADNIE jedną rzeczą. Owinięcie sterownika z
+    modulacją attention mierzyłoby bramkę I modulację naraz, a wyniku nie dałoby się
+    przypisać — tym bardziej że modulacja wyszła wobec ATT neutralna (`results/t2_uw.md`).
+
+    DLACZEGO PER WĘZEŁ, a nie globalnie: `mask0p25_intersection` to 25% skrzyżowań
+    martwych i 75% zdrowych, a globalnie rdzeń (510,0 s) i FixedTime (507,0 s) idą
+    łeb w łeb — średnia ukrywa katastrofę na jednej czwartej sieci. Bramka globalna
+    musiałaby wybrać między zepsuciem zdrowych a zostawieniem martwych. Akcje i tak
+    są per węzeł, więc to nic nie kosztuje.
+
+    OBA STEROWNIKI WOŁANE W KAŻDEJ DECYZJI, dla wszystkich węzłów; maska tylko
+    wybiera. Przy `FixedTimeController` jest to obojętne (czyta stan świata, nie
+    obserwację), ale przy bramkowaniu sterownika z PAMIĘCIĄ — `UWPolicyController`
+    trzyma okno ostatnich odczytów — pominięcie wywołania zrobiłoby dziurę w oknie.
+    Kontrakt „wołamy oba zawsze" zostaje więc częścią powłoki, nie szczegółem.
+    """
+
+    state_independent = False
+
+    def __init__(
+        self, policy: Controller, rule: Controller, gate: Gate, name: str = "gated"
+    ) -> None:
+        self.policy = policy
+        self.rule = rule
+        self.gate = gate
+        self.name = name
+        self.reset_stats()
+
+    def reset_stats(self) -> None:
+        """Woła też `gate.reset()` — i to jest tu najważniejsze. Wyrocznia jest
+        bezstanowa, ale bramka UQ trzyma okno odczytów, a `robustness/degrade.py`
+        odpala `reset_stats` na starcie każdego epizodu. Bez tej delegacji okno
+        wchodziłoby w nowy epizod z odczytami sprzed `world.reset()`, czyli z
+        zupełnie innego stanu ruchu."""
+        self.gate.reset()
+        self._share: list[float] = []
+        self._switches = 0
+        self._previous: np.ndarray | None = None
+
+    def act(self, obs: np.ndarray) -> np.ndarray:
+        maska = self.gate.mask(obs)
+        self._share.append(float(np.mean(maska)))
+        if self._previous is not None:
+            self._switches += int((maska != self._previous).sum())
+        self._previous = maska
+        return np.where(maska, self.rule.act(obs), self.policy.act(obs))
+
+    def episode_stats(self) -> dict[str, float]:
+        """Diagnostyka „czy bramka w ogóle strzeliła" — bez niej pusty wynik jest
+        nieodróżnialny od bramki, która przez cały epizod milczała (ta sama lekcja
+        co `uw_spread` przy UW-attention). `gate_switches` liczy zmiany trybu na
+        węzłach, bo to one, a nie sam odsetek, psują ruch przez reset fazy."""
+        if not self._share:
+            return {}
+        return {"gate_share": float(np.mean(self._share)), "gate_switches": float(self._switches)}
+
+
+class OracleGate:
+    """Bramka-WYROCZNIA: czyta prawdę z warstwy awarii, nie z obserwacji.
+
+    Nie jest sterownikiem do wdrożenia — jest GÓRNYM OGRANICZENIEM dla bramek
+    realnych (reguła, UQ). Jeśli przy idealnej detekcji przełączanie nic nie daje,
+    żaden detektor nie da więcej i nie ma po co go budować. Dlatego powstaje
+    PIERWSZA, przed kalibracją jakiegokolwiek progu.
+
+    CZYM JEST „OŚLEPIONY WĘZEŁ": ułamek jego PASÓW WJAZDOWYCH w `sensors.broken`,
+    porównany z `threshold`. `in_lanes`, nie `all_lanes`, bo `failure_units`
+    przypisuje pas do skrzyżowania, DO KTÓREGO pas dojeżdża — „bo tam stoi kamera".
+    Pasy wyjazdowe węzła należą więc do jego sąsiadów w dół strumienia. Zmierzone na
+    JiNan: każde sterowane skrzyżowanie ma 8 pasów wjazdowych i 20 wszystkich, czyli
+    przy `all_lanes` całkowicie martwa kamera dawałaby ułamek 8/20 = 0,40 — i przy
+    progu 0,5 bramka NIE strzeliłaby w scenariuszach `mask*_intersection`, czyli
+    dokładnie tam, gdzie powstała.
+
+    ZNANY LIMIT TEJ DEFINICJI: węzeł ze zdrowymi własnymi kamerami może dostawać
+    skażone `pressure`, bo ono patrzy też na wyjazdy, czyli na detektory sąsiada.
+    Wyrocznia tego nie łapie — sąsiad przełączy się sam, ale ciśnienie tego węzła
+    zostaje częściowo zatrute. Świadomy wybór, nie przeoczenie.
+
+    PRÓG: porównanie nieostre (`>=`), czyli „co najmniej połowa detektorów martwa”.
+    Przy `unit: intersection` ułamek jest 0 albo 1 i rozstrzygnięcie remisu nie ma
+    znaczenia; przy `unit: lane` ma, bo `mask` bierze DOKŁADNY ułamek jednostek, więc
+    przy `mask0p5` i ośmiu pasach wjazdowych co czwarty węzeł siada na dokładnie 4/8.
+    Wybór w stronę przełączenia, bo tam polityka wyraźnie przegrywa (743 s wobec
+    507 s FixedTime). Rozstrzyga to jednak sweep `threshold`, nie ta konwencja —
+    stąd parametr konstruktora, a nie stała.
+    """
+
+    def __init__(self, env: Any, *, threshold: float = 0.5) -> None:
+        # `env`, NIE `env.features`: `robustness/degrade.py:212` podmienia
+        # `env.features` przy każdym scenariuszu, a sterownik powstaje raz.
+        # Zapamiętany snapshot to na zawsze `clean` (pierwszy scenariusz planu),
+        # czyli bramka, która nigdy nie strzela — i fałszywy wniosek „nie ma o co grać".
+        self.env = env
+        self.threshold = threshold
+        self._in_lanes: list[list[str]] | None = None
+        self._built_for: Any = None
+
+    def reset(self) -> None:
+        """Wyrocznia jest bezstanowa; metoda istnieje dla jednolitego interfejsu
+        z bramkami, które stan mają (UQ trzyma okno odczytów)."""
+
+    def mask(self, obs: np.ndarray) -> np.ndarray:
+        features = self.env.features
+        sensors = features.sensors
+        # `sensors is None` na czystym scenariuszu (`StateBuilder` tworzy warstwę
+        # tylko dla aktywnej awarii), a `live` odsiewa scenariusze z `onset`:
+        # `broken` jest niepuste od startu epizodu, ale przed onsetem `_measure`
+        # zwraca czyste wartości, więc bramka nie ma czego gasić.
+        if sensors is None or not sensors.live:
+            return np.zeros(features.n_nodes, dtype=bool)
+        if features is not self._built_for:  # cache przeżywa epizod,
+            self._in_lanes = [list(s.in_lanes) for s in features.structs]
+            self._built_for = features  # ale nie podmianę scenariusza
+
+        broken = sensors.broken
+        part = [sum(lane in broken for lane in lanes) / len(lanes) for lanes in self._in_lanes]
+        return np.asarray(part) >= self.threshold
 
 
 class ColightController:

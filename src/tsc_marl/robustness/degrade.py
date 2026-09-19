@@ -44,7 +44,18 @@ KINDS = {
 #: `policy_uw` = TEN SAM checkpoint co `policy`, tylko attention dostaje log ρ z głowy
 #: obserwacyjnej (Faza 3). Modulacja jest bezparametrowa, więc kolumny „rdzeń" i
 #: „rdzeń + UW-attention" różnią się wyłącznie mechanizmem — ten sam plik z wagami.
-LEARNED = ("policy", "colight", "ensemble", "policy_uw")
+#: `policy_gate` = TEN SAM checkpoint co `policy`, ale akcja każdego węzła idzie
+#: z polityki ALBO z reguły, zależnie od bramki (Faza 3, dolny poziom fallbacku).
+LEARNED = ("policy", "colight", "ensemble", "policy_uw", "policy_gate")
+#: Rodzaje bramek. `oracle` czyta prawdę z warstwy awarii i jest GÓRNYM
+#: OGRANICZENIEM, nie sterownikiem do wdrożenia; `rule` i `uq` dojdą w Krokach 8–9.
+GATE_KINDS = ("oracle",)
+#: Klucze spec sterownika, które zmieniają MECHANIZM, a nie tylko etykietę kolumny:
+#: `uw` niesie τ modulacji, `gate` — rodzaj bramki, próg i długość cyklu reguły.
+#: MUSZĄ wejść do odcisku biegu (`unit_params`), inaczej sweep po τ albo po progu
+#: liczy pierwszą wartość, a każdą następną pomija jako „jest wynik" — ten sam błąd,
+#: przed którym ostrzega docstring `FailureSpec`.
+MECHANISM_KEYS = ("uw", "gate")
 #: Sufiks wariantu ruchu w nazwie sieci (`_d0p25`, `_d1p5`, `_r2000`, `_r5816`). `{base}`
 #: w szablonie rodzica = sieć bez sufiksu, czyli sieć, NA KTÓREJ polityka się uczyła.
 VARIANT_SUFFIX = re.compile(r"_(?:d\d+(?:p\d+)?|r\d+)$")
@@ -98,6 +109,8 @@ class Plan:
             return "ensemble"
         if spec.get("uw"):
             return "policy_uw"
+        if spec.get("gate"):
+            return "policy_gate"
         return KINDS[self.agent(controller)]
 
     def units(self) -> list[Unit]:
@@ -188,6 +201,16 @@ def load_plan(path: str | Path) -> Plan:
             raise SystemExit(f"plan '{p.name}': ensemble '{label}' potrzebuje ≥ 2 seedów")
         if spec.get("uw") and KINDS[plan.agent(label)] != "policy":
             raise SystemExit(f"plan '{p.name}': UW-attention tylko z actorem rdzenia ('{label}')")
+        if spec.get("gate"):
+            if KINDS[plan.agent(label)] != "policy":
+                raise SystemExit(f"plan '{p.name}': bramka tylko z actorem rdzenia ('{label}')")
+            # Literówka w `kind` nie ma prawa po cichu zbudować wyroczni: to ona jest
+            # górnym ograniczeniem, więc pomylona z realną bramką zawyżyłaby wynik.
+            if spec["gate"].get("kind") not in GATE_KINDS:
+                raise SystemExit(
+                    f"plan '{p.name}': bramka '{label}' ma kind="
+                    f"{spec['gate'].get('kind')!r}, dozwolone: {GATE_KINDS}"
+                )
     slugs = [slug(s) for s in plan.scenarios]
     if len(set(slugs)) != len(slugs):
         raise SystemExit(f"plan '{p.name}': zdublowane scenariusze {slugs}")
@@ -242,7 +265,10 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, float]:
     for r in rows:
         by.setdefault(r["scenario"], []).append(r)
     for name, group in by.items():
-        for metric in ("att", "throughput", "ens_mi", "ens_disagree", "uw_spread", "uw_active"):
+        for metric in (
+            "att", "throughput", "ens_mi", "ens_disagree",
+            "uw_spread", "uw_active", "gate_share", "gate_switches",
+        ):  # fmt: skip
             if metric in group[0]:
                 out[f"{metric}__{name}"] = sum(r[metric] for r in group) / len(group)
     if "att__clean" in out:
