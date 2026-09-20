@@ -1,4 +1,4 @@
-# T2 bez mechanizmu — plan `t2_ablations`
+# T2 dla ablacji agregacji — plan `t2_ablations`
 
 Tryb realistic (yellow=5), 5 losowań awarii na scenariusz, ewaluacja ZAMROŻONYCH sterowników (`tsc degrade`). Wszystkie czytają tę samą warstwę detektorów: MaxPressure liczy decyzję z popsutego wektora stanu, nie z silnika.
 
@@ -57,6 +57,25 @@ FixedTime (niezależny od odczytów): **568.9 s**.
 
 
 ![krzywe degradacji cityflow_hangzhou4x4_4ph](figures/t2_ablations_cityflow_hangzhou4x4_4ph.png)
+
+## Mechanizmy × scenariusz
+
+Δ ATT [s] KOLUMNY OCENIANEJ względem `rdzeń GAT+PPO+CTDE`, sparowana po (seed, losowanie). **pogrubienie** = |t| ≥ 2.8. Δ < 0 = kolumna oceniana lepsza od odniesienia.
+
+
+### cityflow_jinan3x4_4ph
+
+| mechanizm | `clean` | `gauss1` | `gauss2` | `gauss4` | `mask0p1` | `mask0p25` | `mask0p5` | `mask0p25_intersection` | `mask0p5_intersection` | `mask0p25_hold_t60` | `mask0p5_hold_t60` | `drift0p3` | `drift0p5` |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| actor mean-pool | **-4.5** | **-2.9** | -0.3 | +4.7 | +13.0 | **+33.8** | **+68.4** | +129.4 | +149.5 | -17.8 | +13.8 | **-3.8** | -2.8 |
+| actor bez GNN | **-4.1** | **-2.2** | +2.1 | **+14.5** | +12.2 | **+35.3** | +18.7 | +60.4 | +30.3 | +0.9 | +42.5 | **-3.0** | -3.1 |
+
+### cityflow_hangzhou4x4_4ph
+
+| mechanizm | `clean` | `gauss1` | `gauss2` | `gauss4` | `mask0p1` | `mask0p25` | `mask0p5` | `mask0p25_intersection` | `mask0p5_intersection` | `mask0p25_hold_t60` | `mask0p5_hold_t60` | `drift0p3` | `drift0p5` |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| actor mean-pool | -0.8 | **-2.1** | **-4.7** | **-8.2** | **+14.5** | **+56.8** | **+153.3** | **+111.4** | **+206.9** | -11.9 | **+65.0** | **-0.8** | +2.1 |
+| actor bez GNN | **-1.3** | -0.2 | +2.6 | +12.0 | +8.2 | **+72.1** | **+181.8** | **+194.2** | **+355.5** | **+29.0** | **+54.0** | **-1.0** | -1.4 |
 
 ## Kontrola: ewaluator mierzy tę samą politykę co T1
 

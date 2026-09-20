@@ -15,14 +15,21 @@ networks: [cityflow_jinan3x4_4ph, cityflow_hangzhou4x4_4ph]
 
 controllers:
   gatppo: {seeds: [0, 1, 2, 3, 4]}
+  # `baseline:` dopisane 2026-09-20. Kolumny ablacji to osobne TRENINGI, więc bez
+  # niego raport dawał wyłącznie ±std — a tabela z ±std przy `mask0p25_intersection`
+  # (sd rzędu 90–200 s) nie odróżnia efektu od szumu. To ta sama pułapka, którą
+  # notatka Fazy 3 opisuje przy `mask0p25_hold_t60`. Δ < 0 = ABLACJA lepsza, czyli
+  # attention/GNN GORSZE — kolumną ocenianą jest wariant, odniesieniem rdzeń.
   gatppo_mean:
     agent: gatppo
     seeds: [0, 1, 2, 3, 4]
     parent: "{agent}__{network}__s{seed}_y{yellow}__p1_abl_meanpool"
+    baseline: gatppo
   gatppo_nognn:
     agent: gatppo
     seeds: [0, 1, 2, 3, 4]
     parent: "{agent}__{network}__s{seed}_y{yellow}__p1_abl_nognn"
+    baseline: gatppo
   fixedtime: {}
 
 scenarios:

@@ -28,7 +28,7 @@ FixedTime (niezależny od odczytów): **507.0 s**.
 
 ## Mechanizmy × scenariusz
 
-Δ ATT [s] względem `rdzeń GAT+PPO+CTDE`, sparowana po (seed, losowanie); w nawiasie odsetek par (decyzja, węzeł) przejętych przez regułę. **pogrubienie** = |t| ≥ 2.8. Δ < 0 = bramka lepsza.
+Δ ATT [s] KOLUMNY OCENIANEJ względem `rdzeń GAT+PPO+CTDE`, sparowana po (seed, losowanie). W nawiasie odsetek par (decyzja, węzeł) przejętych przez regułę. **pogrubienie** = |t| ≥ 2.8. Δ < 0 = kolumna oceniana lepsza od odniesienia.
 
 
 ### cityflow_jinan3x4_4ph

@@ -357,7 +357,12 @@ def test_plan_t2_train_uw_sie_laduje():
     plan = d.load_plan("t2_train_uw")
     assert plan.kind("gatppo_fail_uw") == "policy_uw"
     assert plan.kind("gatppo_fail") == "policy"
-    assert mechanism_pairs(plan) == [("gatppo_fail_uw", "gatppo_fail")]
+    # OBA odczyty z nagłówka planu mają wiersz w raporcie: ramię 2 vs 1 (ile daje sam
+    # trening z awariami) i ramię 3 vs 2 (ile daje mechanizm ponad to).
+    assert mechanism_pairs(plan) == [
+        ("gatppo_fail", "gatppo"),
+        ("gatppo_fail_uw", "gatppo_fail"),
+    ]
     unit = d.Unit("gatppo_fail_uw", "cityflow_jinan3x4_4ph", 1)
     assert plan.parent_id(unit) == "gatppo__cityflow_jinan3x4_4ph__s1_y5__p1_uw"
     inne = d.Unit("gatppo_fail", "cityflow_jinan3x4_4ph", 1)
@@ -365,6 +370,84 @@ def test_plan_t2_train_uw_sie_laduje():
     # ramię 1 zostaje przy domyślnym rodzicu, czyli biegu z `p1_gate`
     assert plan.parent_id(d.Unit("gatppo", "cityflow_jinan3x4_4ph", 1)) == (
         "gatppo__cityflow_jinan3x4_4ph__s1_y5"
+    )
+
+
+def test_gola_kolumna_z_baseline_dostaje_wiersz(tmp_path):
+    """Regresja: kolumna BEZ mechanizmu inferencyjnego, ale z jawnym `baseline:`,
+    musi trafić do tabeli Δ.
+
+    Tak wypadł z raportu `t2_train_uw` najmocniejszy wynik planu — ramię trenowane
+    z awariami (goły `policy`) bije rdzeń o 140 s przy `mask0p5`, a `mechanism_pairs`
+    przepuszczał wyłącznie `policy_uw` / `policy_gate`. Plan się liczył, `baseline:`
+    walidowało się poprawnie, tabela po prostu nie powstawała — cisza nie do odróżnienia
+    od braku efektu."""
+    from tsc_marl.analysis.degradation import mechanism_pairs  # noqa: PLC0415
+
+    plan = d.load_plan(plan_trzy_ramiona(tmp_path))
+    assert plan.kind("gatppo_fail") == "policy"
+    assert plan.baseline("gatppo_fail") is None
+    assert ("gatppo_fail", "gatppo") not in mechanism_pairs(plan)
+
+    z_baza = d.load_plan(
+        _write(
+            tmp_path / "z_baza.yml",
+            plan_trzy_ramiona(tmp_path)
+            .read_text()
+            .replace(
+                "    parent: '{agent}__{network}__s{seed}_y{yellow}__p1_fail'",
+                "    parent: '{agent}__{network}__s{seed}_y{yellow}__p1_fail'\n"
+                "    baseline: gatppo",
+            ),
+        )
+    )
+    assert ("gatppo_fail", "gatppo") in mechanism_pairs(z_baza)
+
+
+def test_sweep_tylko_przy_jednym_odniesieniu(tmp_path):
+    """`_sweep_section` składa JEDNĄ tabelę wokół JEDNEJ kolumny bazowej (`pary[0][1]`).
+    Plan o kilku odniesieniach (`t2_gate_dr`) wpuszczony w tę gałąź liczyłby bramkę
+    na rdzeniu DR przeciw rdzeniowi CZYSTEMU — czyli bramkę razem z treningiem
+    z awariami, dokładnie ten błąd, przed którym powstało `Plan.baseline`."""
+    from tsc_marl.analysis.degradation import _sweep_section, mechanism_pairs  # noqa: PLC0415
+
+    plan = d.load_plan("t2_gate_dr")
+    pary = mechanism_pairs(plan)
+    assert len({baza for _, baza in pary}) == 2, pary
+    with pytest.raises(ValueError, match="jedno odniesienie"):
+        _sweep_section(plan, None, pary)
+
+    # sweepy jednego parametru zostają sweepami — warunek nie może ich zepsuć
+    for nazwa in ("t2_gate", "t2_gate_real", "t2_uw_tau"):
+        bazy = {baza for _, baza in mechanism_pairs(d.load_plan(nazwa))}
+        assert bazy == {"gatppo"}, (nazwa, bazy)
+
+
+def test_plan_t2_gate_dr_sie_laduje():
+    """Kwadrat 2×2 {rdzeń czysty, rdzeń DR} × {bez bramki, z bramką}. Trzy odczyty:
+    sama bramka, sam trening z awariami, bramka PONAD treningiem z awariami."""
+    from tsc_marl.analysis.degradation import mechanism_pairs  # noqa: PLC0415
+
+    plan = d.load_plan("t2_gate_dr")
+    assert plan.kind("gatppo_fail_gate_rule") == "policy_gate"
+    assert mechanism_pairs(plan) == [
+        ("gatppo_gate_rule", "gatppo"),
+        ("gatppo_fail", "gatppo"),
+        ("gatppo_fail_gate_rule", "gatppo_fail"),
+    ]
+    # obie kolumny bramkowane MUSZĄ czytać ten sam detektor — inaczej różnica między
+    # nimi miesza bramkę z jej rekalibracją pod nową politykę
+    assert (
+        plan.controllers["gatppo_gate_rule"]["gate"]
+        == (plan.controllers["gatppo_fail_gate_rule"]["gate"])
+    )
+    # złożenie i sam DR biorą wagi z tego samego suite'u `p1_fail`
+    for kol in ("gatppo_fail", "gatppo_fail_gate_rule"):
+        unit = d.Unit(kol, "cityflow_jinan3x4_4ph", 2)
+        assert plan.parent_id(unit) == "gatppo__cityflow_jinan3x4_4ph__s2_y5__p1_fail"
+    # rdzeń czysty zostaje przy domyślnym rodzicu (bieg bez sufiksu suite'u)
+    assert plan.parent_id(d.Unit("gatppo", "cityflow_jinan3x4_4ph", 2)) == (
+        "gatppo__cityflow_jinan3x4_4ph__s2_y5"
     )
 
 

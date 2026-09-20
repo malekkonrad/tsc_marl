@@ -95,6 +95,7 @@ LABELS = {
     "gatppo_uw_t0p05": "UW-attention, τ = 0,05",
     "gatppo_fail": "rdzeń trenowany z awariami",
     "gatppo_fail_uw": "rdzeń z awariami + UW-attention",
+    "gatppo_fail_gate_rule": "rdzeń z awariami + bramka: reguła",
 }
 INK, INK2, MUTED = "#0b0b0b", "#52514e", "#898781"
 GRID, AXIS, SURFACE = "#e1e0d9", "#c3c2b7", "#fcfcfb"
@@ -194,12 +195,22 @@ T_THRESHOLD = 2.8
 
 
 def mechanism_pairs(plan: Plan) -> list[tuple[str, str]]:
-    """[(kolumna z mechanizmem, kolumna odniesienia)] — pary liczone Z TEGO SAMEGO
-    checkpointu. Dla UW-attention modulacja jest bezparametrowa, więc `agent` obu
-    kolumn jest ten sam i różni je wyłącznie mechanizm."""
+    """[(kolumna porównywana, kolumna odniesienia)] — pary do tabeli Δ.
+
+    Dwa źródła pary. (a) Kolumna z MECHANIZMEM inferencyjnym (`policy_uw`,
+    `policy_gate`) — liczona z tego samego checkpointu co odniesienie, więc różni je
+    wyłącznie mechanizm. (b) Kolumna z JAWNYM `baseline:` w planie, niezależnie od
+    rodzaju — bo jawne odniesienie jest deklaracją „to porównanie jest wynikiem".
+
+    Gałąź (b) dopisana po `t2_train_uw`: ramię `gatppo_fail` (trening z awariami)
+    jest gołym `policy`, więc mimo `baseline:` nie trafiało do żadnej tabeli i
+    najmocniejsza liczba planu — −140 s przy `mask0p5`, t = −10,8, lepszy w 15/15 —
+    musiała być doliczona ręcznie z `metrics.csv`. Raport milczał, bo nie miał
+    o czym mówić, a nie dlatego, że nie było wyniku. Patrz `Plan.baseline`.
+    """
     out = []
     for label in plan.controllers:
-        if plan.kind(label) not in ("policy_uw", "policy_gate"):
+        if plan.kind(label) not in ("policy_uw", "policy_gate") and not plan.baseline(label):
             continue
         # `baseline:` z planu wygrywa z domyślem. Domyśl („pierwsza kolumna `policy`
         # tego samego agenta") jest dobry tam, gdzie kolumna bez mechanizmu jest
@@ -238,6 +249,17 @@ DIAGNOSTICS = {
         "i `gate_recall` liczą się względem WYROCZNI (prawda z warstwy awarii, "
         "wyłącznie diagnostycznie) i rozdzielają „detektor jest słaby” od "
         "„przełączanie mało daje” — dwie rzeczy, które samo ATT skleja.",
+    ),
+    # Goła kolumna `policy` z jawnym `baseline:` — kolumny różni TRENING, nie mechanizm
+    # działający w inferencji, więc nie ma czego diagnozować per krok. `_mechanism_section`
+    # indeksuje ten słownik po `plan.kind()`, więc brak wpisu = KeyError w środku raportu.
+    "policy": (
+        (),
+        "Kolumny różni SPOSÓB TRENOWANIA, nie mechanizm włączany w inferencji, więc nie "
+        "ma diagnostyki „czy mechanizm wystartował” — jest albo go nie ma już na poziomie "
+        "wag. Rozrzut między seedami wchodzi tu do różnicy w całości (patrz zdanie o "
+        "parowaniu wyżej), a liczba NIEZALEŻNYCH replikacji to liczba seedów, nie liczba "
+        "par: losowania awarii dzielą checkpoint, więc |t| jest wobec nich optymistyczne.",
     ),
 }
 
@@ -360,8 +382,16 @@ def _mechanism_section(plan: Plan, df, mechanizm: str, baza: str) -> list[str]:
         return []
 
     etykieta = LABELS.get(mechanizm, mechanizm)
+    # Goła kolumna `policy` nie jest MECHANIZMEM — różni ją od odniesienia trening.
+    # Nazwanie jej mechanizmem w nagłówku byłoby przekłamaniem wyniku, nie kosmetyką.
+    ramie = plan.kind(mechanizm) == "policy"
+    czym = "Ramię" if ramie else "Mechanizm"
+    lepszy = "ramię lepsze" if ramie else "mechanizm lepszy"
+    neutralny = (
+        "ramię jest wobec ATT **neutralne**" if ramie else "mechanizm jest wobec ATT **neutralny**"
+    )
     lines = [
-        f"## Mechanizm: {etykieta} vs {LABELS.get(baza, baza)}",
+        f"## {czym}: {etykieta} vs {LABELS.get(baza, baza)}",
         "",
         (
             "Obie kolumny liczą się z TEGO SAMEGO checkpointu i tych samych losowań awarii "
@@ -374,7 +404,7 @@ def _mechanism_section(plan: Plan, df, mechanizm: str, baza: str) -> list[str]:
             "rozrzut między seedami wchodzi do różnicy. Kolumna odniesienia jest wskazana "
             f"w planie (`baseline: {plan.baseline(mechanizm)}`), a nie domyślona."
         )
-        + " `Δ` < 0 = mechanizm lepszy. `|t| ≥ "
+        + f" `Δ` < 0 = {lepszy}. `|t| ≥ "
         + f"{T_THRESHOLD}` to próg po poprawce na tyle porównań, ile ma ta tabela.",
         "",
         wyjasnienie,
@@ -388,7 +418,7 @@ def _mechanism_section(plan: Plan, df, mechanizm: str, baza: str) -> list[str]:
         lines += [
             f"### {net}",
             "",
-            f"| scenariusz | {' | '.join(metryki)} | Δ ATT [s] | sd | t | lepszy w |",
+            "| " + " | ".join(("scenariusz", *metryki, "Δ ATT [s]", "sd", "t", "lepszy w")) + " |",
             "|---|" + "---:|" * (len(metryki) + 4),
         ]
         for scen in kolejnosc:
@@ -410,14 +440,24 @@ def _mechanism_section(plan: Plan, df, mechanizm: str, baza: str) -> list[str]:
             # „—" zamiast `nan`: brak rozrzutu to nie jest brak wyniku.
             t = "—" if not np.isfinite(r["t"]) else f"{r['t']:+.2f}"
             lines.append(
-                f"| `{scen}` | {' | '.join(komorki)} | {mocny}{r['delta']:+.2f}{mocny} | "
-                f"{r['sd']:.1f} | {t} | {int(r['lepszy'])}/{int(r['n'] - r['remis'])} |"
+                "| "
+                + " | ".join(
+                    (
+                        f"`{scen}`",
+                        *komorki,
+                        f"{mocny}{r['delta']:+.2f}{mocny}",
+                        f"{r['sd']:.1f}",
+                        t,
+                        f"{int(r['lepszy'])}/{int(r['n'] - r['remis'])}",
+                    )
+                )
+                + " |"
             )
         istotne = wiersze[wiersze["t"].abs() >= T_THRESHOLD]
         lines += [
             "",
             (
-                "* Żaden scenariusz nie przekracza progu — mechanizm jest wobec ATT **neutralny**."
+                f"* Żaden scenariusz nie przekracza progu — {neutralny}."
                 if istotne.empty
                 else "* Powyżej progu: "
                 + ", ".join(
@@ -447,14 +487,33 @@ def _sweep_section(plan: Plan, df, pary: list[tuple[str, str]]) -> list[str]:
     # `rule` i `uq` nie mają progu w planie, więc obie lądowały pod 0,5 i jedna
     # nadpisywała drugą, znikając z raportu bez śladu.
     mechanizmy = [m for m, _ in pary]
+    bazy = {b for _, b in pary}
+    if len(bazy) != 1:
+        raise ValueError(
+            f"_sweep_section: jedna tabela = jedno odniesienie, a plan ma {sorted(bazy)}. "
+            "Taki plan idzie w osobne sekcje (patrz warunek w `build_report`)."
+        )
     baza = pary[0][1]
 
+    # Zdanie wstępne było pisane pod bramki („w nawiasie gate_share", „Δ < 0 = bramka
+    # lepsza") i po wpuszczeniu tu ablacji agregacji kłamało w obie strony: ablacje nie
+    # mają udziału, a kolumną ocenianą jest wariant architektury, nie bramka.
+    z_udzialem = any(
+        any("gate_share" in v for v in mechanism_diagnostics(plan, m, ("gate_share",)).values())
+        for m in mechanizmy
+    )
     lines = [
         "## Mechanizmy × scenariusz",
         "",
-        f"Δ ATT [s] względem `{LABELS.get(baza, baza)}`, sparowana po (seed, losowanie); "
-        "w nawiasie odsetek par (decyzja, węzeł) przejętych przez regułę. "
-        f"**pogrubienie** = |t| ≥ {T_THRESHOLD}. Δ < 0 = bramka lepsza.",
+        f"Δ ATT [s] KOLUMNY OCENIANEJ względem `{LABELS.get(baza, baza)}`, sparowana po "
+        "(seed, losowanie)"
+        + (
+            ". W nawiasie odsetek par (decyzja, węzeł) przejętych przez regułę"
+            if z_udzialem
+            else ""
+        )
+        + f". **pogrubienie** = |t| ≥ {T_THRESHOLD}. Δ < 0 = kolumna oceniana lepsza od "
+        "odniesienia.",
         "",
         "",
     ]
@@ -581,7 +640,14 @@ def to_markdown(
             lines += ["", f"![krzywe degradacji {net}](figures/{figures[net].name})", ""]
 
     pary = mechanism_pairs(plan)
-    if len(pary) > 1:  # sweep jednego parametru: jedna tabela zamiast N sekcji
+    # Sweep (jedna zbiorcza tabela zamiast N sekcji) wolno złożyć TYLKO wtedy, gdy
+    # wszystkie kolumny mierzą się względem TEGO SAMEGO odniesienia — `_sweep_section`
+    # ma jedną kolumnę bazową na tabelę. Plan z kilkoma odniesieniami (`t2_gate_dr`:
+    # bramka vs rdzeń czysty, DR vs rdzeń czysty, bramka+DR vs DR) dostaje osobne
+    # sekcje. Bez tego warunku wiersz „bramka na rdzeniu DR" liczyłby się przeciw
+    # rdzeniowi CZYSTEMU i mierzył bramkę razem z treningiem z awariami — dokładnie
+    # ten cichy błąd, przed którym powstało `Plan.baseline`, tylko piętro wyżej.
+    if len(pary) > 1 and len({baza for _, baza in pary}) == 1:
         lines += _sweep_section(plan, df, pary)
     else:
         for mechanizm, baza in pary:

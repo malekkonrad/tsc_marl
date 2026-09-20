@@ -40,6 +40,11 @@ controllers:
     agent: gatppo
     seeds: [0, 1, 2]
     parent: "{agent}__{network}__s{seed}_y{yellow}__p1_fail"
+    # Odczyt „ramię 2 vs ramię 1" z nagłówka tego planu MA BYĆ W RAPORCIE, a nie
+    # doliczany ręcznie. Dopisane po pierwszym przebiegu: bez tej linii kolumna jest
+    # gołym `policy` i nie trafiała do żadnej tabeli Δ, przez co −140,0 s przy
+    # `mask0p5` (t = −10,8, lepszy w 15/15) nie pojawiło się nigdzie w `t2_train_uw.md`.
+    baseline: gatppo
   gatppo_fail_uw:
     agent: gatppo
     seeds: [0, 1, 2]
