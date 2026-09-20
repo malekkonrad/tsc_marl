@@ -44,7 +44,16 @@ class Gate(Protocol):
 
     `obs` w sygnaturze `mask` bywa nieużywane (wyrocznia czyta warstwę awarii, nie
     obserwację) i tak ma zostać: powłoka woła każdą bramkę tak samo.
+
+    `last_score` [N] float — SUROWY wynik z ostatniego `mask()`, przed progiem
+    i przed histerezą. Wszystkie trzy bramki liczą go i tak (ułamek martwych wlotów /
+    zamrożonych ruchów / ruchów ponad `u_ref`), więc wystawienie go nic nie kosztuje,
+    a jest jedyną wielkością, z której da się odpowiedzieć na pytanie „DLACZEGO ten
+    węzeł oddał sterowanie" — sama maska mówi tylko, że oddał. Przed pierwszym
+    `mask()` i w oknie rozgrzewki jest wektorem zer.
     """
+
+    last_score: np.ndarray
 
     def mask(self, obs: np.ndarray) -> np.ndarray: ...
 
@@ -237,10 +246,19 @@ class GatedController:
         k_off: int = 1,
         oracle: Gate | None = None,
         name: str = "gated",
+        trace: bool = False,
     ) -> None:
         self.policy = policy
         self.rule = rule
         self.gate = gate
+        # ŚLAD PER (DECYZJA, WĘZEŁ) — wyłączony domyślnie. Wyjaśnia pojedyncze
+        # przełączenie („dlaczego TO skrzyżowanie oddało sterowanie w 47. decyzji"),
+        # czego żadna metryka epizodu nie umie: `gate_share` mówi ILE, nie KTÓRE
+        # i KIEDY. Włącza go `tsc degrade run --trace`, a NIE klucz w planie —
+        # celowo, bo `gate` wchodzi do odcisku biegu (`MECHANISM_KEYS`) i dopisanie
+        # tam flagi logowania unieważniłoby wszystkie policzone punkty, choć nie
+        # zmienia ani jednej decyzji.
+        self.trace = trace
         # HISTEREZA: wejście po `k_on` kolejnych decyzjach powyżej progu, wyjście po
         # `k_off` poniżej. Asymetria (k_off > k_on) celowa — wchodź ostrożnie, wychodź
         # jeszcze ostrożniej. Bez niej bramka o szumiącym sygnale migocze co decyzję,
@@ -280,6 +298,7 @@ class GatedController:
         self._previous: np.ndarray | None = None
         self._licznik: np.ndarray | None = None  # kolejne decyzje po tej samej stronie progu
         self._trafienia = np.zeros(3)  # [wspólne, tylko bramka, tylko wyrocznia]
+        self._trace: list[tuple[int, int, float, bool, bool]] = []
 
     def act(self, obs: np.ndarray) -> np.ndarray:
         surowa = self.gate.mask(obs)
@@ -294,6 +313,22 @@ class GatedController:
         self._share.append(float(np.mean(maska)))
         if self._previous is not None:
             self._switches += int((maska != self._previous).sum())
+        if self.trace:
+            # Zapisujemy SUROWY wynik i obie maski: bez surowego nie widać, czy węzeł
+            # był tuż pod progiem, a bez rozdzielenia surowa/po histerezie nie da się
+            # odróżnić „detektor nie zadziałał" od „histereza jeszcze nie przepuściła".
+            wynik = getattr(self.gate, "last_score", None)
+            decyzja = len(self._share) - 1
+            for node in range(len(maska)):
+                self._trace.append(
+                    (
+                        decyzja,
+                        node,
+                        float(wynik[node]) if wynik is not None else float("nan"),
+                        bool(surowa[node]),
+                        bool(maska[node]),
+                    )
+                )
         self._previous = maska
         return np.where(maska, self.rule.act(obs), self.policy.act(obs))
 
@@ -308,6 +343,13 @@ class GatedController:
         zmiana = zgodne & (self._licznik >= prog)
         self._licznik = np.where(zmiana, 0, self._licznik)
         return np.where(zmiana, surowa, self._previous)
+
+    def episode_trace(self) -> list[tuple[int, int, float, bool, bool]]:
+        """Ślad epizodu: [(decyzja, węzeł, wynik surowy, maska surowa, tryb reguły)].
+
+        Pusty, gdy `trace=False`. Czyści go `reset_stats`, czyli start epizodu —
+        ta sama granica, na której zerują się `gate_share` i histereza."""
+        return self._trace
 
     def episode_stats(self) -> dict[str, float]:
         """Diagnostyka „czy bramka w ogóle strzeliła" — bez niej pusty wynik jest
@@ -384,6 +426,7 @@ class OracleGate:
         # `broken` jest niepuste od startu epizodu, ale przed onsetem `_measure`
         # zwraca czyste wartości, więc bramka nie ma czego gasić.
         if sensors is None or not sensors.live:
+            self.last_score = np.zeros(features.n_nodes, dtype=np.float64)
             return np.zeros(features.n_nodes, dtype=bool)
         if features is not self._built_for:  # cache przeżywa epizod,
             self._in_lanes = [list(s.in_lanes) for s in features.structs]
@@ -391,7 +434,8 @@ class OracleGate:
 
         broken = sensors.broken
         part = [sum(lane in broken for lane in lanes) / len(lanes) for lanes in self._in_lanes]
-        return np.asarray(part) >= self.threshold
+        self.last_score = np.asarray(part, dtype=np.float64)
+        return self.last_score >= self.threshold
 
 
 class RuleGate:
@@ -424,12 +468,14 @@ class RuleGate:
         # KAŻDY ruch wygląda na zamrożony i bramka przełączyłaby całą sieć na
         # starcie epizodu. Ta sama reguła co w kalibracji progu (`full_window`).
         if len(self._buf) < self.window:
+            self.last_score = np.zeros(obs.shape[0], dtype=np.float64)
             return np.zeros(obs.shape[0], dtype=bool)
 
         hist = np.stack(self._buf)  # [k, N, F]
         win = np.arange(self.window)[None, :]  # okno NAJNOWSZEGO kroku
         podejrzane = suspicious_movements(hist, win, self.n_mov)[0]  # [N, n_mov]
-        return podejrzane.mean(-1) >= self.threshold
+        self.last_score = podejrzane.mean(-1)
+        return self.last_score >= self.threshold
 
 
 class UQGate:
@@ -459,8 +505,10 @@ class UQGate:
     def mask(self, obs: np.ndarray) -> np.ndarray:
         u_mov = self.uncertainty.movements(obs)  # [N, n_mov]
         if not self.uncertainty.ready:  # strażnik rozgrzewki — jak w regule
+            self.last_score = np.zeros(u_mov.shape[0], dtype=np.float64)
             return np.zeros(u_mov.shape[0], dtype=bool)
-        return (u_mov >= self.u_mov_ref).mean(-1) >= self.threshold
+        self.last_score = (u_mov >= self.u_mov_ref).mean(-1)
+        return self.last_score >= self.threshold
 
 
 class ColightController:

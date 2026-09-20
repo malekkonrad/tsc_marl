@@ -67,7 +67,22 @@ def base_network(network: str) -> str:
     return VARIANT_SUFFIX.sub("", network)
 
 
-METRICS = ("att", "throughput", "queue", "delay", "reward")
+#: Kolumny zapisywane do `metrics.csv` każdego biegu T2. `queue_max`/`queue_p90`/
+#: `wait_max` to OGON (Faza 4): średnia sieciowa nie widzi jednego skrzyżowania
+#: trzymanego w martwej fazie ani ćwiartki sieci zepsutej przy zdrowej reszcie.
+#: Dopisane PRZED biegami maskingu i Krakowa celowo — metryki liczą się w epizodzie,
+#: więc dodanie ich później oznacza przeliczenie wszystkiego od nowa.
+METRICS = (
+    "att",
+    "throughput",
+    "queue",
+    "delay",
+    "reward",
+    "queue_max",
+    "queue_p90",
+    "wait_max",
+    "wait_max_demand",
+)
 
 
 def slug(spec: FailureSpec) -> str:
@@ -251,6 +266,7 @@ def evaluate(
     make_builder: Callable[[FailureSpec], Any],
     decisions: int,
     on_row: Callable[[dict[str, Any]], None] | None = None,
+    on_trace: Callable[[str, int, list[Any]], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Każdy scenariusz × losowanie = jeden pełny epizod testowy. -> wiersze metryk.
 
@@ -276,6 +292,12 @@ def evaluate(
             rows.append(row)
             if on_row is not None:
                 on_row(row)
+            # Ślad bramki (opcjonalny) wychodzi PO metrykach i przed `reset_stats`
+            # następnego epizodu — czyli w jedynym momencie, w którym jest kompletny.
+            if on_trace is not None and hasattr(controller, "episode_trace"):
+                slad = controller.episode_trace()
+                if slad:
+                    on_trace(slug(spec), draw, slad)
     return rows
 
 

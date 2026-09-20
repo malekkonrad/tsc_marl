@@ -140,6 +140,26 @@ class TrafficEnv:
         self._reward_sum = np.zeros(n, dtype=np.float64)
         self._queue_sum = np.zeros(n, dtype=np.float64)
         self._delay_sum = np.zeros(n, dtype=np.float64)
+        # WIEK OBSŁUGI (Faza 4). Ile decyzji minęło, odkąd dana faza dostała zielone.
+        # Metryka GŁODZENIA, której `att`/`queue` nie widzą: uśrednianie po sieci i po
+        # czasie zamazuje jedno skrzyżowanie trzymane w martwej fazie przez pół epizodu.
+        # Indeks [węzeł, faza] w KOLEJNOŚCI GRAFU — tej samej co `_queue_sum`, `_delay`
+        # i wektor akcji (permutacja do świata jest dopiero w `step`). Maska legalnych
+        # faz jest konieczna, bo `n_phases` to MAKSIMUM po sieci i węzły o 2 fazach mają
+        # resztę kolumn martwych; bez niej `wait_max` mierzyłby fazy nieistniejące
+        # i rósł liniowo z długością epizodu na każdej sieci niejednorodnej.
+        self._since_green = np.zeros((n, self.features.n_phases), dtype=np.float64)
+        self._legal_phase = np.zeros((n, self.features.n_phases), dtype=bool)
+        for idx, inter in enumerate(self.features.intersections):
+            self._legal_phase[idx, : len(inter.phases)] = True
+        self._age_max = 0.0
+        # WIEK OBSŁUGI Z POPYTEM. Sam `_age_max` nie wie, czy na zagłodzonej fazie
+        # ktokolwiek stoi — a faza bez ruchu może legalnie czekać dowolnie długo
+        # (w praktyce miejskiej bywa to celowe: wloty bez detekcji dostają zielone
+        # bezwarunkowo, patrz `tsc_marl_research/krakow-its.md`). Bez tego rozróżnienia
+        # metryka karze politykę za to, że nie obsługuje pustego wlotu.
+        self._phase_mov = self.features.phase_incidence()  # [N, n_faz, n_mov]
+        self._age_demand_max = 0.0
 
     def _builder(self, spec: FailureSpec) -> StateBuilder:
         if spec not in self._builders:
@@ -194,10 +214,22 @@ class TrafficEnv:
             reward_acc += self.features.rewards()
         rewards = reward_acc / self.action_interval
 
+        kolejka, popyt = self._queue_and_demand()
         self._reward_sum += rewards
-        self._queue_sum += self._queue()
+        self._queue_sum += kolejka
         self._delay_sum += np.array([g.generate() for g in self._delay], dtype=np.float64).ravel()
         self._decisions += 1
+        # Faza wybrana w tej decyzji DOSTAŁA zielone, reszta czeka o jedną decyzję dłużej.
+        # `actions` jest w kolejności grafu (permutacja `_to_world` dotyczy tylko silnika).
+        self._since_green += 1.0
+        self._since_green[np.arange(self.graph.n_nodes), np.asarray(actions, dtype=int)] = 0.0
+        self._age_max = max(self._age_max, float(self._since_green[self._legal_phase].max()))
+        # Faza „z popytem" = obsługuje choć jeden ruch, na którym ktoś TERAZ stoi.
+        z_popytem = self._legal_phase & (self._phase_mov & popyt[:, None, :]).any(-1)
+        if z_popytem.any():
+            self._age_demand_max = max(
+                self._age_demand_max, float(self._since_green[z_popytem].max())
+            )
         return self.features.observe(), rewards.astype(np.float32), False
 
     def _queue(self) -> np.ndarray:
@@ -205,11 +237,23 @@ class TrafficEnv:
         liczy `LaneVehicleGenerator(['lane_waiting_count'], in_only=True)`
         w `Metrics`. Liczymy z `reward_lanes`, a nie z nagrody, żeby metryka nie
         zależała od tego, który wariant nagrody jest akurat włączony."""
+        return self._queue_and_demand()[0]
+
+    def _queue_and_demand(self) -> tuple[np.ndarray, np.ndarray]:
+        """(kolejka per węzeł [N], czy na ruchu ktoś stoi [N, n_mov]).
+
+        Jedno odpytanie silnika na obie rzeczy. Czytamy PRAWDĘ z silnika, nie wektor
+        obserwacji — bo pod awarią detektora obserwacja kłamie, a metryka głodzenia
+        ma mierzyć, co NAPRAWDĘ stało na wlocie, nie co zaraportował zepsuty czujnik.
+        """
         waiting = self.world.get_info("lane_waiting_count")
-        return np.array(
-            [sum(waiting[lane] for lane in s.reward_lanes) for s in self.features.structs],
-            dtype=np.float64,
-        )
+        kolejka = np.zeros(self.graph.n_nodes, dtype=np.float64)
+        popyt = np.zeros((self.graph.n_nodes, self.features.n_mov), dtype=bool)
+        for idx, s in enumerate(self.features.structs):
+            kolejka[idx] = sum(waiting[lane] for lane in s.reward_lanes)
+            for m, (wjazdy, _) in enumerate(s.movements):
+                popyt[idx, m] = sum(waiting[lane] for lane in wjazdy) > 0
+        return kolejka, popyt
 
     # ---------------------------------------------------------------- metryki
 
@@ -218,12 +262,36 @@ class TrafficEnv:
         if self._decisions == 0:
             raise RuntimeError("epizod nie wystartował — najpierw reset() i step()")
         n = self.graph.n_nodes
+        # Kolejka i opóźnienie PER WĘZEŁ (średnia po decyzjach) — z nich liczą się
+        # zarówno kolumny zgodne z LibSignalem (średnia po sieci), jak i OGON.
+        kolejka = self._queue_sum / self._decisions  # [N]
         return {
             "att": float(self.world.get_average_travel_time()),
             "throughput": float(self.world.get_cur_throughput()),
             "reward": float(self._reward_sum.sum() / self._decisions),
-            "queue": float(self._queue_sum.sum() / (self._decisions * n)),
+            "queue": float(kolejka.sum() / n),
             "delay": float(self._delay_sum.sum() / (self._decisions * n)),
+            # --- OGON (Faza 4). Średnia sieciowa ukrywa katastrofę na jednej czwartej
+            # sieci — to samo zastrzeżenie, przez które bramka jest per skrzyżowanie,
+            # a nie globalna. Mechanizmy celujące w GŁODZENIE i SPRAWIEDLIWOŚĆ obsługi
+            # (action masking) nie ruszą `att`; ruszą te trzy kolumny. Mierzenie ich
+            # przez `att` daje zero i wygląda jak porażka mechanizmu, a jest
+            # niezgodnością metryki z celem — patrz `faza3-po-t2.md` §7.
+            "queue_max": float(kolejka.max()),
+            "queue_p90": float(np.quantile(kolejka, 0.9)),
+            # Sekundy, nie decyzje — żeby czytało się w tej samej jednostce co `att`.
+            # To MAKSIMUM PO EPIZODZIE z maksimum po (węzeł, faza legalna), czyli
+            # najdłuższe zagłodzenie, jakie w epizodzie wystąpiło gdziekolwiek.
+            # UWAGA przy interpretacji: mierzy odstęp między DECYZJAMI wyboru fazy,
+            # więc nie odejmuje żółtego ani międzyzielonego.
+            "wait_max": float(self._age_max * self.action_interval),
+            # Ten sam wiek, ale liczony TYLKO dla faz, na których ktoś stoi. To jest
+            # metryka, którą należy raportować jako głodzenie; `wait_max` zostaje jako
+            # diagnostyka surowa (odstęp między zielonymi, niezależnie od popytu).
+            # UWAGA przy interpretacji: to GÓRNE ograniczenie czasu oczekiwania
+            # konkretnego pojazdu — wiek fazy liczy się od ostatniego zielonego,
+            # a pojazd mógł podjechać później.
+            "wait_max_demand": float(self._age_demand_max * self.action_interval),
         }
 
 

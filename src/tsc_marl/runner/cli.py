@@ -228,12 +228,20 @@ def degrade_run(
     jobs: int = typer.Option(1, "--jobs", "-j", help="ile punktów liczyć naraz"),
     replace: bool = typer.Option(False, "--replace", help="policz ponownie także gotowe"),
     stagger: float = typer.Option(15.0, help="sekundy między startami podprocesów"),
+    trace: bool = typer.Option(
+        False,
+        "--trace",
+        help="zapisz ślad bramki per (decyzja, węzeł) do gate_trace.csv — do wyjaśniania "
+        "pojedynczych przełączeń; NIE zmienia decyzji ani odcisku biegu",
+    ),
 ) -> None:
     """Policz brakujące punkty planu (sterownik × sieć × seed, wszystkie scenariusze)."""
     from tsc_marl.robustness.degrade import load_plan
     from tsc_marl.runner import degrade
 
-    licznik = degrade.run_plan(load_plan(plan), jobs=jobs, replace=replace, stagger=stagger)
+    licznik = degrade.run_plan(
+        load_plan(plan), jobs=jobs, replace=replace, stagger=stagger, trace=trace
+    )
     if licznik.get("failed") or licznik.get("timeout"):
         raise typer.Exit(1)
 

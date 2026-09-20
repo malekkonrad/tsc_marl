@@ -106,6 +106,128 @@ def test_checkpoint_odtwarza_polityke_i_skale_wartosci(graph, tmp_path):
     assert po_skala == pytest.approx(przed_skala)
 
 
+# ------------------------------------------------- ogon metryk (Faza 4), bez CityFlow
+
+
+def _metrics_atrapa(n_phases, legalne, n_nodes=1, waiting=None):
+    """`TrafficEnv` z podstawionymi współpracownikami — testujemy ARYTMETYKĘ ogona,
+    nie silnik. `legalne[i]` = ile faz ma naprawdę węzeł i. `waiting` = mapa
+    pas -> liczba stojących (domyślnie pusto, czyli zero popytu wszędzie)."""
+    from collections import defaultdict  # noqa: PLC0415
+
+    waiting = defaultdict(int) if waiting is None else defaultdict(int, waiting)
+    from tsc_marl.core.loop import TrafficEnv  # noqa: PLC0415
+
+    m = object.__new__(TrafficEnv)
+    m.graph = SimpleNamespace(n_nodes=n_nodes)
+    # Jeden ruch na fazę, ruch `m` obsługiwany przez fazę `m`; pasy nazwane `iN_m`,
+    # żeby `popyt` dało się sterować zawartością `waiting`.
+    incydencja = np.zeros((n_nodes, n_phases, n_phases), dtype=bool)
+    for i in range(n_nodes):
+        for f in range(n_phases):
+            incydencja[i, f, f] = True
+    m.features = SimpleNamespace(
+        n_phases=n_phases,
+        n_mov=n_phases,
+        intersections=[SimpleNamespace(phases=list(range(k))) for k in legalne],
+        structs=[
+            SimpleNamespace(
+                reward_lanes=[],
+                movements=[([f"i{i}_{f}"], []) for f in range(n_phases)],
+            )
+            for i in range(n_nodes)
+        ],
+        phase_incidence=lambda: incydencja,
+        rewards=lambda: np.zeros(n_nodes),
+        observe=lambda: np.zeros((n_nodes, 1)),
+    )
+    m.world = SimpleNamespace(
+        step=lambda _a: None,
+        get_info=lambda _k: waiting,
+        get_average_travel_time=lambda: 300.0,
+        get_cur_throughput=lambda: 1000.0,
+    )
+    m.action_interval = 15
+    m._to_world = np.arange(n_nodes)
+    m._delay = [SimpleNamespace(generate=lambda: 0.0) for _ in range(n_nodes)]
+    m._reset_stats()
+    return m
+
+
+def test_wait_max_mierzy_glodzenie_fazy():
+    """Węzeł trzymany w fazie 0 głodzi pozostałe. Po k decyzjach najdłużej
+    nieobsłużona czeka k decyzji = k × 15 s — i to jest liczba, której `att`
+    ani `queue` nie pokazują."""
+    m = _metrics_atrapa(n_phases=3, legalne=[3])
+    for _ in range(10):
+        m.step(np.array([0]))
+    assert m.metrics()["wait_max"] == pytest.approx(10 * 15)
+
+
+def test_wait_max_ignoruje_fazy_NIEISTNIEJACE():
+    """PUŁAPKA, dla której ten test istnieje. `n_phases` to MAKSIMUM po sieci, więc
+    węzeł o 2 fazach ma trzecią kolumnę martwą — nigdy nie dostanie zielonego.
+    Bez maski legalnych faz `wait_max` liczyłby tę kolumnę i rósł liniowo z długością
+    epizodu na KAŻDEJ sieci niejednorodnej (Kraków: 2–7 faz), udając głodzenie,
+    którego nie ma. Tu węzeł na przemian obsługuje obie swoje fazy, więc prawdziwe
+    zagłodzenie to jedna decyzja."""
+    m = _metrics_atrapa(n_phases=3, legalne=[2])
+    for i in range(10):
+        m.step(np.array([i % 2]))
+    assert m.metrics()["wait_max"] == pytest.approx(15), "faza 2 nie istnieje — nie głoduje"
+
+
+def test_wait_max_demand_nie_karze_za_PUSTA_faze():
+    """SEDNO rozdzielenia obu metryk. Węzeł trzymany w fazie 0 głodzi fazy 1 i 2,
+    ale nikt na nich nie stoi — a w praktyce miejskiej wlot bez popytu może czekać
+    dowolnie długo i bywa to celowe (Kraków: wloty bez detekcji dostają zielone
+    bezwarunkowo). `wait_max` ma to POKAZAĆ jako odstęp, `wait_max_demand` ma
+    MILCZEĆ, bo nikomu nic się nie stało."""
+    m = _metrics_atrapa(n_phases=3, legalne=[3])
+    for _ in range(10):
+        m.step(np.array([0]))
+    wynik = m.metrics()
+    assert wynik["wait_max"] == pytest.approx(10 * 15), "surowy odstęp ma rosnąć"
+    assert wynik["wait_max_demand"] == 0.0, "pusta faza to nie głodzenie"
+
+
+def test_wait_max_demand_liczy_faze_NA_KTOREJ_KTOS_STOI():
+    """Ta sama sytuacja, ale na ruchu fazy 1 stoi pojazd. Teraz to JEST głodzenie
+    i obie metryki mają je pokazać."""
+    m = _metrics_atrapa(n_phases=3, legalne=[3], waiting={"i0_1": 4})
+    for _ in range(10):
+        m.step(np.array([0]))
+    wynik = m.metrics()
+    assert wynik["wait_max"] == pytest.approx(10 * 15)
+    assert wynik["wait_max_demand"] == pytest.approx(10 * 15)
+
+
+def test_wait_max_demand_ignoruje_fazy_nieistniejace():
+    """Ta sama pułapka co przy `wait_max`, ale groźniejsza: martwa kolumna NIGDY nie
+    dostanie zielonego, więc jej wiek rośnie przez cały epizod, a gdyby jeszcze
+    „miała popyt", metryka raportowałaby narastające głodzenie na fazie, której nie ma.
+    Tu węzeł ma 2 fazy, obsługuje je na przemian (zero głodzenia), a 9 pojazdów stoi
+    na ruchu fazy 2 — nieistniejącej. Bez maski legalnych faz wyszłoby 10 × 15 = 150 s."""
+    m = _metrics_atrapa(n_phases=3, legalne=[2], waiting={"i0_2": 9})
+    for i in range(10):
+        m.step(np.array([i % 2]))
+    assert m.metrics()["wait_max_demand"] == 0.0
+
+
+def test_ogon_kolejki_to_maksimum_po_wezlach_a_nie_srednia():
+    """`queue` uśrednia po sieci i po czasie — jedno zakorkowane skrzyżowanie przy
+    trzech pustych znika. `queue_max` je pokazuje. To jest ta sama różnica, przez
+    którą bramka jest per skrzyżowanie, a nie globalna."""
+    m = _metrics_atrapa(n_phases=2, legalne=[2, 2, 2, 2], n_nodes=4)
+    m._queue_sum = np.array([120.0, 0.0, 0.0, 0.0])
+    m._delay_sum = np.zeros(4)
+    m._decisions = 10
+    wynik = m.metrics()
+    assert wynik["queue"] == pytest.approx(3.0)  # 120 / (10 decyzji × 4 węzły)
+    assert wynik["queue_max"] == pytest.approx(12.0)  # 120 / 10 na jednym węźle
+    assert wynik["queue_p90"] > wynik["queue"]
+
+
 # ----------------------------------------------------------- z prawdziwym CityFlow
 
 
@@ -126,7 +248,21 @@ def test_epizod_treningowy_wypelnia_bufor_i_daje_metryki(trainer):
     assert len(buffer) == SHORT.decisions == 10
     assert buffer.obs.shape == (10, trainer.env.graph.n_nodes, trainer.env.features.ob_length)
     assert torch.isfinite(buffer.advantages).all() and torch.isfinite(buffer.returns).all()
-    assert set(metryki) == {"att", "throughput", "reward", "queue", "delay"}
+    assert set(metryki) == {
+        "att",
+        "throughput",
+        "reward",
+        "queue",
+        "delay",
+        "queue_max",
+        "queue_p90",
+        "wait_max",
+        "wait_max_demand",
+    }
+    assert metryki["queue_max"] >= metryki["queue_p90"] >= 0
+    assert metryki["wait_max"] >= metryki["wait_max_demand"] >= 0, (
+        "wiek z popytem jest podzbiorem wieku surowego"
+    )
     assert all(np.isfinite(v) for v in metryki.values())
     assert metryki["att"] > 0 and metryki["queue"] >= 0
     assert metryki["reward"] <= 0, "nagroda kolejkowa nie może być dodatnia"

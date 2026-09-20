@@ -517,10 +517,52 @@ def features(broken=(), *, live=True, sensors=True, n=4, prefix=""):
     )
 
 
-def gated(env, **kwargs):
+def gated(env, *, trace=False, **kwargs):
+    """`kwargs` idą do WYROCZNI (próg), `trace` do powłoki — to różne obiekty."""
     polityka = SimpleNamespace(act=lambda obs: np.full(env.features.n_nodes, POLITYKA))
     regula = SimpleNamespace(act=lambda obs: np.full(env.features.n_nodes, REGULA))
-    return c.GatedController(polityka, regula, c.OracleGate(env, **kwargs))
+    return c.GatedController(polityka, regula, c.OracleGate(env, **kwargs), trace=trace)
+
+
+def test_slad_bramki_wyjasnia_POJEDYNCZE_przelaczenie():
+    """Instrumentacja pod explainability (Faza 4). `gate_share` mówi ILE par
+    (decyzja, węzeł) przejęła reguła — nie mówi KTÓRE ani KIEDY, a wyjaśnienie
+    wdrożeniowe brzmi „dlaczego TO skrzyżowanie oddało sterowanie". Ślad zapisuje
+    wynik SUROWY obok obu masek, bo bez niego nie widać, czy węzeł był tuż pod
+    progiem, a bez rozdzielenia surowa/po histerezie nie da się odróżnić
+    „detektor nie zadziałał" od „histereza jeszcze nie przepuściła"."""
+    env = SimpleNamespace(features=features({"1_a", "1_b"}))
+    sterownik = gated(env, trace=True)
+    sterownik.act(None)
+    slad = sterownik.episode_trace()
+
+    assert len(slad) == 4, "jeden wiersz na węzeł na decyzję"
+    assert [w[0] for w in slad] == [0] * 4  # numer decyzji
+    assert [w[1] for w in slad] == [0, 1, 2, 3]  # numer węzła
+    # węzeł 1 ma oba wloty martwe -> wynik surowy 1,0 i tryb reguły; reszta 0,0
+    assert [w[2] for w in slad] == [0.0, 1.0, 0.0, 0.0]
+    assert [w[4] for w in slad] == [False, True, False, False]
+
+
+def test_slad_domyslnie_WYLACZONY():
+    """Domyślnie pusty, bo 240 decyzji × N węzłów × scenariusze × losowania to
+    dane, których nikt nie zamawiał. Włącza go `tsc degrade run --trace`."""
+    env = SimpleNamespace(features=features({"1_a", "1_b"}))
+    sterownik = gated(env)
+    sterownik.act(None)
+    assert sterownik.episode_trace() == []
+
+
+def test_trace_NIE_wchodzi_do_odcisku_biegu():
+    """PUŁAPKA, dla której `--trace` jest flagą CLI, a nie kluczem w planie.
+    `gate` należy do `MECHANISM_KEYS`, więc dopisanie tam flagi LOGOWANIA
+    unieważniłoby wszystkie policzone punkty — mimo że nie zmienia ani jednej
+    decyzji. Ten test pilnuje, żeby nikt nie „uprościł" tego z powrotem do planu."""
+    from tsc_marl.robustness.degrade import MECHANISM_KEYS  # noqa: PLC0415
+
+    assert "trace" not in MECHANISM_KEYS
+    plan = d.load_plan("t2_gate_real")
+    assert "trace" not in plan.controllers["gatppo_gate_rule"]["gate"]
 
 
 def test_bramka_na_czystym_nie_rusza_polityki():

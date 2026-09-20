@@ -164,6 +164,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--network", required=True)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--replace", action="store_true")
+    p.add_argument(
+        "--trace",
+        action="store_true",
+        help="zapisz ślad bramki per (decyzja, węzeł) do gate_trace.csv w katalogu biegu",
+    )
     return p.parse_args(argv)
 
 
@@ -248,7 +253,9 @@ def build_gate(spec: dict[str, Any], plan: Plan, unit: Unit, env):
     )
 
 
-def build_controller(plan: Plan, unit: Unit, env, config, agents, ckpts: list[Path]):
+def build_controller(
+    plan: Plan, unit: Unit, env, config, agents, ckpts: list[Path], *, trace: bool = False
+):
     import numpy as np  # noqa: PLC0415
     import torch  # noqa: PLC0415
 
@@ -300,6 +307,7 @@ def build_controller(plan: Plan, unit: Unit, env, config, agents, ckpts: list[Pa
                 k_off=int(spec.get("k_off", 1)),
                 oracle=wyrocznia,
                 name=unit.controller,
+                trace=trace,
             )
         return c.PolicyController(actors[0], env.graph.edge_index, name=unit.controller)
     if kind == "colight":
@@ -374,7 +382,7 @@ def main(argv: list[str] | None = None) -> None:
             return StateBuilder.from_registry(world, order, failure=spec)
 
         env = TrafficEnv(world, graph, make(None), loop.action_interval)
-        controller = build_controller(plan, unit, env, config, agents, ckpts)
+        controller = build_controller(plan, unit, env, config, agents, ckpts, trace=args.trace)
 
         exp = experiment()
         with exp.start(
@@ -393,10 +401,28 @@ def main(argv: list[str] | None = None) -> None:
                     f"  {row['scenario']:28s} los {row['draw']}  ATT {row['att']:7.1f}", flush=True
                 )
 
+            slady: list[str] = []
+
+            def zapisz_slad(scenariusz, draw, wiersze):
+                # Jeden plik na bieg, kolumny jak w `metrics.csv` (`split`/`step`),
+                # żeby dało się je złączyć bez tłumaczenia nazw.
+                for decyzja, node, wynik, surowa, tryb in wiersze:
+                    slady.append(
+                        f"{scenariusz},{draw},{decyzja},{node},{wynik:.6f},"
+                        f"{int(surowa)},{int(tryb)}"
+                    )
+
             rows = evaluate(
                 env, controller, plan.scenarios_for(unit), plan.draws, make,
                 loop.test_decisions, on_row=log,
+                on_trace=zapisz_slad if args.trace else None,
             )  # fmt: skip
+            if slady:
+                sciezka = run.path / "gate_trace.csv"
+                sciezka.write_text(
+                    "split,step,decision,node,score,raw,rule_mode\n" + "\n".join(slady) + "\n"
+                )
+                print(f"  ślad bramki: {sciezka} ({len(slady)} wierszy)", flush=True)
             run.result(
                 **summarize(rows),
                 checkpoint=str(ckpts[0].relative_to(REPO_ROOT)) if ckpts else None,
@@ -408,7 +434,13 @@ def main(argv: list[str] | None = None) -> None:
 # ------------------------------------------------------------------- rodzic
 
 
-def run_plan(plan: Plan, jobs: int = 1, replace: bool = False, stagger: float = 15.0) -> dict:
+def run_plan(
+    plan: Plan,
+    jobs: int = 1,
+    replace: bool = False,
+    stagger: float = 15.0,
+    trace: bool = False,
+) -> dict:
     """Policz brakujące punkty planu. -> licznik statusów."""
     import subprocess  # noqa: PLC0415
 
@@ -443,6 +475,8 @@ def run_plan(plan: Plan, jobs: int = 1, replace: bool = False, stagger: float = 
         ]  # fmt: skip
         if replace:
             cmd.append("--replace")
+        if trace:
+            cmd.append("--trace")
         log = open(logs / f"{unit.controller}__{unit.network}__s{unit.seed}.log", "a")  # noqa: SIM115
         log.write(f"\n$ {' '.join(cmd)}\n")
         log.flush()
