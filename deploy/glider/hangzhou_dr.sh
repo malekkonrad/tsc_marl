@@ -66,8 +66,22 @@ fi
 "$TSC" doctor | grep -E "torch|PYTHONHASHSEED" || { echo "tsc doctor nie działa"; exit 1; }
 .venv/bin/python -c "import torch; assert torch.cuda.is_available(), 'brak CUDA'" \
   || { echo "torch nie widzi karty — make setup-gpu"; exit 1; }
-if pgrep -f "deploy/glider/" > /dev/null; then
-  echo "inna kolejka na gliderze jeszcze liczy — uruchom później."
+# Strażnik równoległych kolejek — wyklucza po NAZWIE SKRYPTU, nie po PID.
+#
+# Dlaczego nie po PID: linia poleceń tego skryptu sama zawiera "deploy/glider/", więc
+# `pgrep -f` trafia w siebie. Wykluczenie `$$` NIE WYSTARCZA — `$(...)` forkuje
+# podpowłokę o INNYM PID, ale tej samej linii poleceń, i to ona zostaje w wyniku.
+# Pierwsza wersja tego strażnika blokowała start zawsze, nie podając powodu.
+#
+# `pgrep -af` wypisuje "PID linia poleceń", więc `grep -v "$self"` zdejmuje i proces
+# główny, i fork. Wypisanie trafionych procesów jest celowe: strażnik blokujący bez
+# podania, CO blokuje, jest gorszy od braku strażnika.
+self=$(basename "$0")
+inne=$(pgrep -af "deploy/glider/.*\.sh" | grep -v "$self" || true)
+if [ -n "$inne" ]; then
+  echo "inna kolejka na gliderze jeszcze liczy:"
+  echo "$inne"
+  echo "uruchom później albo ubij tamtą kolejkę."
   exit 1
 fi
 
