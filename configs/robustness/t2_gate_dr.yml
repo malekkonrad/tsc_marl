@@ -49,9 +49,18 @@
 #     w `t2_gate_real`). Szum nie zamraża odczytu, a to jedyne, co reguła widzi. Jeśli
 #     strzeli, znaczy że H2 poleciała i próg jest za nisko dla polityki DR.
 #
-# ZAKRES: JiNan, 3 seedy. HangZhou NIE — checkpointy DR są tylko dla JiNan (`p1_fail`
-# grid = cityflow_jinan3x4_4ph × [0,1,2]). Replikacja na drugiej sieci wymagałaby 3 biegów
-# GPU na gliderze i jest osobną decyzją, PO tym wyniku.
+# ZAKRES: dwie sieci, 3 seedy. HangZhou dopisane 2026-09-20 PO wyniku z JiNan —
+# złożenie zeszło tam pod próg FixedTime (481,1 vs 507,0) i twierdzenie o rozwiązaniu
+# nie może stać na jednej sieci. Wymaga `p1_fail` na HangZhou (3 biegi GPU, glider).
+#
+# CZEGO SIĘ SPODZIEWAĆ, zapisane przed pomiarem: na HangZhou bramka z progiem
+# z artefaktu (0,875) jest ZACHOWAWCZA — zbiera 58% zapasu wyroczni wobec 98% na JiNan
+# (§2b notatki), a sweep `t2_gate_thr` pokazał, że jej optimum leży przy 0,500.
+# Przy progu domyślnym złożenie może więc na HangZhou NIE zejść pod FixedTime (568,9),
+# mimo że na JiNan zeszło. Gdyby tak wyszło, wniosek brzmi „złożenie działa, ale próg
+# kalibrowany percentylem oddaje na sieciach rzadkich za dużo" — czyli §8.4, a nie
+# porażka złożenia. Rozstrzyga to dopiero kolumna z progiem 0,500, której TU NIE MA
+# i której dopisanie byłoby wyborem progu PO zobaczeniu wyniku.
 #
 # KOSZT: 13 biegów (4 kolumny × 3 seedy + FixedTime), 8 splitów, 1 + 7×5 = 36 epizodów na
 # bieg. Ewaluacja zamrożonych wag — CPU, laptop, ZERO treningu. Wszystkie checkpointy są
@@ -88,7 +97,7 @@ mode: realistic
 draws: 5
 timeout: 7200
 
-networks: [cityflow_jinan3x4_4ph]
+networks: [cityflow_jinan3x4_4ph, cityflow_hangzhou4x4_4ph]
 
 controllers:
   # 1. rdzeń trenowany na czystym — odniesienie całej tabeli. Rodzic domyślny, czyli

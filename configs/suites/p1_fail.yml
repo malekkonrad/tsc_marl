@@ -25,7 +25,11 @@ timeout: 86400
 ngpu: "0"
 
 grid:
-  network: [cityflow_jinan3x4_4ph]
+  # HangZhou dopisane 2026-09-20. Powód: `t2_gate_dr` pokazał, że DR + bramka schodzi
+  # przy `mask0p5` pod próg FixedTime (481,1 vs 507,0) — jedyna taka konfiguracja
+  # w pracy. Twierdzenie stoi dziś na JEDNEJ sieci i to jest pierwszy cel ataku
+  # recenzenta. `run_id` się nie zmienia, więc policzone punkty JiNan zostają pominięte.
+  network: [cityflow_jinan3x4_4ph, cityflow_hangzhou4x4_4ph]
   seed: [0, 1, 2]
 
 overrides:
