@@ -288,6 +288,20 @@ def build_controller(
                 build_uncertainty(plan, unit, env),
                 name=unit.controller,
             )
+        if kind == "policy_mask":
+            spec = plan.controllers[unit.controller]["mask"]
+            # Maska legalnych faz: `n_phases` to MAKSIMUM po sieci, więc węzeł o 2 fazach
+            # ma resztę kolumn martwych. Bez tej maski mechanizm wymuszałby fazy, których
+            # nie ma — i na sieci niejednorodnej (Kraków: 2–7 faz) sterowałby w pustkę.
+            legal = np.zeros((feats.n_nodes, feats.n_phases), dtype=bool)
+            for i, inter in enumerate(feats.intersections):
+                legal[i, : len(inter.phases)] = True
+            return c.MaskedController(
+                c.PolicyController(actors[0], env.graph.edge_index),
+                legal=legal,
+                k_max=int(spec["k_max"]),
+                name=unit.controller,
+            )
         if kind == "policy_gate":
             spec = plan.controllers[unit.controller]["gate"]
             # Wyrocznia jako DIAGNOSTYKA bramki realnej: precyzja i czułość rozdzielają

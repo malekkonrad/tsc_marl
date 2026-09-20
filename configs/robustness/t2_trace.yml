@@ -1,0 +1,43 @@
+# ŚLAD BRAMKI DO RYSUNKU — plan istniejący WYŁĄCZNIE po to, żeby wyprodukować
+# `gate_trace.csv` pod figurę wyjaśniającą (Faza 4, explainability).
+#
+# ⚠ NIE CYTOWAĆ Z TEGO PLANU ŻADNEGO ATT. Jeden seed i jedno losowanie awarii na
+# scenariusz — to jest materiał na rysunek, nie pomiar. Liczby do pracy pochodzą
+# z `t2_gate_real` (3 seedy × 5 losowań) i tylko z niego.
+#
+# PO CO OSOBNY PLAN, a nie `--trace` na `t2_gate_real`: ślad to ~240 decyzji × N węzłów
+# × scenariusze × losowania. Na pełnym planie to dane, których nikt nie zamawiał,
+# a przeliczenie `t2_gate_real` z `--replace` podmieniłoby wyniki cytowane w §2b.
+# Osobny `run_id` (`__t2_trace`) nie dotyka niczego policzonego.
+#
+# URUCHOMIENIE (flaga jest CLI, nie kluczem planu — patrz `GatedController.trace`):
+#     tsc degrade run t2_trace --trace -j 4
+#
+# SCENARIUSZE dobrane tak, żeby rysunek pokazywał TRZY różne zachowania bramki:
+#   clean                  — prawie nie strzela (gate_share 1,6%): tło „brak awarii"
+#   gauss2                 — NIE STRZELA ANI RAZU (§8.3): dowód, że szum nie zamraża
+#                            odczytu; na rysunku pusty pasek, i to jest treść
+#   mask0p25_intersection   — precyzja 0,89: czyste przejęcie CAŁYCH skrzyżowań,
+#                            najczytelniejszy przypadek „dlaczego TEN węzeł"
+#   mask0p5                — precyzja 0,73 przy udziale 57%: przypadek rozmyty,
+#                            gdzie widać histerezę i wynik tuż pod progiem
+#   mask0p25_hold_t60      — awaria OD 60. DECYZJI: na rysunku widać OPÓŹNIENIE
+#                            detekcji (okno 12 musi wypełnić się zamrożonymi odczytami)
+name: t2_trace
+mode: realistic
+draws: 1
+timeout: 3600
+
+networks: [cityflow_jinan3x4_4ph]
+
+controllers:
+  gatppo_gate_rule:
+    agent: gatppo
+    seeds: [0]
+    gate: {kind: rule, k_on: 3, k_off: 6}
+
+scenarios:
+  - {kind: gauss, level: 2.0}
+  - {kind: mask, level: 0.25, unit: intersection}
+  - {kind: mask, level: 0.5}
+  - {kind: mask, level: 0.25, substitution: hold, onset: 60}

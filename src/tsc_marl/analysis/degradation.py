@@ -210,7 +210,8 @@ def mechanism_pairs(plan: Plan) -> list[tuple[str, str]]:
     """
     out = []
     for label in plan.controllers:
-        if plan.kind(label) not in ("policy_uw", "policy_gate") and not plan.baseline(label):
+        mechanizmy = ("policy_uw", "policy_gate", "policy_mask")
+        if plan.kind(label) not in mechanizmy and not plan.baseline(label):
             continue
         # `baseline:` z planu wygrywa z domyślem. Domyśl („pierwsza kolumna `policy`
         # tego samego agenta") jest dobry tam, gdzie kolumna bez mechanizmu jest
@@ -249,6 +250,15 @@ DIAGNOSTICS = {
         "i `gate_recall` liczą się względem WYROCZNI (prawda z warstwy awarii, "
         "wyłącznie diagnostycznie) i rozdzielają „detektor jest słaby” od "
         "„przełączanie mało daje” — dwie rzeczy, które samo ATT skleja.",
+    ),
+    "policy_mask": (
+        ("mask_share", "mask_forced"),
+        "`mask_share` = odsetek par (decyzja, węzeł), w których maska ZMIENIŁA akcję "
+        "polityki (nie tych, w których była aktywna i zgodziła się z nią). `mask_forced` "
+        "= liczba takich nadpisań w epizodzie. Maska celuje w GŁODZENIE, nie w przejazd, "
+        "więc jej efekt czyta się w kolumnach `wait_max` / `wait_max_demand`, a nie "
+        "w `att` — mierzenie jej samym ATT daje zero z powodu niezgodności metryki "
+        "z celem (patrz `faza3-po-t2.md` §8.7).",
     ),
     # Goła kolumna `policy` z jawnym `baseline:` — kolumny różni TRENING, nie mechanizm
     # działający w inferencji, więc nie ma czego diagnozować per krok. `_mechanism_section`

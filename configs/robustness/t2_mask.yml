@@ -1,0 +1,118 @@
+# ACTION MASKING — ograniczenie wieku obsługi. Faza 4, pierwszy mechanizm celujący
+# w GŁODZENIE, a nie w czas przejazdu.
+#
+# PO CO. `results/t2_gate_thr.md` pokazał liczbę, której `att` nie widzi: pod maskami
+# rdzeń zostawia jedną fazę bez zielonego przez 2386–3160 s na JiNan i 2680–3060 s
+# na HangZhou — czyli PONAD 40 z 60 minut epizodu. Degradacja pod awarią detektorów
+# nie polega więc tylko na wydłużeniu przejazdów, ale na PORZUCENIU KIERUNKÓW
+# (`faza3-po-t2.md` §8.7). Ten plan mierzy mechanizm, który to ogranicza wprost.
+#
+# MECHANIZM. Per skrzyżowanie: jeśli legalna faza czeka ≥ `k_max` decyzji, akcja
+# polityki jest nadpisywana najstarszą przeterminowaną fazą. Maska NIE CZYTA ŻADNEGO
+# CZUJNIKA — liczy wyłącznie własne akcje — więc jest odporna na awarię detektorów
+# z konstrukcji. Spełnia trzy warunki opłacalności z §7.7 z definicji: nie jest
+# estymatorem niepewności, jest tania gdy się myli (jeden interwał na pustej fazie)
+# i jest DYSKRETNYM ograniczeniem zbioru akcji.
+#
+# ⚠ JAK TO CZYTAĆ — DWIE PUŁAPKI METRYKI, obie zapisane PRZED pomiarem:
+#
+#   1. NIE czytać samego `att`. Maska zapobiega rzadkim zdarzeniom złym, nie skraca
+#      przejazdu — na ATT spodziewam się ZERA albo lekkiej STRATY. Zero na ATT nie jest
+#      porażką mechanizmu, jest niezgodnością metryki z celem. Ten sam błąd popełniłbym,
+#      mierząc UW-attention liczbą naruszeń.
+#   2. NIE czytać samego `wait_max`. Jest monotoniczny w odsetku nadpisań, więc jego
+#      optimum to „wymuszaj zawsze" (k_max = 1), co jest round-robinem, czyli cyklem
+#      stałym — i kosztuje ~150 s ATT (zmierzone na bramce, §8.7). Metryka ogona sama
+#      w sobie jest celem ZDEGENEROWANYM.
+#
+#   Właściwy odczyt to KRZYWA WYMIANY: `att` przeciw `wait_max_demand`, punkt po punkcie
+#   po `k_max`. Dlatego w planie są cztery ograniczenia, nie jedno — pojedyncza kolumna
+#   nie powiedziałaby nic, czego nie wiadomo z góry.
+#
+# HIPOTEZY ZAPISANE PRZED POMIAREM:
+#
+#  H1 (gwarancja). `wait_max` kolumny z ograniczeniem `k_max` nie przekroczy
+#     (k_max + liczba_legalnych_faz − 1) × 15 s. To NIE jest twarde k_max: przy kilku
+#     fazach przeterminowanych naraz obsłużyć można jedną. Jeśli zostanie przekroczone,
+#     mechanizm ma błąd, nie „słaby wynik" — i to jest jedyna hipoteza tego planu,
+#     która jest testem POPRAWNOŚCI, nie wyniku.
+#
+#  H2 (cena na czystym). Na `clean` maska prawie nie strzela, bo polityka i tak obraca
+#     fazami: `wait_max` rdzenia na czystym to 545 s (JiNan) ≈ 36 decyzji. Przy k_max=16
+#     spodziewam się więc nadpisań rzędu jednostek procent i Δ att w granicach szumu;
+#     przy k_max=4 maska zacznie nadpisywać na czystym i ATT wzrośnie ISTOTNIE.
+#     Punkt przegięcia jest pytaniem planu, nie tłem.
+#
+#  H3 (zysk pod awarią). Największy zysk w `wait_max_demand` przy `mask0p5` i
+#     `mask0p5_intersection` — tam rdzeń głodzi najdłużej (3160 s), a maska nie zależy
+#     od czujników, więc działa dokładnie tak samo jak na czystym. To jest jedyny
+#     mechanizm w tej pracy, którego skuteczność NIE degraduje się z awarią.
+#
+#  H4 (wobec bramki). Bramka też obniża `wait_max` — ale jako efekt UBOCZNY oddania
+#     sterowania cyklowi stałemu, i tylko na węzłach, które uznała za oślepione. Maska
+#     działa na WSZYSTKICH węzłach i bez detekcji. Spodziewam się, że przy `gauss2`
+#     (gdzie bramka nie strzela ANI RAZU, §8.3) maska będzie jedynym mechanizmem
+#     obniżającym głodzenie. To rozdziela oba mechanizmy czyściej niż ATT.
+#
+# ZAKRES: dwie sieci, 3 seedy, ramię POST HOC (maska na gotowej polityce).
+# HangZhou dopisane 2026-09-20 PO wyniku z JiNan i PO tym, jak `t2_gate_dr` pokazał,
+# że HangZhou potrafi ODWRÓCIĆ wnioski (§8.8: tam sam DR bije bramkę, na JiNan odwrotnie).
+# Maska jest jedynym mechanizmem tej pracy z TWARDĄ GWARANCJĄ, więc zostawienie jej na
+# jednej sieci byłoby najsłabszym punktem najmocniejszego twierdzenia.
+#
+# CZEGO SIĘ SPODZIEWAĆ, zapisane przed pomiarem: gwarancja (H1) jest niezależna od sieci
+# z KONSTRUKCJI — maska liczy własne akcje, nie odczyty — więc `wait_max` MUSI trzymać
+# się granicy także na HangZhou. Jeśli nie, jest to błąd implementacji, nie wynik.
+# Niepewny jest natomiast KOSZT: HangZhou ma 16 węzłów o innym rozkładzie faz, a rdzeń
+# ma tam na czystym `wait_max` 1000 s wobec 545 s na JiNan (§8.7), czyli polityka
+# obraca fazami WOLNIEJ. Przy tym samym `k_max` maska będzie więc na HangZhou
+# nadpisywać CZĘŚCIEJ, a punkt przegięcia może wypaść przy większym `k_max` niż 16. Ramię trenowane
+# Z MASKĄ wymaga zmiany w pętli treningu i jest osobną pozycją (glider) — a wynik
+# [[bodagala-2026-ucatsc]] („maska doklejona post hoc kasuje naruszenia, ale nie
+# odtwarza zintegrowanego zachowania") oraz §1 tej pracy każą się spodziewać, że
+# post hoc wytnie głodzenie i NIE poprawi przejazdu. Jeśli tak wyjdzie, jest to wynik,
+# nie porażka — i dopiero ramię trenowane rozstrzyga, czy dało się lepiej.
+#
+# k_max w DECYZJACH (Δt = 15 s): 4 = 1 min, 8 = 2 min, 16 = 4 min, 24 = 6 min.
+# 16 to punkt odniesienia praktyki — maksymalny czerwony w miejskich wytycznych bywa
+# rzędu 2–4 min; wartość NIE jest strojona pod wynik i tak trzeba to opisać.
+name: t2_mask
+mode: realistic
+draws: 5
+timeout: 7200
+
+networks: [cityflow_jinan3x4_4ph, cityflow_hangzhou4x4_4ph]
+
+controllers:
+  gatppo: {seeds: [0, 1, 2]}
+
+  gatppo_mask_k24:
+    agent: gatppo
+    seeds: [0, 1, 2]
+    mask: {k_max: 24}
+
+  gatppo_mask_k16:
+    agent: gatppo
+    seeds: [0, 1, 2]
+    mask: {k_max: 16}
+
+  gatppo_mask_k8:
+    agent: gatppo
+    seeds: [0, 1, 2]
+    mask: {k_max: 8}
+
+  gatppo_mask_k4:
+    agent: gatppo
+    seeds: [0, 1, 2]
+    mask: {k_max: 4}
+
+  fixedtime: {}
+
+scenarios:
+  - {kind: gauss, level: 2.0}
+  - {kind: mask, level: 0.25}
+  - {kind: mask, level: 0.5}
+  - {kind: mask, level: 0.25, unit: intersection}
+  - {kind: mask, level: 0.5, unit: intersection}
+  - {kind: mask, level: 0.25, substitution: hold, onset: 60}
+  - {kind: mask, level: 0.5, substitution: hold, onset: 60}

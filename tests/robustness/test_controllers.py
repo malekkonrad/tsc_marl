@@ -524,6 +524,115 @@ def gated(env, *, trace=False, **kwargs):
     return c.GatedController(polityka, regula, c.OracleGate(env, **kwargs), trace=trace)
 
 
+# ------------------------------------------------- action masking (Faza 4)
+
+
+def masked(n_nodes=2, n_phases=4, legalne=None, k_max=3, akcja=0):
+    """Polityka-atrapa wybierająca ZAWSZE `akcja` — czyli głodząca wszystko inne.
+    `legalne[i]` = ile faz ma naprawdę węzeł i."""
+    legalne = legalne or [n_phases] * n_nodes
+    legal = np.zeros((n_nodes, n_phases), dtype=bool)
+    for i, k in enumerate(legalne):
+        legal[i, :k] = True
+    polityka = SimpleNamespace(act=lambda obs: np.full(n_nodes, akcja))
+    return c.MaskedController(polityka, legal=legal, k_max=k_max)
+
+
+def test_maska_wymusza_zaglodzona_faze():
+    """Polityka trzyma fazę 0 w nieskończoność. Przy k_max=3 maska musi wejść
+    najpóźniej w 4. decyzji i oddać zielone fazie, która czeka najdłużej."""
+    m = masked(n_nodes=1, n_phases=3, k_max=3)
+    wybrane = [int(m.act(None)[0]) for _ in range(8)]
+    assert wybrane[:3] == [0, 0, 0], "przed progiem maska milczy"
+    assert set(wybrane[3:]) != {0}, "po progu musi wymusić coś innego"
+    assert m.episode_stats()["mask_forced"] > 0
+
+
+def test_maska_trzyma_GWARANCJE_wieku_obslugi():
+    """H1 planu `t2_mask` i jedyny test POPRAWNOŚCI, nie wyniku. Przy kilku fazach
+    przeterminowanych naraz obsłużyć można jedną, więc gwarancja nie jest twardym
+    `k_max`, a `k_max + liczba_legalnych_faz − 1`. Ten test liczy faktyczny wiek
+    krok po kroku i sprawdza tę granicę — gdyby wybór szedł po INDEKSIE zamiast po
+    wieku, ostatnia faza zostałaby zagłodzona na zawsze i granica pękłaby."""
+    n_faz, k_max = 4, 3
+    m = masked(n_nodes=1, n_phases=n_faz, k_max=k_max)
+    wiek = np.zeros(n_faz, dtype=int)
+    najstarszy = 0
+    for _ in range(200):
+        a = int(m.act(None)[0])
+        wiek += 1
+        wiek[a] = 0
+        najstarszy = max(najstarszy, int(wiek.max()))
+    assert najstarszy <= k_max + n_faz - 1, f"wiek {najstarszy} > granicy {k_max + n_faz - 1}"
+
+
+def test_maska_NIE_wymusza_fazy_nieistniejacej():
+    """Ta sama pułapka co w metrykach ogona: `n_phases` to maksimum po sieci, więc
+    węzeł o 2 fazach ma resztę kolumn martwych. Wymuszenie takiej kolumny oznaczałoby
+    akcję poza przestrzenią decyzji tego skrzyżowania — na sieci niejednorodnej
+    (Kraków: 2–7 faz) sterowanie w pustkę."""
+    m = masked(n_nodes=1, n_phases=5, legalne=[2], k_max=2)
+    wybrane = {int(m.act(None)[0]) for _ in range(40)}
+    assert wybrane <= {0, 1}, f"maska wyszła poza legalne fazy: {wybrane}"
+
+
+def test_maska_liczy_tylko_NADPISANIA_nie_zgodnosci():
+    """`mask_share` musi mierzyć nadpisania, nie aktywność — mechanizm, który się
+    zgodził z polityką, jest wobec wyniku no-opem. Ta sama zasada co `gate_share`."""
+    # polityka sama obraca fazami, więc nic nie ma prawa się przeterminować
+    licznik = {"i": -1}
+
+    def obrot(_obs):
+        licznik["i"] += 1
+        return np.array([licznik["i"] % 2])
+
+    m = c.MaskedController(SimpleNamespace(act=obrot), legal=np.array([[True, True]]), k_max=3)
+    for _ in range(20):
+        m.act(None)
+    assert m.episode_stats() == {"mask_share": 0.0, "mask_forced": 0.0}
+
+
+def test_maska_zeruje_wiek_na_starcie_epizodu():
+    """`reset_stats` woła `robustness/degrade.py` na starcie KAŻDEGO epizodu. Bez
+    zerowania pierwsze decyzje nowego epizodu wymuszałyby fazy z zaległości poprzedniego
+    — ten sam błąd, przed którym broni się okno bramki UQ."""
+    m = masked(n_nodes=1, n_phases=3, k_max=3)
+    for _ in range(10):
+        m.act(None)
+    m.reset_stats()
+    assert [int(m.act(None)[0]) for _ in range(3)] == [0, 0, 0]
+
+
+def test_maska_odrzuca_bezsensowne_k_max():
+    with pytest.raises(ValueError, match="k_max"):
+        masked(k_max=0)
+
+
+def test_plan_t2_mask_sie_laduje():
+    from tsc_marl.analysis.degradation import mechanism_pairs  # noqa: PLC0415
+
+    plan = d.load_plan("t2_mask")
+    assert plan.kind("gatppo_mask_k16") == "policy_mask"
+    # cztery ograniczenia, wszystkie przeciw rdzeniowi -> jedna zbiorcza tabela
+    assert {b for _, b in mechanism_pairs(plan)} == {"gatppo"}
+    assert len(mechanism_pairs(plan)) == 4
+
+
+def test_plan_odrzuca_maske_bez_k_max(tmp_path):
+    """`k_max` JEST całym mechanizmem tej maski. Literówka w nazwie klucza dałaby
+    po cichu wartość domyślną, a sweep po ograniczeniu policzyłby jedną kolumnę
+    i pominął trzy jako „jest wynik" — ta sama pułapka co przy τ i progach bramki."""
+    p = plan_file(tmp_path)
+    p.write_text(
+        p.read_text().replace(
+            "  fixedtime: {}",
+            "  gatppo_m:\n    agent: gatppo\n    mask: {kmax: 8}\n  fixedtime: {}",
+        )
+    )
+    with pytest.raises(SystemExit, match="k_max"):
+        d.load_plan(p)
+
+
 def test_slad_bramki_wyjasnia_POJEDYNCZE_przelaczenie():
     """Instrumentacja pod explainability (Faza 4). `gate_share` mówi ILE par
     (decyzja, węzeł) przejęła reguła — nie mówi KTÓRE ani KIEDY, a wyjaśnienie

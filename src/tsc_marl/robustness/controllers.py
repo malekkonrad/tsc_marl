@@ -373,6 +373,94 @@ class GatedController:
         return out
 
 
+class MaskedController:
+    """ACTION MASKING: twarde ograniczenie WIEKU OBSŁUGI. Żadna legalna faza nie może
+    czekać dłużej niż `k_max` decyzji — gdy czeka, maska nadpisuje wybór polityki
+    najstarszą przeterminowaną fazą.
+
+    DLACZEGO BEZ SYGNAŁU O POPYCIE, choć „wymuś tylko tam, gdzie ktoś stoi" brzmi
+    mądrzej. Dwa powody, oba rozstrzygające:
+
+    1. **Deployowalność.** Popyt per RUCH dałoby się czytać z wektora obserwacji, ale
+       pierwszy blok cech to przy stanie `ats` znormalizowane ciśnienie ruchu, które
+       bywa UJEMNE — „popyt > 0" nie jest z niego odczytywalny bez arbitralnego progu.
+       Czytanie prawdy z silnika byłoby wyrocznią, nie sterownikiem.
+    2. **Odporność z KONSTRUKCJI.** Ta maska nie czyta ŻADNEGO czujnika — liczy
+       wyłącznie własne akcje. Jest więc niewrażliwa na awarię detektorów, a to jest
+       dokładnie reżim, w którym rdzeń porzuca kierunki: pod maskami `wait_max` rdzenia
+       to 2386–3160 s przy epizodzie 3600 s (`faza3-po-t2.md` §8.7). Mechanizm, który
+       tego nie widzi przez czujnik, bo go nie potrzebuje, jest w tym reżimie mocniejszy
+       niż jakikolwiek oparty na odczytach.
+
+    Spełnia trzy warunki opłacalności z §7.7 Z DEFINICJI: (1) nie jest estymatorem
+    niepewności, tylko licznikiem własnych decyzji; (2) jest tani, gdy się myli —
+    wymuszenie pustej fazy kosztuje jeden interwał; (3) jest DYSKRETNYM ograniczeniem
+    zbioru akcji, nie ciągłym przeważeniem, na które polityka nie była trenowana.
+
+    OGRANICZENIE GWARANCJI, do nazwania w tekście. Przy jednej przeterminowanej fazie
+    na węzeł wiek nie przekroczy `k_max + 1` decyzji. Gdy przeterminowanych jest kilka
+    naraz, obsłużyć można jedną, więc w najgorszym razie wiek dobija do
+    `k_max + liczba_legalnych_faz − 1`. To NIE jest twarde `k_max` i tak trzeba to podać.
+
+    CZEGO TA MASKA NIE ROBI: nie dotyka strefy dylematu (wymaga prędkości i odległości
+    pojazdu, czego stan nie niesie — u [[bodagala-2026-ucatsc]] to osobny filtr na SUMO)
+    ani minimalnego zielonego (`t_min` pilnuje zatrzask w silniku).
+    """
+
+    def __init__(
+        self,
+        policy: Controller,
+        *,
+        legal: np.ndarray,
+        k_max: int,
+        name: str = "masked",
+    ) -> None:
+        if k_max < 1:
+            raise ValueError(f"k_max musi być ≥ 1, jest {k_max}")
+        self.policy = policy
+        self.legal = np.asarray(legal, dtype=bool)  # [N, n_faz]
+        self.k_max = int(k_max)
+        self.name = name
+        self.reset_stats()
+
+    def reset_stats(self) -> None:
+        """Zeruje wiek na starcie epizodu — tak jak `GatedController` zeruje okno
+        i histerezę. Bez tego pierwsze decyzje nowego epizodu wymuszałyby fazy na
+        podstawie zaległości z poprzedniego."""
+        self._since = np.zeros(self.legal.shape, dtype=np.int64)
+        self._nadpisane = 0
+        self._decyzje = 0
+
+    def act(self, obs: np.ndarray) -> np.ndarray:
+        akcje = np.asarray(self.policy.act(obs), dtype=np.int64).copy()
+        # Przeterminowane = legalne ORAZ czekające co najmniej `k_max` decyzji.
+        spozniona = self.legal & (self._since >= self.k_max)
+        wymus = spozniona.any(-1)
+        if wymus.any():
+            # NAJSTARSZA przeterminowana, nie pierwsza z indeksu: przy kilku naraz
+            # kolejność po wieku daje round-robin, a po indeksie zagłodziłaby ostatnią.
+            wiek = np.where(spozniona, self._since, -1)
+            wybor = wiek.argmax(-1)
+            self._nadpisane += int((wymus & (akcje != wybor)).sum())
+            akcje = np.where(wymus, wybor, akcje)
+        self._since += 1
+        self._since[np.arange(len(akcje)), akcje] = 0
+        self._decyzje += 1
+        return akcje
+
+    def episode_stats(self) -> dict[str, float]:
+        """`mask_share` = odsetek par (decyzja, węzeł), w których maska ZMIENIŁA akcję
+        polityki — nie tych, w których była aktywna i zgodziła się z polityką. Ta sama
+        zasada co przy `gate_share` i z tego samego powodu: mechanizm, który nic nie
+        nadpisał, jest wobec wyniku no-opem i musi to być widoczne."""
+        if not self._decyzje:
+            return {}
+        return {
+            "mask_share": float(self._nadpisane / (self._decyzje * len(self.legal))),
+            "mask_forced": float(self._nadpisane),
+        }
+
+
 class OracleGate:
     """Bramka-WYROCZNIA: czyta prawdę z warstwy awarii, nie z obserwacji.
 

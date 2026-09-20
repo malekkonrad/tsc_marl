@@ -46,7 +46,9 @@ KINDS = {
 #: „rdzeń + UW-attention" różnią się wyłącznie mechanizmem — ten sam plik z wagami.
 #: `policy_gate` = TEN SAM checkpoint co `policy`, ale akcja każdego węzła idzie
 #: z polityki ALBO z reguły, zależnie od bramki (Faza 3, dolny poziom fallbacku).
-LEARNED = ("policy", "colight", "ensemble", "policy_uw", "policy_gate")
+#: `policy_mask` = TEN SAM checkpoint co `policy`, ale akcja węzła jest nadpisywana,
+#: gdy legalna faza czeka dłużej niż `k_max` decyzji (Faza 4, action masking).
+LEARNED = ("policy", "colight", "ensemble", "policy_uw", "policy_gate", "policy_mask")
 #: Rodzaje bramek. `oracle` czyta prawdę z warstwy awarii i jest GÓRNYM
 #: OGRANICZENIEM, nie sterownikiem do wdrożenia. `rule` (licznik zamrożonych
 #: detektorów) i `uq` (głowa obserwacyjna) są wdrażalne i mierzy się je WZGLĘDEM
@@ -57,7 +59,7 @@ GATE_KINDS = ("oracle", "rule", "uq")
 #: MUSZĄ wejść do odcisku biegu (`unit_params`), inaczej sweep po τ albo po progu
 #: liczy pierwszą wartość, a każdą następną pomija jako „jest wynik" — ten sam błąd,
 #: przed którym ostrzega docstring `FailureSpec`.
-MECHANISM_KEYS = ("uw", "gate")
+MECHANISM_KEYS = ("uw", "gate", "mask")
 #: Sufiks wariantu ruchu w nazwie sieci (`_d0p25`, `_d1p5`, `_r2000`, `_r5816`). `{base}`
 #: w szablonie rodzica = sieć bez sufiksu, czyli sieć, NA KTÓREJ polityka się uczyła.
 VARIANT_SUFFIX = re.compile(r"_(?:d\d+(?:p\d+)?|r\d+)$")
@@ -128,6 +130,8 @@ class Plan:
             return "policy_uw"
         if spec.get("gate"):
             return "policy_gate"
+        if spec.get("mask"):
+            return "policy_mask"
         return KINDS[self.agent(controller)]
 
     def baseline(self, controller: str) -> str | None:
@@ -239,6 +243,17 @@ def load_plan(path: str | Path) -> Plan:
                     f"plan '{p.name}': bramka '{label}' ma kind="
                     f"{spec['gate'].get('kind')!r}, dozwolone: {GATE_KINDS}"
                 )
+        if spec.get("mask"):
+            if KINDS[plan.agent(label)] != "policy":
+                raise SystemExit(f"plan '{p.name}': maska tylko z actorem rdzenia ('{label}')")
+            # `k_max` jest CAŁYM mechanizmem tej maski — literówka w nazwie klucza dałaby
+            # po cichu wartość domyślną i sweep po ograniczeniu liczyłby jedną kolumnę.
+            if "k_max" not in spec["mask"]:
+                raise SystemExit(
+                    f"plan '{p.name}': maska '{label}' musi podać `k_max` (liczba decyzji)"
+                )
+            if int(spec["mask"]["k_max"]) < 1:
+                raise SystemExit(f"plan '{p.name}': maska '{label}' ma k_max < 1")
         baza = spec.get("baseline")
         if baza is not None and baza not in plan.controllers:
             raise SystemExit(
