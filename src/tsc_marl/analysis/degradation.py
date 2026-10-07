@@ -71,6 +71,12 @@ COLORS = {
     # odróżniały się od rdzenia (slot 1) także w symulacji CVD
     "gatppo_fail": "#00a3a3",
     "gatppo_fail_uw": "#a8442c",
+    # t2_uw_src: strona celu zostaje w kolorze `gatppo_uw`, strona źródła dostaje
+    # ciemniejszy odcień tej samej barwy — to jeden mechanizm w dwóch mapowaniach,
+    # nie dwa różne mechanizmy
+    "gatppo_uw_src": "#8c1c40",
+    # wyrocznia modulacji: fiolet wyroczni bramki — ta sama rola (sufit), inny mechanizm
+    "gatppo_uw_oracle": "#7a4fd6",
 }
 LABELS = {
     "gatppo": "rdzeń GAT+PPO+CTDE",
@@ -96,6 +102,8 @@ LABELS = {
     "gatppo_fail": "rdzeń trenowany z awariami",
     "gatppo_fail_uw": "rdzeń z awariami + UW-attention",
     "gatppo_fail_gate_rule": "rdzeń z awariami + bramka: reguła",
+    "gatppo_uw_src": "rdzeń + UW-attention (strona źródła)",
+    "gatppo_uw_oracle": "UW-attention: wyrocznia (sufit)",
 }
 INK, INK2, MUTED = "#0b0b0b", "#52514e", "#898781"
 GRID, AXIS, SURFACE = "#e1e0d9", "#c3c2b7", "#fcfcfb"

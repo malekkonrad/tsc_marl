@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
 
 from tsc_marl.domain.sensors import FailureSpec
 from tsc_marl.robustness import controllers as c
@@ -223,6 +224,34 @@ def test_odcisk_biegu_widzi_parametry_mechanizmu(tmp_path):
     duzy = d.load_plan(plan_uw(katalogi[1], tau=0.50))
     assert odcisk(maly, "gatppo_uw") != odcisk(duzy, "gatppo_uw")
     assert odcisk(maly, "gatppo") == odcisk(duzy, "gatppo")
+
+
+def plan_uw_side(tmp_path, side: str):
+    p = plan_uw(tmp_path)
+    p.write_text(p.read_text().replace("uw: {tau: 0.25}", f"uw: {{tau: 0.25, side: {side}}}"))
+    return p
+
+
+def test_strona_krawedzi_zmienia_odcisk_biegu(tmp_path):
+    """`side` siedzi w `uw`, więc wchodzi do odcisku. Bez tego kolumna `source`
+    zostałaby pominięta jako „jest wynik" policzonej kolumny `target`."""
+    from runlog import params_hash  # noqa: PLC0415
+    from tsc_marl.runner.degrade import unit_params  # noqa: PLC0415
+
+    rodzic = [SimpleNamespace(id="rodzic", meta={"params_hash": "abc"})]
+    odciski = []
+    for side in ("target", "source"):
+        (tmp_path / side).mkdir()
+        plan = d.load_plan(plan_uw_side(tmp_path / side, side))
+        odciski.append(params_hash(unit_params(plan, d.Unit("gatppo_uw", "siec_a", 0), rodzic)))
+    assert odciski[0] != odciski[1]
+
+
+def test_literowka_w_stronie_krawedzi_odrzucona(tmp_path):
+    """Pomylone `side` nie może po cichu dać `target` — kolumna podpisana „source"
+    powtórzyłaby wtedy `t2_uw` pod nową nazwą."""
+    with pytest.raises(SystemExit, match="side"):
+        d.load_plan(plan_uw_side(tmp_path, "src"))
 
 
 def test_plan_uw_tylko_z_actorem_rdzenia(tmp_path):
@@ -881,3 +910,132 @@ def test_summarize_usrednia_metryki_obecne_tylko_w_czesci_losowan():
     out = d.summarize(rows)
     assert out["att__mask0p5"] == pytest.approx(750.0)
     assert out["gate_recall__mask0p5"] == pytest.approx(0.4)  # średnia z OKREŚLONYCH
+
+
+# ------------------------------------------------ wyrocznia modulacji (UW-attention)
+
+GRAF = torch.tensor([[0, 1, 2], [1, 2, 3]])  # (źródło, cel): 0→1, 1→2, 2→3
+
+
+def test_wyrocznia_modulacji_wygasza_krawedz_OD_martwego_wezla():
+    """Strona źródła: martwy węzeł 1 (oba pasy wjazdowe) ma wygasić krawędź 1→2,
+    którą niesie jego wiadomość, i własną pętlę — a NIE krawędź 0→1, którą
+    niesie zdrowy sąsiad 0. Układ log ρ: [0→1, 1→2, 2→3, pętle 0..3]."""
+    env = SimpleNamespace(features=features({"1_a", "1_b"}))
+    lr = c.OracleUncertainty(env, GRAF, tau=0.5).log_rho(np.zeros((4, 3)))
+    assert lr.tolist() == [0.0, -2.0, 0.0, 0.0, -2.0, 0.0, 0.0]
+
+
+def test_wyrocznia_modulacji_ulamek_pasow_i_tau():
+    """u = ułamek MARTWYCH pasów wjazdowych (ta sama definicja co `OracleGate`),
+    log ρ = −u/τ. Pół węzła przy τ = 0,25 to −2 naty."""
+    env = SimpleNamespace(features=features({"2_a"}))
+    lr = c.OracleUncertainty(env, GRAF, tau=0.25).log_rho(np.zeros((4, 3)))
+    assert lr[2].item() == pytest.approx(-2.0)  # krawędź 2→3
+    assert lr[3 + 2].item() == pytest.approx(-2.0)  # pętla węzła 2
+
+
+@pytest.mark.parametrize("kwargs", [{"sensors": False}, {"live": False}])
+def test_wyrocznia_modulacji_milczy_na_czystym_i_przed_onsetem(kwargs):
+    """A3a jako TOŻSAMOŚĆ: bez warstwy awarii (czysty scenariusz) i przed `onset`
+    log ρ ma być zerem — wyrocznia nie ma `u_ref`, więc nie ma czego kalibrować."""
+    env = SimpleNamespace(features=features({"1_a", "1_b"}, **kwargs))
+    lr = c.OracleUncertainty(env, GRAF, tau=0.25).log_rho(np.zeros((4, 3)))
+    assert (lr == 0).all()
+
+
+def test_wyrocznia_modulacji_czyta_biezacy_scenariusz():
+    """`env`, nie `env.features`: degrade podmienia `features` przy każdym scenariuszu,
+    a sterownik powstaje raz. Zapamiętany snapshot = wyrocznia ślepa na zawsze."""
+    env = SimpleNamespace(features=features(sensors=False))
+    orakl = c.OracleUncertainty(env, GRAF, tau=0.25)
+    assert (orakl.log_rho(np.zeros((4, 3))) == 0).all()
+    env.features = features({"0_a", "0_b"})
+    assert orakl.log_rho(np.zeros((4, 3)))[0].item() == pytest.approx(-4.0)
+
+
+def test_wyrocznia_modulacji_w_sterowniku_uw():
+    """Wpina się w `UWPolicyController` bez zmian i daje diagnostykę `uw_spread`."""
+    widziane = {}
+
+    def actor(x, edge_index, log_rho=None):
+        widziane["log_rho"] = log_rho
+        return torch.zeros(x.shape[0], 2)
+
+    actor.eval = lambda: actor
+    env = SimpleNamespace(features=features({"1_a", "1_b"}))
+    ster = c.UWPolicyController(actor, GRAF, c.OracleUncertainty(env, GRAF, tau=0.25))
+    ster.act(np.zeros((4, 3), np.float32))
+    assert widziane["log_rho"][1].item() == pytest.approx(-4.0)
+    assert ster.episode_stats()["uw_spread"] > 0
+
+
+def plan_uw_spec(tmp_path, spec: str):
+    p = plan_uw(tmp_path)
+    p.write_text(p.read_text().replace("uw: {tau: 0.25}", f"uw: {{{spec}}}"))
+    return p
+
+
+def test_wyrocznia_modulacji_wymaga_strony_zrodla(tmp_path):
+    with pytest.raises(SystemExit, match="side: source"):
+        d.load_plan(plan_uw_spec(tmp_path, "tau: 0.25, u: oracle"))
+
+
+def test_literowka_w_zrodle_u_odrzucona(tmp_path):
+    """„wyrocznia" z literówką nie może po cichu liczyć głową."""
+    with pytest.raises(SystemExit, match="u="):
+        d.load_plan(plan_uw_spec(tmp_path, "tau: 0.25, side: source, u: orcale"))
+
+
+def test_wyrocznia_modulacji_ma_wlasny_odcisk(tmp_path):
+    from runlog import params_hash  # noqa: PLC0415
+    from tsc_marl.runner.degrade import unit_params  # noqa: PLC0415
+
+    rodzic = [SimpleNamespace(id="rodzic", meta={"params_hash": "abc"})]
+    odciski = []
+    for i, spec in enumerate(["tau: 0.25, side: source", "tau: 0.25, side: source, u: oracle"]):
+        (tmp_path / str(i)).mkdir()
+        plan = d.load_plan(plan_uw_spec(tmp_path / str(i), spec))
+        odciski.append(params_hash(unit_params(plan, d.Unit("gatppo_uw", "siec_a", 0), rodzic)))
+    assert odciski[0] != odciski[1]
+
+
+@pytest.mark.slow
+def test_wyrocznia_modulacji_na_prawdziwym_cityflow(advanced_colight_world):
+    """Atrapy wyżej sprawdzają arytmetykę; tu — że wyrocznia czyta PRAWDZIWY
+    `StateBuilder` podmieniany przez `degrade.evaluate` per scenariusz: na czystym
+    milczy, przy martwych skrzyżowaniach wygasza dokładnie krawędzie WYCHODZĄCE
+    z martwych węzłów i ich pętle, a zdrowe krawędzie zostawia w spokoju."""
+    from tsc_marl.core.features import StateBuilder  # noqa: PLC0415
+    from tsc_marl.core.loop import CoreTrainer, LoopConfig  # noqa: PLC0415
+
+    world, _ = advanced_colight_world
+    torch.manual_seed(0)
+    trainer = CoreTrainer.from_world(
+        world, loop_config=LoopConfig(steps=60, test_steps=60, episodes=1)
+    )
+    env = trainer.env
+    order = env.graph.order_intersections(world)
+    orakl = c.OracleUncertainty(env, env.graph.edge_index, tau=0.25)
+    ster = c.UWPolicyController(trainer.ppo.ac.actor, env.graph.edge_index, orakl)
+
+    czysty = FailureSpec()
+    martwe = FailureSpec(kind="mask", level=0.5, unit="intersection")
+    rows = d.evaluate(
+        env,
+        ster,
+        (czysty, martwe),
+        draws=1,
+        make_builder=lambda spec: StateBuilder.from_registry(world, order, failure=spec),
+        decisions=4,
+    )
+    assert rows[0]["uw_spread"] == 0.0 and rows[0]["uw_active"] == 0.0
+    assert rows[1]["uw_spread"] > 0.0
+
+    lr = orakl.log_rho(None).numpy()  # stan po ostatnim epizodzie: scenariusz `martwe`
+    u = orakl._gate.last_score
+    assert set(np.unique(u)) <= {0.0, 1.0} and u.any() and not u.all()
+    src = env.graph.edge_index[0].numpy()
+    e = len(src)
+    assert np.array_equal(lr[:e] < 0, u[src] == 1.0)
+    assert np.array_equal(lr[e:] < 0, u == 1.0)

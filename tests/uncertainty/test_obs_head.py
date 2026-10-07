@@ -439,3 +439,131 @@ def test_rozstep_w_grupie_liczy_sie_po_CELU_i_z_petla():
     lr = torch.tensor([-1.0, -3.0, 0.0, 0.0, 0.0])  # 2 krawędzie + 3 pętle
     # grupa węzła 1: krawędzie (−1, −3) i pętla (0) -> rozstęp 3; węzły 0 i 2: same pętle
     assert O.group_spread(lr, ei, 3) == pytest.approx(1.0)
+
+
+# ------------------------------------------- strona krawędzi: cel vs źródło (t2_uw_src)
+
+
+def _ref_zerowe(side: str) -> O.EdgeReference:
+    """Odniesienie zerowe na fiksturze 0→1, 1→2: log ρ = −u/τ wprost, bez progu."""
+    return O.EdgeReference(
+        u_edge=np.zeros(2),
+        u_self=np.zeros(3),
+        edges=((1, 0), (2, 1)),
+        network="fake",
+        k=0.0,
+        scenario="clean",
+        head_sha="x",
+        side=side,
+    )
+
+
+def test_zrodlo_agreguje_wszystkie_ruchy_zrodla_a_krawedzie_bez_zmian():
+    """`source` bierze WSZYSTKIE ruchy węzła j (też brzegowe — `x_j` ma cechy każdego
+    z nich), a zbiór i kolejność `edges` zostają te same co przy `target`. Inna
+    kolejność przy tym samym zbiorze krawędzi przeszłaby przez `log_rho` bez błędu."""
+    u = np.array([[[1.0, 3.0], [10.0, 20.0], [0.0, 0.0]]])  # [T=1, N=3, n_mov=2]
+    sources = np.array([[-1, -1], [0, 0], [1, 1]])  # 0→1, 1→2
+    u_cel, e_cel = O.edge_uncertainty(u, sources, "mean", side="target")
+    u_zr, e_zr = O.edge_uncertainty(u, sources, "mean", side="source")
+    assert e_cel == e_zr == [(1, 0), (2, 1)]
+    # krawędź 0→1: cel = ruchy węzła 1 z węzła 0 (15), źródło = ruchy węzła 0 (2)
+    assert u_cel[0].tolist() == [15.0, 0.0]
+    assert u_zr[0].tolist() == [2.0, 15.0]
+
+
+def test_martwe_zrodlo_wygasza_krawedz_od_niego_tylko_po_stronie_zrodla():
+    """SEDNO wariantu. Węzeł 0 ma popsute odczyty, reszta zdrowa. Wiadomość na
+    krawędzi 0→1 to `hidden_embedding(x_0)`, więc to ONA ma zostać wygaszona.
+
+    Po stronie celu u krawędzi 0→1 liczy się z ruchów węzła 1 — zdrowych — i log ρ
+    zostaje zerem: węzeł 1 dalej w pełni ufa zepsutemu sąsiadowi. Po stronie źródła
+    wygasza się dokładnie ta krawędź. Pętla własna węzła 0 jest w obu wariantach
+    taka sama (średnia jego ruchów) — strona dotyczy wyłącznie krawędzi."""
+    u_mov = np.array([[4.0, 4.0], [0.0, 0.0], [0.0, 0.0]])  # [N, n_mov]
+    sources = np.array([[-1, -1], [0, 0], [1, 1]])
+    ei = torch.tensor([[0, 1], [1, 2]])  # (źródło, cel): 0→1, 1→2
+    wynik = {}
+    for side in O.EDGE_SIDES:
+        u_edge, _ = O.edge_uncertainty(u_mov[None], sources, "mean", side=side)
+        wynik[side] = O.log_rho(u_edge[0], u_mov.mean(-1), _ref_zerowe(side), ei, tau=1.0)
+    # układ: [0→1, 1→2, pętla 0, pętla 1, pętla 2]
+    assert wynik["target"].tolist() == [0.0, 0.0, -4.0, 0.0, 0.0]
+    assert wynik["source"].tolist() == [-4.0, 0.0, -4.0, 0.0, 0.0]
+
+
+def test_martwe_skrzyzowanie_po_stronie_celu_jest_niezmiennicze():
+    """Dlaczego po stronie celu `unit: intersection` wychodziło na zero „z definicji":
+    zepsute wszystkie ruchy węzła 1 dają TĘ SAMĄ karę na każdej krawędzi jego grupy
+    softmaxu (0→1 i pętla 1), a na wspólną stałą softmax jest niezmienniczy. Po stronie
+    źródła grupa węzła 1 ma rozstęp: zdrowy sąsiad 0 zostaje, własna pętla spada."""
+    u_mov = np.array([[0.0, 0.0], [4.0, 4.0], [0.0, 0.0]])
+    sources = np.array([[-1, -1], [0, 0], [1, 1]])
+    ei = torch.tensor([[0, 1], [1, 2]])
+    spread = {}
+    for side in O.EDGE_SIDES:
+        u_edge, _ = O.edge_uncertainty(u_mov[None], sources, "mean", side=side)
+        lr = O.log_rho(u_edge[0], u_mov.mean(-1), _ref_zerowe(side), ei, tau=1.0)
+        grupa_1 = lr[[0, 3]]  # krawędź 0→1 i pętla 1 — wszystko, co wchodzi do 1
+        spread[side] = float(grupa_1.max() - grupa_1.min())
+    assert spread["target"] == 0.0
+    assert spread["source"] == 4.0
+
+
+def test_nieznana_strona_odrzucona():
+    u = np.zeros((1, 3, 2))
+    sources = np.array([[-1, -1], [0, 0], [1, 1]])
+    with pytest.raises(ValueError, match="side"):
+        O.edge_uncertainty(u, sources, "mean", side="src")
+    with pytest.raises(ValueError, match="side"):
+        O.reference_path("fake", "src")
+
+
+def test_odniesienie_niesie_strone_przez_zapis(tmp_path):
+    """Strona jedzie W PLIKU: u_ref po stronie celu użyte z u po stronie źródła to
+    poprawnie wyglądające liczby o innym znaczeniu. Pliki sprzed wariantu nie mają
+    pola i czytają się jako `target` — tak zostały policzone."""
+    fitted = _fitted_maly()
+    ref, glowa = _ref_maly(tmp_path, fitted, side="source")
+    assert ref.side == "source"
+    wczytane = O.load_reference(ref.save(tmp_path / "u_ref.npz"), head=glowa)
+    assert wczytane.side == "source"
+    assert np.array_equal(wczytane.u_edge, ref.u_edge)
+
+    blob = dict(np.load(tmp_path / "u_ref.npz"))
+    del blob["side"]
+    np.savez(tmp_path / "stary.npz", **blob)
+    assert O.load_reference(tmp_path / "stary.npz").side == "target"
+
+
+def test_odniesienie_zrodla_rozni_sie_od_celu(tmp_path):
+    """Ta sama głowa, te same krawędzie, inne u_ref — inaczej wariant `source`
+    liczyłby nadmiar względem progu drugiej strony."""
+    fitted = _fitted_maly()
+    cel, _ = _ref_maly(tmp_path, fitted)
+    zr, _ = _ref_maly(tmp_path, fitted, side="source")
+    assert cel.edges == zr.edges and cel.head_sha == zr.head_sha
+    assert np.array_equal(cel.u_self, zr.u_self)
+    assert not np.allclose(cel.u_edge, zr.u_edge)
+
+
+def test_sciezka_odniesienia_celu_bez_zmian():
+    """Policzone plany (`t2_uw`, `t2_uw_tau`, `t2_train_uw`) czytają starą nazwę."""
+    assert O.reference_path("siec").name == "u_ref__siec.npz"
+    assert O.reference_path("siec", "source").name == "u_ref__siec__source.npz"
+
+
+def test_online_po_stronie_zrodla_liczy_to_samo_co_offline(tmp_path):
+    """`OnlineUncertainty` bierze stronę z ODNIESIENIA. Gdyby liczył u po stronie
+    celu przy u_ref ze źródła, log ρ wyszedłby poprawnej długości i bez wyjątku."""
+    data, fitted = fake(), _fitted_maly()
+    ref, _ = _ref_maly(tmp_path, fitted, side="source")
+    _, sigma = fitted.predict(data, data.x["gauss1"])
+    u_mov = O.movement_uncertainty(sigma / fitted.y_std, 2)
+    u_edge, _ = O.edge_uncertainty(u_mov, SOURCES, "mean", side="source")
+    online = O.OnlineUncertainty(fitted, ref, SOURCES, EI, tau=1.0)
+
+    x = data.x["gauss1"]
+    for t in np.flatnonzero(data.episode == 0)[:20]:
+        offline = O.log_rho(u_edge[t], u_mov[t].mean(-1), ref, EI, tau=1.0)
+        assert torch.allclose(online.log_rho(x[t]), offline, atol=1e-6)

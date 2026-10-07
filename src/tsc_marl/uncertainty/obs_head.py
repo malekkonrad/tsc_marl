@@ -414,6 +414,10 @@ class EdgeReference:
     k: float
     scenario: str
     head_sha: str
+    #: Który koniec krawędzi niesie jej u — patrz `EDGE_SIDES`. Część odniesienia, bo
+    #: `u_edge` policzone po stronie celu i po stronie źródła to inne liczby przy TYCH
+    #: SAMYCH `edges`: pomylone nie rzucą wyjątkiem, tylko przesuną próg.
+    side: str = "target"
 
     def save(self, path: str | Path) -> Path:
         path = Path(path)
@@ -428,6 +432,7 @@ class EdgeReference:
             k=np.array(self.k),
             scenario=np.array(self.scenario),
             head_sha=np.array(self.head_sha),
+            side=np.array(self.side),
         )
         return path
 
@@ -440,10 +445,14 @@ def file_sha(path: str | Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:16]
 
 
-def reference_path(network: str) -> Path:
+def reference_path(network: str, side: str = "target") -> Path:
+    """`target` zostaje pod starą nazwą — policzone plany (`t2_uw`, `t2_uw_tau`,
+    `t2_train_uw`) czytają ją i mają ją czytać dalej bez przeliczania."""
     from tsc_marl.paths import RUNS  # noqa: PLC0415
 
-    return RUNS / "heads" / f"u_ref__{network}.npz"
+    _check_side(side)
+    suffix = "" if side == "target" else f"__{side}"
+    return RUNS / "heads" / f"u_ref__{network}{suffix}.npz"
 
 
 def edge_reference(
@@ -455,6 +464,7 @@ def edge_reference(
     head_sha: str,
     k: float = REFERENCE_K,
     scenario: str = "clean",
+    side: str = "target",
 ) -> EdgeReference:
     """Policz odniesienie na TRENINGOWEJ części czystego okna.
 
@@ -465,7 +475,7 @@ def edge_reference(
     train = data.mask(fitted.cfg.split, train=True)
     _, sigma = fitted.predict(data, data.x[scenario])
     u_mov = movement_uncertainty(sigma / fitted.y_std, sources.shape[1])  # [T, N, n_mov]
-    u_edge, edges = edge_uncertainty(u_mov, sources, "mean")
+    u_edge, edges = edge_uncertainty(u_mov, sources, "mean", side=side)
 
     e, s = u_edge[train], u_mov[train].mean(-1)  # pętla własna: ŚREDNIA PO WSZYSTKICH
     return EdgeReference(  # ruchach węzła, też tych z brzegu sieci (decyzja 2 Kroku 4)
@@ -476,6 +486,7 @@ def edge_reference(
         k=float(k),
         scenario=scenario,
         head_sha=head_sha,
+        side=side,
     )
 
 
@@ -494,6 +505,8 @@ def load_reference(
         k=float(blob["k"]),
         scenario=str(blob["scenario"]),
         head_sha=str(blob["head_sha"]),
+        # pliki sprzed wariantu `source` nie mają pola — policzone były po stronie celu
+        side=str(blob["side"]) if "side" in blob.files else "target",
     )
     if network is not None and ref.network != network:
         raise ValueError(f"u_ref policzone na {ref.network!r}, a sieć to {network!r}")
@@ -701,7 +714,9 @@ class OnlineUncertainty:
     def log_rho(self, obs: np.ndarray) -> torch.Tensor:
         """Dołóż odczyt do okna i policz log ρ [E + N] dla TEGO kroku."""
         u_mov = self._u_mov(obs)
-        u_edge, _ = edge_uncertainty(u_mov[None], self.sources, "mean")  # [1, E]
+        # strona z ODNIESIENIA, nie z osobnego argumentu: u i u_ref muszą być liczone
+        # po tej samej stronie, a jedno źródło prawdy nie ma jak się rozjechać
+        u_edge, _ = edge_uncertainty(u_mov[None], self.sources, "mean", side=self.ref.side)
         return log_rho(u_edge[0], u_mov.mean(-1), self.ref, self.edge_index, tau=self.tau)
 
     def _u_mov(self, obs: np.ndarray) -> np.ndarray:
@@ -888,6 +903,26 @@ def train_head(
     return head, ref.save(reference_path(network)), progi.save(gate_path(network))
 
 
+def save_reference(network: str, side: str) -> Path:
+    """Samo `u_ref` dla ISTNIEJĄCEJ głowy — bez przeuczania.
+
+    Osobno od `train_head`, bo ponowne uczenie zmienia plik głowy, a z nim odcisk,
+    na którym stoją policzone `u_ref` i progi bramek: porównanie `target` vs `source`
+    przestałoby być parowane (inna głowa = inne u). Tu głowa zostaje bit w bit ta sama,
+    różni się wyłącznie strona krawędzi.
+    """
+    from tsc_marl.paths import RUNS  # noqa: PLC0415
+
+    head = head_path(network)
+    if not head.is_file():
+        raise SystemExit(f"brak głowy {head} — najpierw: tsc obshead -n {network} --save ...")
+    fitted = load_head(head, network=network)
+    base = load(RUNS / "bc" / f"advancedmp__{network}__ep3" / "dataset.npz")
+    sources = movement_sources(network, base.dead["clean"].shape[-1])
+    ref = edge_reference(fitted, base, sources, network=network, head_sha=file_sha(head), side=side)
+    return ref.save(reference_path(network, side))
+
+
 # ---------------------------------------------------------------- metryki
 
 
@@ -917,12 +952,45 @@ def movement_uncertainty(sigma_std: np.ndarray, n_mov: int) -> np.ndarray:
     return np.max(np.stack(blocks), axis=0)
 
 
-def edge_uncertainty(u_mov: np.ndarray, sources: np.ndarray, how: str = "max"):
+#: Który koniec krawędzi j→i niesie jej niepewność.
+#:
+#:   target — ruchy CELU i, których droga wjazdowa zaczyna się w j (fizyczne pasy
+#:            drogi j→i). Wariant pierwotny, policzony w `t2_uw`/`t2_uw_tau`/`t2_train_uw`.
+#:   source — WSZYSTKIE ruchy ŹRÓDŁA j. To jest wiarygodność WIADOMOŚCI: attention
+#:            na krawędzi j→i waży `hidden_embedding(x_j)`, czyli reprezentację
+#:            z odczytów j, a nie z pasów drogi j→i.
+#:
+#: Różnica jest największa przy martwym skrzyżowaniu j (`unit: intersection`, właściciel
+#: pasa = skrzyżowanie, do którego pas DOJEŻDŻA). Po stronie celu droga j→i należy do
+#: zdrowego i, więc sąsiedzi dalej w pełni ufają śmieciom z j, a w samym j cała grupa
+#: softmaxu jest równo niepewna i modulacja jest tożsamościowa. Po stronie źródła każdy
+#: sąsiad wygasza dokładnie krawędź od j, a j przenosi wagę z własnej pętli na sąsiadów.
+EDGE_SIDES = ("target", "source")
+
+
+def _check_side(side: str) -> None:
+    if side not in EDGE_SIDES:
+        raise ValueError(f"side={side!r}, dozwolone: {EDGE_SIDES}")
+
+
+def edge_uncertainty(
+    u_mov: np.ndarray, sources: np.ndarray, how: str = "max", *, side: str = "target"
+):
     """u ruchów -> u krawędzi (j→i). -> ([T, E], lista (i, j)). Ruchy z brzegu
-    sieci (−1) nie należą do żadnej krawędzi grafu."""
+    sieci (−1) nie należą do żadnej krawędzi grafu.
+
+    Zbiór i KOLEJNOŚĆ `edges` nie zależą od `side` — wyznacza je graf ruchów, a nie
+    to, który koniec krawędzi liczy u. Dzięki temu `log_rho` przepina oba warianty
+    tą samą permutacją, a odniesienie `source` podmienia się bez zmiany kontraktu.
+    Przy `side="source"` agregacja idzie po WSZYSTKICH ruchach j, także brzegowych:
+    `x_j` zawiera cechy każdego z nich."""
+    _check_side(side)
     edges = sorted({(i, int(j)) for i in range(sources.shape[0]) for j in sources[i] if j >= 0})
     agg = np.max if how == "max" else np.mean
-    cols = [agg(u_mov[:, i, sources[i] == j], axis=-1) for i, j in edges]
+    if side == "source":
+        cols = [agg(u_mov[:, j, :], axis=-1) for _i, j in edges]
+    else:
+        cols = [agg(u_mov[:, i, sources[i] == j], axis=-1) for i, j in edges]
     return np.stack(cols, axis=-1), edges
 
 

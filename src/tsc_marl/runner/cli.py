@@ -101,9 +101,17 @@ def obshead(
     save: bool = typer.Option(
         False, help="ucz SAMĄ głowę (bez bramki) i zapisz artefakt -> runs/heads/"
     ),
+    reference: str | None = typer.Option(
+        None,
+        help="policz SAMO u_ref (target|source) dla ISTNIEJĄCEJ głowy, bez przeuczania",
+    ),
 ) -> None:
     """Bramka prototypu 2.2 — głowa obserwacyjna (per ruch → krawędź) -> results/gate_2_2.md."""
     from tsc_marl.uncertainty import obs_head as module
+
+    if reference is not None:
+        print(module.save_reference(network, reference))
+        return
 
     if mask_variants:
         print(module.mask_variants(network=network))

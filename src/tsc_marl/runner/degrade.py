@@ -183,7 +183,14 @@ def build_uncertainty(plan: Plan, unit: Unit, env):
     cięższym ruchu niż w zrzucie u rośnie wszędzie i `relu` wygeneruje nadmiar bez
     awarii; przy lżejszym — zje go (brak fałszywych alarmów).
     """
+    from tsc_marl.robustness import controllers as c  # noqa: PLC0415
     from tsc_marl.robustness.training import online_uncertainty  # noqa: PLC0415
+
+    uw = plan.controllers[unit.controller].get("uw", {})
+    if uw.get("u") == "oracle":
+        # wyrocznia modulacji: prawda z warstwy awarii zamiast głowy — bez artefaktów
+        # `runs/heads/`, więc liczy się także tam, gdzie głowy nie ma
+        return c.OracleUncertainty(env, env.graph.edge_index, tau=float(uw.get("tau", 0.25)))
 
     # Ładowanie artefaktów przez `robustness.training.online_uncertainty` — wspólne
     # z treningiem, żeby dwie kopie nie rozjechały się przy zmianie nazw plików.
@@ -194,6 +201,9 @@ def build_uncertainty(plan: Plan, unit: Unit, env):
         env.features.n_mov,
         env.graph.edge_index,
         tau=plan.controllers[unit.controller].get("uw", {}).get("tau"),
+        # `side` siedzi w `uw`, więc wchodzi do odcisku biegu (`MECHANISM_KEYS`) sam —
+        # kolumna `source` nie zostanie pominięta jako „jest wynik" kolumny `target`
+        side=plan.controllers[unit.controller].get("uw", {}).get("side", "target"),
     )
 
 

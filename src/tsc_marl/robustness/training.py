@@ -161,6 +161,7 @@ def online_uncertainty(
     edge_index: Tensor,
     *,
     tau: float | None = None,
+    side: str = "target",
 ) -> Any:
     """`OnlineUncertainty` z ZAMROŻONYCH artefaktów `runs/heads/` dla tej sieci.
 
@@ -172,17 +173,32 @@ def online_uncertainty(
     `network` ma być siecią BAZOWĄ (bez sufiksu wariantu popytu): artefakty są
     związane z siecią, głowa z JiNan na HangZhou ma AUROC 0,53
     (`results/gate_2_2.md`).
+
+    `side` wybiera PLIK odniesienia (`oh.reference_path`), a strona zapisana w nim
+    musi się z nim zgadzać — plik przemianowany ręcznie dałby u po jednej stronie
+    krawędzi i próg po drugiej, bez żadnego wyjątku.
     """
     from tsc_marl.uncertainty import obs_head as oh  # noqa: PLC0415
 
-    head, ref = oh.head_path(network), oh.reference_path(network)
-    if not head.is_file() or not ref.is_file():
+    head, ref = oh.head_path(network), oh.reference_path(network, side)
+    if not head.is_file():
         raise SystemExit(
-            f"brak głowy obserwacyjnej dla '{network}' ({head.name}, {ref.name}) — "
+            f"brak głowy obserwacyjnej dla '{network}' ({head.name}) — "
             f"policz ją: tsc obshead -n {network} --save --window 12 --persistence"
+        )
+    if not ref.is_file():
+        raise SystemExit(
+            f"brak odniesienia '{ref.name}' dla '{network}' — "
+            + (
+                f"policz je: tsc obshead -n {network} --save --window 12 --persistence"
+                if side == "target"
+                else f"policz je dla istniejącej głowy: tsc obshead -n {network} --reference {side}"
+            )
         )
     fitted = oh.load_head(head, network=network)
     reference = oh.load_reference(ref, network=network, head=head)
+    if reference.side != side:
+        raise SystemExit(f"{ref.name} ma side={reference.side!r}, a plan chce {side!r}")
     sources = oh.movement_sources(network, n_mov)
     return oh.OnlineUncertainty(
         fitted, reference, sources, edge_index, tau=oh.DEFAULT_TAU if tau is None else float(tau)

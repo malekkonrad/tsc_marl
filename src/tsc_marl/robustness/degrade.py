@@ -54,6 +54,9 @@ LEARNED = ("policy", "colight", "ensemble", "policy_uw", "policy_gate", "policy_
 #: detektorów) i `uq` (głowa obserwacyjna) są wdrażalne i mierzy się je WZGLĘDEM
 #: wyroczni — ta ablacja rozstrzyga, czy głowa niepewności zarabia na siebie.
 GATE_KINDS = ("oracle", "rule", "uq")
+#: Skąd UW-attention bierze u: z głowy obserwacyjnej albo z prawdy warstwy awarii
+#: (wyrocznia modulacji — górne ograniczenie, `controllers.OracleUncertainty`).
+UW_SOURCES = ("head", "oracle")
 #: Klucze spec sterownika, które zmieniają MECHANIZM, a nie tylko etykietę kolumny:
 #: `uw` niesie τ modulacji, `gate` — rodzaj bramki, próg i długość cyklu reguły.
 #: MUSZĄ wejść do odcisku biegu (`unit_params`), inaczej sweep po τ albo po progu
@@ -233,6 +236,32 @@ def load_plan(path: str | Path) -> Plan:
             raise SystemExit(f"plan '{p.name}': ensemble '{label}' potrzebuje ≥ 2 seedów")
         if spec.get("uw") and KINDS[plan.agent(label)] != "policy":
             raise SystemExit(f"plan '{p.name}': UW-attention tylko z actorem rdzenia ('{label}')")
+        # Literówka w `side` nie może po cichu dać wariantu domyślnego: kolumna podpisana
+        # „source" liczyłaby wtedy stronę celu, czyli powtórzyła `t2_uw` pod nową nazwą.
+        if spec.get("uw") and "side" in spec["uw"]:
+            # import tu, nie na górze: `obs_head` ciągnie torcha, a ładowanie planu
+            # ma zostać lekkie (`tsc degrade status` bez sieci neuronowych)
+            from tsc_marl.uncertainty.obs_head import EDGE_SIDES  # noqa: PLC0415
+
+            if spec["uw"]["side"] not in EDGE_SIDES:
+                raise SystemExit(
+                    f"plan '{p.name}': UW '{label}' ma side={spec['uw']['side']!r}, "
+                    f"dozwolone: {EDGE_SIDES}"
+                )
+        # Źródło u: głowa (domyślnie) albo wyrocznia. Literówka nie może po cichu dać
+        # głowy — kolumna podpisana „wyrocznia" byłaby wtedy kopią zwykłego UW.
+        if spec.get("uw") and "u" in spec["uw"]:
+            if spec["uw"]["u"] not in UW_SOURCES:
+                raise SystemExit(
+                    f"plan '{p.name}': UW '{label}' ma u={spec['uw']['u']!r}, "
+                    f"dozwolone: {UW_SOURCES}"
+                )
+            # wyrocznia istnieje tylko po stronie źródła (`OracleUncertainty`) — wymagamy
+            # tego JAWNIE, żeby w planie nie stało coś, czego sterownik nie liczy
+            if spec["uw"]["u"] == "oracle" and spec["uw"].get("side") != "source":
+                raise SystemExit(
+                    f"plan '{p.name}': wyrocznia modulacji '{label}' wymaga side: source"
+                )
         if spec.get("gate"):
             if KINDS[plan.agent(label)] != "policy":
                 raise SystemExit(f"plan '{p.name}': bramka tylko z actorem rdzenia ('{label}')")

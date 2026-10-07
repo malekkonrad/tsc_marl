@@ -526,6 +526,53 @@ class OracleGate:
         return self.last_score >= self.threshold
 
 
+class OracleUncertainty:
+    """WYROCZNIA MODULACJI: log ρ dla UW-attention z PRAWDY warstwy awarii, nie z głowy.
+
+    Ta sama rola co `OracleGate` dla bramek: GÓRNE OGRANICZENIE, nie sterownik do
+    wdrożenia. Odpowiada na jedno pytanie, którego `t2_uw`/`t2_uw_src` nie rozstrzygają:
+    czy ważenie sąsiadów wiarygodnością może pomóc PRZY IDEALNYM SYGNALE. Jeśli nie —
+    mechanizm jest martwy niezależnie od głowy i C5 zamyka się bez zastrzeżeń. Jeśli
+    tak — wąskim gardłem była głowa (trafienie 0,54 na zrzucie BC), nie idea.
+
+    u węzła = ułamek jego pasów WJAZDOWYCH w `sensors.broken`, czyli DOKŁADNIE
+    `OracleGate.last_score` — liczone przez nią, żeby „oślepiony węzeł" miał w pracy
+    jedną definicję (i jej znany limit: `pressure` patrzy też na wyjazdy, czyli na
+    detektory sąsiadów w dół strumienia). Tylko STRONA ŹRÓDŁA: krawędź j→i dostaje u(j),
+    bo niesie `hidden_embedding(x_j)`, a pętla własna i→i — u(i). Wariant po stronie
+    celu nie ma tu sensu jako sufit: mierzyłby idealnie coś, co nie jest wiarygodnością
+    wiadomości (`obs_head.EDGE_SIDES`).
+
+        log ρ = −u / τ,  u ∈ [0, 1]
+
+    BEZ `u_ref`: prawda na zdrowej sieci to dokładnie 0 (`sensors is None` albo przed
+    `onset`), więc no-op na czystym (A3a) jest tu tożsamością, nie kalibracją. Przy
+    τ = 0,25 całkowicie martwy węzeł dostaje −4 naty, czyli ~55× mniejszą wagę.
+
+    Interfejs jak `OnlineUncertainty` (`reset`, `log_rho`), więc wpina się w
+    `UWPolicyController` bez zmian i dostaje tę samą diagnostykę `uw_spread`.
+    """
+
+    def __init__(self, env: Any, edge_index: torch.Tensor, *, tau: float) -> None:
+        if tau <= 0:
+            raise ValueError(f"τ musi być dodatnie, jest {tau}")
+        # `env`, nie `env.features` — powód w `OracleGate.__init__`
+        self._gate = OracleGate(env)
+        self.src = edge_index[0].numpy()
+        self.tau = float(tau)
+
+    def reset(self) -> None:
+        self._gate.reset()
+
+    def log_rho(self, obs: np.ndarray) -> torch.Tensor:
+        """[E + N] w kolejności `edge_index`, potem pętle własne — kontrakt
+        `UncertaintyWeightedAttention` (tak dokleja je `add_self_loops`)."""
+        self._gate.mask(obs)
+        u = self._gate.last_score  # [N], zera na czystym i przed onsetem
+        out = -np.concatenate([u[self.src], u]) / self.tau
+        return torch.from_numpy(out.astype(np.float32))
+
+
 class RuleGate:
     """Bramka-REGUŁA: ułamek ruchów węzła, których odczyty STOJĄ W MIEJSCU przez całe
     okno. Zero uczenia, zero artefaktów — licznik zamrożonych detektorów.
