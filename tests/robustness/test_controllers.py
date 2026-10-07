@@ -1039,3 +1039,118 @@ def test_wyrocznia_modulacji_na_prawdziwym_cityflow(advanced_colight_world):
     e = len(src)
     assert np.array_equal(lr[:e] < 0, u[src] == 1.0)
     assert np.array_equal(lr[e:] < 0, u == 1.0)
+
+
+# ------------------------------------------- modulacja z reguły i złożenie z bramką
+
+PARA = torch.tensor([[0, 1], [1, 0]])  # 2 węzły: 0→1, 1→0; log ρ = [0→1, 1→0, pętla 0, pętla 1]
+
+
+def regula_u(threshold=0.5, tau=0.25):
+    return c.RuleUncertainty(PARA, window=OKNO, threshold=threshold, n_mov=N_MOV, tau=tau)
+
+
+def test_regula_modulacji_wygasza_wiadomosc_OD_zamrozonego_wezla():
+    """Strona źródła jak w wyroczni: zamrożony węzeł 1 wygasza krawędź 1→0 (jego
+    wiadomość) i własną pętlę, a NIE krawędź 0→1 od zdrowego sąsiada."""
+    u = regula_u()
+    x = obserwacje(OKNO, zamrozony=(0, 1))
+    for t in range(OKNO):
+        lr = u.log_rho(x[t])
+    assert lr.tolist() == [0.0, -4.0, 0.0, -4.0]
+
+
+def test_regula_modulacji_milczy_ponizej_progu_a_powyzej_jest_stopniowana():
+    """Pod progiem zero — inaczej puste wloty modulowałyby attention na czystym.
+    Na progu i nad nim u = ułamek zamrożonych ruchów, jak w wyroczni."""
+    x = obserwacje(OKNO, zamrozony=(0,))  # węzeł 1: 1 z 2 ruchów, ułamek 0,5
+    ostro, luzno = regula_u(threshold=0.75), regula_u(threshold=0.5)
+    for t in range(OKNO):
+        lr_ostro, lr_luzno = ostro.log_rho(x[t]), luzno.log_rho(x[t])
+    assert (lr_ostro == 0).all()
+    assert lr_luzno.tolist() == [0.0, -2.0, 0.0, -2.0]
+
+
+def test_regula_modulacji_milczy_na_rozgrzewce_i_po_resecie():
+    u = regula_u()
+    x = obserwacje(OKNO, zamrozony=(0, 1))
+    assert (u.log_rho(x[0]) == 0).all() and (u.log_rho(x[1]) == 0).all()
+    assert u.log_rho(x[2])[1].item() == pytest.approx(-4.0)
+    u.reset()
+    assert (u.log_rho(x[0]) == 0).all()
+
+
+def test_zlozenie_resetuje_i_raportuje_polityke_z_pamiecia():
+    """Bramka owijająca `UWPolicyController` musi czyścić jej okno na starcie epizodu
+    (inaczej modulacja liczy u z odczytów sprzed `world.reset()`) i oddawać jej
+    `uw_spread` obok `gate_*` — bez tego milcząca modulacja wygląda jak bezużyteczna."""
+    resety = []
+    polityka = SimpleNamespace(
+        act=lambda obs: np.full(2, POLITYKA),
+        reset_stats=lambda: resety.append(1),
+        episode_stats=lambda: {"uw_spread": 1.5},
+    )
+    bramka = SimpleNamespace(mask=lambda obs: np.zeros(2, dtype=bool), reset=lambda: None)
+    sterownik = c.GatedController(polityka, polityka, bramka)
+    sterownik.act(None)
+    sterownik.reset_stats()
+    assert len(resety) == 2  # konstruktor + start epizodu
+    sterownik.act(None)
+    assert sterownik.episode_stats()["uw_spread"] == 1.5
+
+
+def test_regula_modulacji_wymaga_strony_zrodla(tmp_path):
+    with pytest.raises(SystemExit, match="side: source"):
+        d.load_plan(plan_uw_spec(tmp_path, "tau: 0.25, u: rule"))
+
+
+def test_plan_t2_uw_rule_sie_laduje_i_paruje_zlozenie_z_bramka():
+    """Złożenie to rodzaj `policy_gate` (bramka owija UW) i ma być parowane z SAMĄ
+    bramką, a nie z rdzeniem — inaczej Δ mierzyłoby bramkę i UW naraz."""
+    from tsc_marl.analysis.degradation import mechanism_pairs  # noqa: PLC0415
+
+    plan = d.load_plan("t2_uw_rule")
+    assert plan.kind("gatppo_gate_rule_uw") == "policy_gate"
+    assert plan.kind("gatppo_uw_rule") == "policy_uw"
+    pary = dict(mechanism_pairs(plan))
+    assert pary["gatppo_gate_rule_uw"] == "gatppo_gate_rule"
+    assert pary["gatppo_gate_oracle_uw"] == "gatppo_gate_oracle"
+    assert pary["gatppo_uw_rule"] == "gatppo"
+
+
+@pytest.mark.slow
+def test_zlozenie_bramka_i_uw_z_reguly_na_prawdziwym_cityflow(advanced_colight_world):
+    """Dym złożenia z `t2_uw_rule` na prawdziwym `StateBuilder`: bramka owija politykę
+    z modulacją z reguły, oba czytają tę samą warstwę awarii, epizod przechodzi,
+    a przy martwych skrzyżowaniach strzelają OBA mechanizmy (bramka przełącza,
+    modulacja rozstępuje grupy softmaxu)."""
+    from tsc_marl.core.features import StateBuilder  # noqa: PLC0415
+    from tsc_marl.core.loop import CoreTrainer, LoopConfig  # noqa: PLC0415
+
+    world, _ = advanced_colight_world
+    torch.manual_seed(0)
+    trainer = CoreTrainer.from_world(
+        world, loop_config=LoopConfig(steps=60, test_steps=60, episodes=1)
+    )
+    env = trainer.env
+    order = env.graph.order_intersections(world)
+    feats = env.features
+    reg = c.RuleUncertainty(
+        env.graph.edge_index, window=3, threshold=1.0, n_mov=feats.n_mov, tau=0.25
+    )
+    ster = c.GatedController(
+        c.UWPolicyController(trainer.ppo.ac.actor, env.graph.edge_index, reg),
+        c.FixedTimeController(feats.intersections, t_fixed=30),
+        c.OracleGate(env, threshold=0.75),
+    )
+    martwe = FailureSpec(kind="mask", level=0.5, unit="intersection")
+    rows = d.evaluate(
+        env,
+        ster,
+        (FailureSpec(), martwe),
+        draws=1,
+        make_builder=lambda spec: StateBuilder.from_registry(world, order, failure=spec),
+        decisions=8,
+    )
+    assert rows[0]["gate_share"] == 0.0
+    assert rows[1]["gate_share"] > 0.0 and rows[1]["uw_spread"] > 0.0

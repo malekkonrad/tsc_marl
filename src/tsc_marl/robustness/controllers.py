@@ -216,10 +216,13 @@ class UWPolicyController:
 class GatedController:
     """Polityka + reguła pod jedną bramką: akcja KAŻDEGO węzła z jednego albo drugiego.
 
-    DLACZEGO OWIJA ZWYKŁĄ POLITYKĘ, a nie `UWPolicyController`: kolumna w T2 ma się
+    DOMYŚLNIE OWIJA ZWYKŁĄ POLITYKĘ, a nie `UWPolicyController`: kolumna w T2 ma się
     różnić od kolumny rdzenia DOKŁADNIE jedną rzeczą. Owinięcie sterownika z
-    modulacją attention mierzyłoby bramkę I modulację naraz, a wyniku nie dałoby się
-    przypisać — tym bardziej że modulacja wyszła wobec ATT neutralna (`results/t2_uw.md`).
+    modulacją attention mierzy bramkę I modulację naraz — i to jest dozwolone
+    wyłącznie jako ZŁOŻENIE z jawnym `baseline:` wskazującym kolumnę z samą bramką
+    (plan `t2_uw_rule`). Wtedy para różni się znowu jedną rzeczą: modulacją u sąsiadów
+    węzła, który bramka już przełączyła. Bramka naprawia WŁASNĄ decyzję martwego
+    węzła, UW — decyzje jego zdrowych sąsiadów, które czytają jego wiadomość.
 
     DLACZEGO PER WĘZEŁ, a nie globalnie: `mask0p25_intersection` to 25% skrzyżowań
     martwych i 75% zdrowych, a globalnie rdzeń (510,0 s) i FixedTime (507,0 s) idą
@@ -289,10 +292,13 @@ class GatedController:
         bezstanowa, ale bramka UQ trzyma okno odczytów, a `robustness/degrade.py`
         odpala `reset_stats` na starcie każdego epizodu. Bez tej delegacji okno
         wchodziłoby w nowy epizod z odczytami sprzed `world.reset()`, czyli z
-        zupełnie innego stanu ruchu."""
+        zupełnie innego stanu ruchu. To samo dotyczy polityki z pamięcią
+        (`UWPolicyController` w złożeniu) — stąd delegacja także do niej."""
         self.gate.reset()
         if self.oracle is not None:
             self.oracle.reset()
+        if hasattr(self.policy, "reset_stats"):
+            self.policy.reset_stats()
         self._share: list[float] = []
         self._switches = 0
         self._previous: np.ndarray | None = None
@@ -370,6 +376,10 @@ class GatedController:
             out["gate_precision"] = float(wspolne / (wspolne + falszywe))
         if wspolne + przeoczone > 0:
             out["gate_recall"] = float(wspolne / (wspolne + przeoczone))
+        # złożenie z UW: `uw_spread` polityki obok diagnostyki bramki, inaczej
+        # nie da się odróżnić „modulacja milczała" od „modulacja nie pomogła"
+        if hasattr(self.policy, "episode_stats"):
+            out |= self.policy.episode_stats()
         return out
 
 
@@ -565,12 +575,63 @@ class OracleUncertainty:
         self._gate.reset()
 
     def log_rho(self, obs: np.ndarray) -> torch.Tensor:
-        """[E + N] w kolejności `edge_index`, potem pętle własne — kontrakt
-        `UncertaintyWeightedAttention` (tak dokleja je `add_self_loops`)."""
         self._gate.mask(obs)
-        u = self._gate.last_score  # [N], zera na czystym i przed onsetem
-        out = -np.concatenate([u[self.src], u]) / self.tau
-        return torch.from_numpy(out.astype(np.float32))
+        # [N], zera na czystym i przed onsetem
+        return source_log_rho(self._gate.last_score, self.src, self.tau)
+
+
+def source_log_rho(u: np.ndarray, src: np.ndarray, tau: float) -> torch.Tensor:
+    """u węzła [N] -> log ρ = −u/τ po STRONIE ŹRÓDŁA: krawędź j→i dostaje u(j), pętla
+    własna i→i — u(i). Wspólne dla wyroczni i reguły, żeby obie kolumny różniła
+    wyłącznie definicja u, a nie sposób rozłożenia go na krawędzie.
+
+    [E + N] w kolejności `edge_index`, potem pętle własne — kontrakt
+    `UncertaintyWeightedAttention` (tak dokleja je `add_self_loops`)."""
+    out = -np.concatenate([u[src], u]) / tau
+    return torch.from_numpy(out.astype(np.float32))
+
+
+class RuleUncertainty:
+    """MODULACJA Z REGUŁY: log ρ dla UW-attention z licznika zamrożonych detektorów.
+
+    Wdrażalny odpowiednik `OracleUncertainty` (plan `t2_uw_rule`). Wyrocznia modulacji
+    dała przy maskach skrzyżowań −96…−167 s, a głowa obserwacyjna zero
+    (`results/t2_uw_src.md`) — więc wąskim gardłem jest sygnał u, nie mechanizm. Ta
+    klasa podaje mechanizmowi sygnał, który JUŻ działa jako bramka (`RuleGate`,
+    `results/t2_gate_real.md`): ten sam detektor, to samo okno, ten sam próg.
+
+    u węzła = ułamek jego ruchów zamrożonych przez całe okno (`RuleGate.last_score`),
+    ALE TYLKO powyżej progu bramki; poniżej — zero. Bez progu modulacja działałaby
+    na czystym: pusty wlot o małym ruchu raportuje zero i wygląda na zamrożony
+    (`obs_head.suspicious_movements`), a na HangZhou takich ruchów jest dużo (próg
+    skalibrował się tam na 0,875 wobec 0,25 na JiNan). Próg z `gate_ref` jest
+    kwantylem 99,5% na czystym oknie, więc no-op na czystym (A3a) trzyma się z tą
+    samą tolerancją fałszywych alarmów co bramka. Powyżej progu u zostaje
+    STOPNIOWANE, jak w wyroczni — martwy węzeł (1,0) dostaje pełne −1/τ.
+
+    Węzły ruchów = jego pasy wjazdowe, czyli ta sama jednostka co `OracleGate`
+    (właściciel pasa = skrzyżowanie, do którego pas dojeżdża). Różnice wobec wyroczni
+    są więc tylko dwie i obie są kosztem wdrożenia: rozgrzewka okna (pierwsze
+    `window` decyzji bez modulacji) i ślepota na martwy detektor, który akurat
+    raportuje zmieniające się wartości (tu: żaden ze scenariuszy planu).
+    """
+
+    def __init__(
+        self, edge_index: torch.Tensor, *, window: int, threshold: float, n_mov: int, tau: float
+    ) -> None:
+        if tau <= 0:
+            raise ValueError(f"τ musi być dodatnie, jest {tau}")
+        self._gate = RuleGate(window=window, threshold=threshold, n_mov=n_mov)
+        self.src = edge_index[0].numpy()
+        self.tau = float(tau)
+
+    def reset(self) -> None:
+        self._gate.reset()
+
+    def log_rho(self, obs: np.ndarray) -> torch.Tensor:
+        maska = self._gate.mask(obs)  # na rozgrzewce: same False
+        u = np.where(maska, self._gate.last_score, 0.0)
+        return source_log_rho(u, self.src, self.tau)
 
 
 class RuleGate:

@@ -394,6 +394,11 @@ def _mechanism_section(plan: Plan, df, mechanizm: str, baza: str) -> list[str]:
     """Dwie tabele, które rozstrzygają o wyniku planu z mechanizmem: CZY zadziałał
     i CZY zmienił ATT. Bez pierwszej druga jest nieinterpretowalna."""
     metryki, wyjasnienie = DIAGNOSTICS[plan.kind(mechanizm)]
+    if plan.kind(mechanizm) == "policy_gate" and plan.controllers[mechanizm].get("uw"):
+        # złożenie bramka + UW: obie diagnostyki, inaczej milcząca modulacja
+        # byłaby nieodróżnialna od modulacji, która nie pomogła
+        metryki = metryki + DIAGNOSTICS["policy_uw"][0]
+        wyjasnienie = wyjasnienie + " " + DIAGNOSTICS["policy_uw"][1]
     diag = mechanism_diagnostics(plan, mechanizm, metryki)
     pary = paired_delta(df, mechanizm, baza) if df is not None and not df.empty else None
     if not diag and (pary is None or pary.empty):

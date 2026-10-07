@@ -191,6 +191,17 @@ def build_uncertainty(plan: Plan, unit: Unit, env):
         # wyrocznia modulacji: prawda z warstwy awarii zamiast głowy — bez artefaktów
         # `runs/heads/`, więc liczy się także tam, gdzie głowy nie ma
         return c.OracleUncertainty(env, env.graph.edge_index, tau=float(uw.get("tau", 0.25)))
+    if uw.get("u") == "rule":
+        # licznik zamrożeń z TYMI SAMYMI oknem i progiem co bramka-reguła (`gate_ref`),
+        # żeby złożenie „bramka + UW" czytało jeden detektor, a nie dwa różnie nastrojone
+        progi = gate_reference(unit)
+        return c.RuleUncertainty(
+            env.graph.edge_index,
+            window=progi.window,
+            threshold=float(uw.get("threshold", progi.rule)),
+            n_mov=env.features.n_mov,
+            tau=float(uw.get("tau", 0.25)),
+        )
 
     # Ładowanie artefaktów przez `robustness.training.online_uncertainty` — wspólne
     # z treningiem, żeby dwie kopie nie rozjechały się przy zmianie nazw plików.
@@ -228,19 +239,9 @@ def fixed_cycle(spec: dict[str, Any]) -> int:
     return int(yaml.safe_load((CONFIGS / "tsc" / "fixedtime.yml").read_text())["model"]["t_fixed"])
 
 
-def build_gate(spec: dict[str, Any], plan: Plan, unit: Unit, env):
-    """Sygnał bramki z planu. `kind` waliduje `load_plan`, więc tu tylko wybór.
-
-    Progi bramek REALNYCH nie pochodzą z planu, tylko z artefaktu skalibrowanego na
-    czystym oknie zrzutu BC (`tsc obshead --save`) — tak jak `u_ref` i τ. Plan może
-    je nadpisać, ale wtedy jest to jawna decyzja, która wchodzi do odcisku biegu.
-    """
-    from tsc_marl.robustness import controllers as c  # noqa: PLC0415
+def gate_reference(unit: Unit):
+    """Progi bramek realnych dla sieci bazowej (`runs/heads/gate_ref__<sieć>.npz`)."""
     from tsc_marl.uncertainty import obs_head as oh  # noqa: PLC0415
-
-    kind = spec.get("kind")
-    if kind == "oracle":
-        return c.OracleGate(env, threshold=float(spec.get("threshold", 0.5)))
 
     net = base_network(unit.network)
     sciezka = oh.gate_path(net)
@@ -249,7 +250,23 @@ def build_gate(spec: dict[str, Any], plan: Plan, unit: Unit, env):
             f"brak progów bramki dla '{net}' ({sciezka.name}) — policz je: "
             f"tsc obshead -n {net} --save --window 12 --persistence"
         )
-    progi = oh.load_gates(sciezka, network=net, head=oh.head_path(net))
+    return oh.load_gates(sciezka, network=net, head=oh.head_path(net))
+
+
+def build_gate(spec: dict[str, Any], plan: Plan, unit: Unit, env):
+    """Sygnał bramki z planu. `kind` waliduje `load_plan`, więc tu tylko wybór.
+
+    Progi bramek REALNYCH nie pochodzą z planu, tylko z artefaktu skalibrowanego na
+    czystym oknie zrzutu BC (`tsc obshead --save`) — tak jak `u_ref` i τ. Plan może
+    je nadpisać, ale wtedy jest to jawna decyzja, która wchodzi do odcisku biegu.
+    """
+    from tsc_marl.robustness import controllers as c  # noqa: PLC0415
+
+    kind = spec.get("kind")
+    if kind == "oracle":
+        return c.OracleGate(env, threshold=float(spec.get("threshold", 0.5)))
+
+    progi = gate_reference(unit)
     if kind == "rule":
         return c.RuleGate(
             window=progi.window,
@@ -291,13 +308,18 @@ def build_controller(
             actors.append(ac.actor)
         if kind == "ensemble":
             return c.EnsembleController(actors, env.graph.edge_index, name=unit.controller)
-        if kind == "policy_uw":
-            return c.UWPolicyController(
+        polityka = (
+            c.UWPolicyController(
                 actors[0],
                 env.graph.edge_index,
                 build_uncertainty(plan, unit, env),
                 name=unit.controller,
             )
+            if plan.controllers[unit.controller].get("uw")
+            else c.PolicyController(actors[0], env.graph.edge_index)
+        )
+        if kind == "policy_uw":
+            return polityka
         if kind == "policy_mask":
             spec = plan.controllers[unit.controller]["mask"]
             # Maska legalnych faz: `n_phases` to MAKSIMUM po sieci, więc węzeł o 2 fazach
@@ -323,8 +345,9 @@ def build_controller(
                 # diagnostyki; 0,75 dawało przy maskach pasowych zbiór pusty.
                 else c.OracleGate(env, threshold=float(spec.get("oracle_threshold", 0.5)))
             )
+            # `polityka` z UW, gdy spec ma też `uw` — złożenie (`t2_uw_rule`)
             return c.GatedController(
-                c.PolicyController(actors[0], env.graph.edge_index),
+                polityka,
                 c.FixedTimeController(feats.intersections, t_fixed=fixed_cycle(spec)),
                 build_gate(spec, plan, unit, env),
                 k_on=int(spec.get("k_on", 1)),

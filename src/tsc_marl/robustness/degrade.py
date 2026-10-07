@@ -54,9 +54,10 @@ LEARNED = ("policy", "colight", "ensemble", "policy_uw", "policy_gate", "policy_
 #: detektorów) i `uq` (głowa obserwacyjna) są wdrażalne i mierzy się je WZGLĘDEM
 #: wyroczni — ta ablacja rozstrzyga, czy głowa niepewności zarabia na siebie.
 GATE_KINDS = ("oracle", "rule", "uq")
-#: Skąd UW-attention bierze u: z głowy obserwacyjnej albo z prawdy warstwy awarii
-#: (wyrocznia modulacji — górne ograniczenie, `controllers.OracleUncertainty`).
-UW_SOURCES = ("head", "oracle")
+#: Skąd UW-attention bierze u: z głowy obserwacyjnej, z prawdy warstwy awarii
+#: (wyrocznia modulacji — górne ograniczenie, `controllers.OracleUncertainty`) albo
+#: z licznika zamrożonych detektorów (`controllers.RuleUncertainty`, wdrażalny).
+UW_SOURCES = ("head", "oracle", "rule")
 #: Klucze spec sterownika, które zmieniają MECHANIZM, a nie tylko etykietę kolumny:
 #: `uw` niesie τ modulacji, `gate` — rodzaj bramki, próg i długość cyklu reguły.
 #: MUSZĄ wejść do odcisku biegu (`unit_params`), inaczej sweep po τ albo po progu
@@ -129,10 +130,12 @@ class Plan:
         spec = self.controllers[controller]
         if "ensemble" in spec:
             return "ensemble"
-        if spec.get("uw"):
-            return "policy_uw"
+        # bramka PRZED UW: spec z obydwoma to złożenie, w którym bramka owija politykę
+        # z modulacją (`GatedController` z `UWPolicyController` w środku, `t2_uw_rule`)
         if spec.get("gate"):
             return "policy_gate"
+        if spec.get("uw"):
+            return "policy_uw"
         if spec.get("mask"):
             return "policy_mask"
         return KINDS[self.agent(controller)]
@@ -256,11 +259,12 @@ def load_plan(path: str | Path) -> Plan:
                     f"plan '{p.name}': UW '{label}' ma u={spec['uw']['u']!r}, "
                     f"dozwolone: {UW_SOURCES}"
                 )
-            # wyrocznia istnieje tylko po stronie źródła (`OracleUncertainty`) — wymagamy
-            # tego JAWNIE, żeby w planie nie stało coś, czego sterownik nie liczy
-            if spec["uw"]["u"] == "oracle" and spec["uw"].get("side") != "source":
+            # wyrocznia i reguła istnieją tylko po stronie źródła (`source_log_rho`) —
+            # wymagamy tego JAWNIE, żeby w planie nie stało coś, czego sterownik nie liczy
+            if spec["uw"]["u"] in ("oracle", "rule") and spec["uw"].get("side") != "source":
                 raise SystemExit(
-                    f"plan '{p.name}': wyrocznia modulacji '{label}' wymaga side: source"
+                    f"plan '{p.name}': modulacja u={spec['uw']['u']} w '{label}' "
+                    "wymaga side: source"
                 )
         if spec.get("gate"):
             if KINDS[plan.agent(label)] != "policy":
