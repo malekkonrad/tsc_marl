@@ -1154,3 +1154,14 @@ def test_zlozenie_bramka_i_uw_z_reguly_na_prawdziwym_cityflow(advanced_colight_w
     )
     assert rows[0]["gate_share"] == 0.0
     assert rows[1]["gate_share"] > 0.0 and rows[1]["uw_spread"] > 0.0
+
+
+def test_opis_pary_rozroznia_wspolny_checkpoint_od_osobnego_treningu():
+    """Jawne `baseline:` nie znaczy „osobny trening": złożenie bramka + UW paruje się
+    z samą bramką na TYM SAMYM checkpoincie, ramię `gatppo_fail` — na innym."""
+    from tsc_marl.analysis.degradation import wspolny_checkpoint  # noqa: PLC0415
+
+    zlozenie = d.load_plan("t2_uw_rule")
+    assert wspolny_checkpoint(zlozenie, "gatppo_gate_rule_uw", "gatppo_gate_rule")
+    trening = d.load_plan("t2_train_uw")
+    assert not wspolny_checkpoint(trening, "gatppo_fail", "gatppo")

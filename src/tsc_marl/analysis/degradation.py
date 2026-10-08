@@ -239,6 +239,19 @@ def mechanism_pairs(plan: Plan) -> list[tuple[str, str]]:
     return out
 
 
+def wspolny_checkpoint(plan: Plan, mechanizm: str, baza: str) -> bool:
+    """Czy para jedzie TYM SAMYM checkpointem — rozstrzyga szablon rodzica, a nie to,
+    czy odniesienie jest jawne. Jawne `baseline:` wskazuje bowiem raz osobny trening
+    (`t2_train_uw`), a raz tę samą politykę z innym mechanizmem (złożenie bramka + UW
+    w `t2_uw_rule`) — i opis pod nagłówkiem pary mylił drugi przypadek z pierwszym.
+    Liczby to nie zmienia: parowanie po (sieć, scenariusz, seed, losowanie) jest jedno."""
+    from tsc_marl.robustness.degrade import Unit  # noqa: PLC0415
+
+    net = plan.networks[0]
+    seed = int(plan.controllers[mechanizm].get("seeds", [0])[0])
+    return plan.parent_id(Unit(mechanizm, net, seed)) == plan.parent_id(Unit(baza, net, seed))
+
+
 #: rodzaj mechanizmu -> (metryki z `result.json`, zdanie tłumaczące je w raporcie).
 #: Każdy mechanizm musi mieć diagnostykę „czy w ogóle zadziałał", bo bez niej pusty
 #: wynik jest nieodróżnialny od mechanizmu, który przez cały epizod milczał.
@@ -421,7 +434,7 @@ def _mechanism_section(plan: Plan, df, mechanizm: str, baza: str) -> list[str]:
             "(`draw` wybiera, które detektory padły), więc porównujemy je **parami**, nie "
             "przez ±std z tabeli wyżej: wspólny rozrzut między seedami i losowaniami skraca "
             "się w różnicy."
-            if plan.baseline(mechanizm) is None
+            if wspolny_checkpoint(plan, mechanizm, baza)
             else "Kolumny mają RÓŻNE checkpointy (osobne treningi), więc parujemy po "
             "(sieć, scenariusz, seed, losowanie): wspólne zostają ruch i wzorzec awarii, "
             "rozrzut między seedami wchodzi do różnicy. Kolumna odniesienia jest wskazana "
