@@ -563,13 +563,17 @@ class OracleUncertainty:
     `UWPolicyController` bez zmian i dostaje tę samą diagnostykę `uw_spread`.
     """
 
-    def __init__(self, env: Any, edge_index: torch.Tensor, *, tau: float) -> None:
+    def __init__(
+        self, env: Any, edge_index: torch.Tensor, *, tau: float, channels: str = "all"
+    ) -> None:
         if tau <= 0:
             raise ValueError(f"τ musi być dodatnie, jest {tau}")
+        _check_channels(channels)
         # `env`, nie `env.features` — powód w `OracleGate.__init__`
         self._gate = OracleGate(env)
         self.src = edge_index[0].numpy()
         self.tau = float(tau)
+        self.channels = channels
 
     def reset(self) -> None:
         self._gate.reset()
@@ -577,17 +581,40 @@ class OracleUncertainty:
     def log_rho(self, obs: np.ndarray) -> torch.Tensor:
         self._gate.mask(obs)
         # [N], zera na czystym i przed onsetem
-        return source_log_rho(self._gate.last_score, self.src, self.tau)
+        return source_log_rho(self._gate.last_score, self.src, self.tau, self.channels)
 
 
-def source_log_rho(u: np.ndarray, src: np.ndarray, tau: float) -> torch.Tensor:
+# Kanały modulacji po stronie źródła (ablacja `t2_uw_channels`), `UW_CHANNELS`
+# w `robustness.training`. `self` = tylko pętle własne: oślepiony węzeł przestaje ufać
+# WŁASNEJ obserwacji i opiera się na sąsiadach. `edges` = tylko krawędzie między
+# węzłami: sąsiedzi przestają ufać JEGO wiadomości. Oba wektory log ρ są rozłączne
+# i sumują się do `all`, więc ablacja rozkłada zysk dokładnie, a nie przez różnicę
+# par z innych planów (`results/t2_uw_rule.md`).
+
+
+def _check_channels(channels: str) -> None:
+    from tsc_marl.robustness.training import UW_CHANNELS  # noqa: PLC0415
+
+    if channels not in UW_CHANNELS:
+        raise ValueError(f"channels={channels!r}, dozwolone: {UW_CHANNELS}")
+
+
+def source_log_rho(
+    u: np.ndarray, src: np.ndarray, tau: float, channels: str = "all"
+) -> torch.Tensor:
     """u węzła [N] -> log ρ = −u/τ po STRONIE ŹRÓDŁA: krawędź j→i dostaje u(j), pętla
     własna i→i — u(i). Wspólne dla wyroczni i reguły, żeby obie kolumny różniła
     wyłącznie definicja u, a nie sposób rozłożenia go na krawędzie.
 
+    `channels` wygasza jedną z dwóch części (patrz `UW_CHANNELS`) — zerem, czyli
+    „bez modulacji", a nie inną wartością, więc kanał wyłączony jest dokładnie tym,
+    co widzi rdzeń.
+
     [E + N] w kolejności `edge_index`, potem pętle własne — kontrakt
     `UncertaintyWeightedAttention` (tak dokleja je `add_self_loops`)."""
-    out = -np.concatenate([u[src], u]) / tau
+    krawedzie = u[src] if channels != "self" else np.zeros(len(src))
+    petle = u if channels != "edges" else np.zeros(len(u))
+    out = -np.concatenate([krawedzie, petle]) / tau
     return torch.from_numpy(out.astype(np.float32))
 
 
@@ -617,13 +644,22 @@ class RuleUncertainty:
     """
 
     def __init__(
-        self, edge_index: torch.Tensor, *, window: int, threshold: float, n_mov: int, tau: float
+        self,
+        edge_index: torch.Tensor,
+        *,
+        window: int,
+        threshold: float,
+        n_mov: int,
+        tau: float,
+        channels: str = "all",
     ) -> None:
         if tau <= 0:
             raise ValueError(f"τ musi być dodatnie, jest {tau}")
+        _check_channels(channels)
         self._gate = RuleGate(window=window, threshold=threshold, n_mov=n_mov)
         self.src = edge_index[0].numpy()
         self.tau = float(tau)
+        self.channels = channels
 
     def reset(self) -> None:
         self._gate.reset()
@@ -631,7 +667,7 @@ class RuleUncertainty:
     def log_rho(self, obs: np.ndarray) -> torch.Tensor:
         maska = self._gate.mask(obs)  # na rozgrzewce: same False
         u = np.where(maska, self._gate.last_score, 0.0)
-        return source_log_rho(u, self.src, self.tau)
+        return source_log_rho(u, self.src, self.tau, self.channels)
 
 
 class RuleGate:

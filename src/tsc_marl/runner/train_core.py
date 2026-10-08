@@ -90,13 +90,11 @@ def main(argv: list[str] | None = None) -> None:
             # `edge_index` z grafu. Artefakty są ZAMROŻONE (`no_grad`, poza
             # `parameters()`), a `u_ref` skalibrowane na zrzucie BC — ograniczenie
             # do wypisania w rozdziale 4, patrz `robustness/training.py`.
+            # `uw_signal` — ta sama funkcja co w `tsc degrade`, więc `u`, `side`,
+            # `channels` i τ z suite'a dają DOKŁADNIE sygnał, którym bieg będzie
+            # potem mierzony (`p1_uw` = głowa po stronie celu, `p1_uw_rule` = reguła)
             core.uncertainty = training.UWStream(
-                training.online_uncertainty(
-                    base_network(args.network),
-                    core.env.features.n_mov,
-                    core.env.graph.edge_index,
-                    tau=uw.get("tau"),
-                ),
+                training.uw_signal(uw, base_network(args.network), core.env),
                 core.env.graph.edge_index,
                 core.device,
                 n_nodes=core.env.graph.n_nodes,
@@ -108,7 +106,10 @@ def main(argv: list[str] | None = None) -> None:
         if failures is not None:
             s.logger.info(f"awarie w treningu: {failures.describe()} (seed {failures.seed})")
         if uw is not None:
-            s.logger.info(f"UW-attention w treningu: tau={uw.get('tau', 'domyślne')}")
+            s.logger.info(
+                f"UW-attention w treningu: u={uw.get('u', 'head')} "
+                f"side={uw.get('side', 'target')} tau={uw.get('tau', 'domyślne')}"
+            )
         result = core.train()
         core.save(s.run.engine_dir / "core.pt")
         s.logger.info(f"Total time taken: {time.time() - started:.1f}s | {result}")

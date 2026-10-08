@@ -155,3 +155,73 @@ def test_mieszanka_suite_ow_sie_parsuje():
     assert any(s.kind == "gauss" for s in m.specs)  # obserwowalne
     assert any(s.kind == "mask" and s.substitution == "hold" for s in m.specs)  # wnioskowalne
     assert any(s.kind == "drift" for s in m.specs)  # nieobserwowalne
+
+
+# ------------------------------------------- ramię 3b: UW z reguły w treningu (`p1_uw_rule`)
+
+
+def test_ramie_z_regula_ma_te_sama_mieszanke_co_kontrola():
+    """`p1_uw_rule` vs `p1_fail` — ta sama zasada co dla `p1_uw`: jedyną różnicą
+    suite'ów ma być mechanizm, inaczej para „trening z UW vs DR" mierzy też rozkład."""
+    assert suite_mix("p1_fail") == suite_mix("p1_uw_rule")
+    bez = yaml.safe_load((CONFIGS / "suites" / "p1_fail.yml").read_text())["overrides"]["model"]
+    z = yaml.safe_load((CONFIGS / "suites" / "p1_uw_rule.yml").read_text())["overrides"]["model"]
+    assert set(z) - set(bez) == {"uw"}
+    assert z["uw"] == {"tau": 0.25, "side": "source", "u": "rule"}
+
+
+@pytest.mark.parametrize(
+    "uw, fragment",
+    [
+        ({"u": "rule"}, "side: source"),  # reguła istnieje tylko po stronie źródła
+        ({"u": "rul", "side": "source"}, "u="),
+        ({"side": "source", "u": "oracle", "channels": "petle"}, "channels="),
+        ({"channels": "self"}, "channels tylko"),  # głowa nie rozdziela kanałów
+        ({"tau": 0.25, "threshhold": 0.5}, "nieznane klucze"),
+        ({"side": "source", "u": "oracle", "threshold": 0.5}, "threshold tylko"),
+    ],
+)
+def test_literowki_w_uw_sa_bledem_a_nie_domyslem(uw, fragment):
+    """Jeden walidator dla planu i suite'a: literówka w suite treningowym dałaby po
+    cichu głowę po stronie celu, czyli powtórzyła `p1_uw` pod nazwą `p1_uw_rule`."""
+    from tsc_marl.robustness.training import check_uw  # noqa: PLC0415
+
+    blad = check_uw(uw)
+    assert blad is not None and fragment in blad
+
+
+def test_poprawne_spec_uw_przechodza():
+    from tsc_marl.robustness.training import check_uw  # noqa: PLC0415
+
+    for uw in (
+        {"tau": 0.25},
+        {"tau": 0.25, "side": "source"},
+        {"tau": 0.25, "side": "source", "u": "rule"},
+        {"tau": 0.25, "side": "source", "u": "oracle", "channels": "edges"},
+    ):
+        assert check_uw(uw) is None, uw
+
+
+def test_uw_signal_buduje_regule_z_progami_bramki():
+    """Trening i ewaluacja budują sygnał tą samą funkcją; dla `u: rule` okno i próg
+    MUSZĄ pochodzić z `gate_ref` tej sieci — tak jak w bramce-regule."""
+    import torch  # noqa: PLC0415
+
+    from tsc_marl.robustness import controllers as c  # noqa: PLC0415
+    from tsc_marl.robustness.training import gate_reference, uw_signal  # noqa: PLC0415
+    from tsc_marl.uncertainty import obs_head as oh  # noqa: PLC0415
+
+    siec = "cityflow_jinan3x4_4ph"
+    if not oh.gate_path(siec).is_file():
+        pytest.skip("brak runs/heads/gate_ref — artefakt liczony przez `tsc obshead`")
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    env = SimpleNamespace(
+        graph=SimpleNamespace(edge_index=torch.tensor([[0, 1], [1, 0]])),
+        features=SimpleNamespace(n_mov=8),
+    )
+    sygnal = uw_signal({"tau": 0.25, "side": "source", "u": "rule"}, siec, env)
+    progi = gate_reference(siec)
+    assert isinstance(sygnal, c.RuleUncertainty)
+    assert sygnal._gate.window == progi.window
+    assert sygnal._gate.threshold == pytest.approx(progi.rule)

@@ -173,48 +173,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def build_uncertainty(plan: Plan, unit: Unit, env):
-    """Głowa obserwacyjna + jej `u_ref` dla TEJ sieci (`tsc obshead --save`).
+    """Źródło log ρ dla kolumny z `uw` (albo głowa dla bramki UQ, która `uw` nie ma).
 
-    Artefakty są związane z siecią: głowa z JiNan na HangZhou ma AUROC 0,53
-    (`results/gate_2_2.md`), więc `load_head`/`load_reference` dostają nazwę sieci
-    i mają prawo krzyknąć. Wariant popytu (`_d0p25`) czyta głowę sieci BAZOWEJ —
-    tej, na której zrzucono BC — bo taka jest też konwencja rodzica w `runs/t1`.
-    Uwaga do rozdziału 4: `u_ref` jest skalibrowane na obciążeniu zrzutu, więc przy
-    cięższym ruchu niż w zrzucie u rośnie wszędzie i `relu` wygeneruje nadmiar bez
-    awarii; przy lżejszym — zje go (brak fałszywych alarmów).
+    Budowa przez `robustness.training.uw_signal` — tę samą funkcję, którą woła
+    trening z UW (`train_core`), żeby polityka uczona z sygnałem była mierzona TYM
+    SAMYM sygnałem. Artefakty są związane z siecią: głowa z JiNan na HangZhou ma
+    AUROC 0,53 (`results/gate_2_2.md`), więc idzie nazwa sieci BAZOWEJ — tej, na
+    której zrzucono BC (konwencja rodzica w `runs/t1`). Uwaga do rozdziału 4: `u_ref`
+    jest skalibrowane na obciążeniu zrzutu, więc przy cięższym ruchu niż w zrzucie
+    u rośnie wszędzie i `relu` wygeneruje nadmiar bez awarii; przy lżejszym — zje go.
     """
-    from tsc_marl.robustness import controllers as c  # noqa: PLC0415
-    from tsc_marl.robustness.training import online_uncertainty  # noqa: PLC0415
+    from tsc_marl.robustness.training import uw_signal  # noqa: PLC0415
 
-    uw = plan.controllers[unit.controller].get("uw", {})
-    if uw.get("u") == "oracle":
-        # wyrocznia modulacji: prawda z warstwy awarii zamiast głowy — bez artefaktów
-        # `runs/heads/`, więc liczy się także tam, gdzie głowy nie ma
-        return c.OracleUncertainty(env, env.graph.edge_index, tau=float(uw.get("tau", 0.25)))
-    if uw.get("u") == "rule":
-        # licznik zamrożeń z TYMI SAMYMI oknem i progiem co bramka-reguła (`gate_ref`),
-        # żeby złożenie „bramka + UW" czytało jeden detektor, a nie dwa różnie nastrojone
-        progi = gate_reference(unit)
-        return c.RuleUncertainty(
-            env.graph.edge_index,
-            window=progi.window,
-            threshold=float(uw.get("threshold", progi.rule)),
-            n_mov=env.features.n_mov,
-            tau=float(uw.get("tau", 0.25)),
-        )
-
-    # Ładowanie artefaktów przez `robustness.training.online_uncertainty` — wspólne
-    # z treningiem, żeby dwie kopie nie rozjechały się przy zmianie nazw plików.
-    # `.get("uw", {})`, bo tę samą głowę wywołuje bramka UQ, która τ nie używa:
-    # τ skaluje modulację log ρ, a bramce potrzebne jest samo u na ruch.
-    return online_uncertainty(
-        base_network(unit.network),
-        env.features.n_mov,
-        env.graph.edge_index,
-        tau=plan.controllers[unit.controller].get("uw", {}).get("tau"),
-        # `side` siedzi w `uw`, więc wchodzi do odcisku biegu (`MECHANISM_KEYS`) sam —
-        # kolumna `source` nie zostanie pominięta jako „jest wynik" kolumny `target`
-        side=plan.controllers[unit.controller].get("uw", {}).get("side", "target"),
+    return uw_signal(
+        plan.controllers[unit.controller].get("uw", {}), base_network(unit.network), env
     )
 
 
@@ -240,17 +212,10 @@ def fixed_cycle(spec: dict[str, Any]) -> int:
 
 
 def gate_reference(unit: Unit):
-    """Progi bramek realnych dla sieci bazowej (`runs/heads/gate_ref__<sieć>.npz`)."""
-    from tsc_marl.uncertainty import obs_head as oh  # noqa: PLC0415
+    """Progi bramek realnych dla sieci bazowej — patrz `training.gate_reference`."""
+    from tsc_marl.robustness.training import gate_reference as wczytaj  # noqa: PLC0415
 
-    net = base_network(unit.network)
-    sciezka = oh.gate_path(net)
-    if not sciezka.is_file():
-        raise SystemExit(
-            f"brak progów bramki dla '{net}' ({sciezka.name}) — policz je: "
-            f"tsc obshead -n {net} --save --window 12 --persistence"
-        )
-    return oh.load_gates(sciezka, network=net, head=oh.head_path(net))
+    return wczytaj(base_network(unit.network))
 
 
 def build_gate(spec: dict[str, Any], plan: Plan, unit: Unit, env):

@@ -1165,3 +1165,70 @@ def test_opis_pary_rozroznia_wspolny_checkpoint_od_osobnego_treningu():
     assert wspolny_checkpoint(zlozenie, "gatppo_gate_rule_uw", "gatppo_gate_rule")
     trening = d.load_plan("t2_train_uw")
     assert not wspolny_checkpoint(trening, "gatppo_fail", "gatppo")
+
+
+# --------------------------------------------------- ablacja kanałów (`t2_uw_channels`)
+
+
+def test_kanaly_sa_rozlaczne_i_sumuja_sie_do_pelnej_modulacji():
+    """Ablacja rozkłada zysk DOKŁADNIE tylko wtedy, gdy `self` i `edges` są rozłączne
+    i razem dają `all`. Układ: [0→1, 1→2, 2→3, pętle 0..3], martwy węzeł 1."""
+    u = np.array([0.0, 1.0, 0.0, 0.0])
+    src = GRAF[0].numpy()
+    pelna = c.source_log_rho(u, src, 0.5)
+    petle = c.source_log_rho(u, src, 0.5, "self")
+    krawedzie = c.source_log_rho(u, src, 0.5, "edges")
+    assert petle.tolist() == [0.0, 0.0, 0.0, 0.0, -2.0, 0.0, 0.0]  # tylko pętla węzła 1
+    assert krawedzie.tolist() == [0.0, -2.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # tylko jego wiadomość
+    assert torch.equal(petle + krawedzie, pelna)
+
+
+def test_kanal_w_wyroczni_i_regule():
+    env = SimpleNamespace(features=features({"1_a", "1_b"}))
+    lr = c.OracleUncertainty(env, GRAF, tau=0.5, channels="edges").log_rho(np.zeros((4, 3)))
+    assert lr.tolist() == [0.0, -2.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    with pytest.raises(ValueError, match="channels"):
+        c.RuleUncertainty(PARA, window=OKNO, threshold=0.5, n_mov=N_MOV, tau=0.25, channels="x")
+
+
+def test_kanal_zmienia_odcisk_biegu(tmp_path):
+    """`channels` siedzi w `uw`, więc wchodzi do odcisku — kolumny `self` i `edges`
+    nie zostaną pominięte jako „jest wynik" kolumny z pełną modulacją."""
+    from runlog import params_hash  # noqa: PLC0415
+    from tsc_marl.runner.degrade import unit_params  # noqa: PLC0415
+
+    rodzic = [SimpleNamespace(id="rodzic", meta={"params_hash": "abc"})]
+    odciski = set()
+    for i, kanal in enumerate(["all", "self", "edges"]):
+        (tmp_path / str(i)).mkdir()
+        spec = f"tau: 0.25, side: source, u: oracle, channels: {kanal}"
+        plan = d.load_plan(plan_uw_spec(tmp_path / str(i), spec))
+        odciski.add(params_hash(unit_params(plan, d.Unit("gatppo_uw", "siec_a", 0), rodzic)))
+    assert len(odciski) == 3
+
+
+def test_plan_t2_uw_channels_paruje_kazdy_kanal_z_rdzeniem():
+    from tsc_marl.analysis.degradation import mechanism_pairs  # noqa: PLC0415
+
+    plan = d.load_plan("t2_uw_channels")
+    pary = dict(mechanism_pairs(plan))
+    for kolumna in ("gatppo_uw_oracle", "gatppo_uw_oracle_self", "gatppo_uw_oracle_edges"):
+        assert pary[kolumna] == "gatppo"
+    assert not any(s.kind in ("gauss", "drift") for s in plan.scenarios)
+
+
+def test_plan_t2_train_uw_rule_paruje_trening_z_doklejeniem():
+    """★1: ta sama modulacja w ewaluacji, różni się tylko to, czy polityka uczyła się
+    z nią — więc odniesieniem jest DOKLEJENIE do polityki DR, nie goła polityka DR."""
+    from tsc_marl.analysis.degradation import mechanism_pairs, wspolny_checkpoint  # noqa: PLC0415
+
+    plan = d.load_plan("t2_train_uw_rule")
+    pary = dict(mechanism_pairs(plan))
+    assert pary["gatppo_fail_uw_rule"] == "gatppo_fail_uwinf"
+    assert pary["gatppo_fail_uw_rule_gate"] == "gatppo_fail_gate"
+    assert pary["gatppo_fail_uwinf"] == "gatppo_fail"
+    assert plan.parent_id(d.Unit("gatppo_fail_uw_rule", "cityflow_jinan3x4_4ph", 1)) == (
+        "gatppo__cityflow_jinan3x4_4ph__s1_y5__p1_uw_rule"
+    )
+    assert not wspolny_checkpoint(plan, "gatppo_fail_uw_rule", "gatppo_fail_uwinf")
+    assert wspolny_checkpoint(plan, "gatppo_fail_uwinf", "gatppo_fail")

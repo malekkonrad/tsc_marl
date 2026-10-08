@@ -59,6 +59,44 @@ if TYPE_CHECKING:
 
 CLEAN = FailureSpec()
 
+#: Skąd UW-attention bierze u: z głowy obserwacyjnej, z prawdy warstwy awarii
+#: (wyrocznia modulacji — górne ograniczenie, `controllers.OracleUncertainty`) albo
+#: z licznika zamrożonych detektorów (`controllers.RuleUncertainty`, wdrażalny).
+UW_SOURCES = ("head", "oracle", "rule")
+#: Kanały modulacji po stronie źródła — opis przy `controllers.source_log_rho`.
+UW_CHANNELS = ("all", "self", "edges")
+
+
+def check_uw(uw: dict[str, Any]) -> str | None:
+    """Błąd w spec `uw` albo None. JEDEN walidator dla planu T2 i suite'a treningowego.
+
+    Każda literówka ma tu być błędem, a nie wartością domyślną: kolumna podpisana
+    „reguła" liczona po cichu głową (albo trening „z regułą" uczony na głowie po
+    stronie celu) powtarzałaby stary pomiar pod nową nazwą — i nic by tego nie zgłosiło.
+    """
+    from tsc_marl.uncertainty.obs_head import EDGE_SIDES  # noqa: PLC0415 - ciągnie torcha
+
+    nieznane = set(uw) - {"tau", "side", "u", "channels", "threshold"}
+    if nieznane:
+        return f"nieznane klucze {sorted(nieznane)}"
+    if "side" in uw and uw["side"] not in EDGE_SIDES:
+        return f"side={uw['side']!r}, dozwolone: {EDGE_SIDES}"
+    zrodlo = uw.get("u", "head")
+    if zrodlo not in UW_SOURCES:
+        return f"u={zrodlo!r}, dozwolone: {UW_SOURCES}"
+    # wyrocznia i reguła istnieją tylko po stronie źródła (`source_log_rho`) —
+    # wymagamy tego JAWNIE, żeby w planie nie stało coś, czego sterownik nie liczy
+    if zrodlo in ("oracle", "rule") and uw.get("side") != "source":
+        return f"modulacja u={zrodlo} wymaga side: source"
+    if "channels" in uw:
+        if uw["channels"] not in UW_CHANNELS:
+            return f"channels={uw['channels']!r}, dozwolone: {UW_CHANNELS}"
+        if zrodlo == "head":
+            return "channels tylko z u: oracle albo u: rule (głowa nie rozdziela kanałów)"
+    if "threshold" in uw and zrodlo != "rule":
+        return "threshold tylko z u: rule (próg licznika zamrożeń)"
+    return None
+
 
 # ------------------------------------------------------------------ mieszanka awarii
 
@@ -205,6 +243,61 @@ def online_uncertainty(
     )
 
 
+def gate_reference(network: str) -> Any:
+    """Progi bramek realnych dla sieci BAZOWEJ (`runs/heads/gate_ref__<sieć>.npz`).
+
+    Wspólne dla bramki-reguły w ewaluacji, modulacji z reguły w ewaluacji i modulacji
+    z reguły w TRENINGU — jedno ładowanie, żeby polityka nie uczyła się na innym
+    oknie albo progu, niż potem mierzy ją `tsc degrade`."""
+    from tsc_marl.uncertainty import obs_head as oh  # noqa: PLC0415
+
+    sciezka = oh.gate_path(network)
+    if not sciezka.is_file():
+        raise SystemExit(
+            f"brak progów bramki dla '{network}' ({sciezka.name}) — policz je: "
+            f"tsc obshead -n {network} --save --window 12 --persistence"
+        )
+    return oh.load_gates(sciezka, network=network, head=oh.head_path(network))
+
+
+def uw_signal(uw: dict[str, Any], network: str, env: Any) -> Any:
+    """Źródło log ρ dla UW-attention ze spec `uw` — JEDNO dla treningu i ewaluacji.
+
+    `u: head` (domyślnie) — zamrożona głowa obserwacyjna po stronie `side`;
+    `u: oracle` — prawda z warstwy awarii (sufit, `controllers.OracleUncertainty`);
+    `u: rule` — licznik zamrożonych detektorów z oknem i progiem bramki-reguły
+    (`controllers.RuleUncertainty`). `channels` dotyczy tylko oracle/rule (strona
+    źródła). `network` = sieć BAZOWA, `env` = `TrafficEnv` (czytany na bieżąco:
+    `env.features` podmienia się per scenariusz i per epizod mieszanki awarii).
+
+    Przed tą funkcją trening znał wyłącznie głowę po stronie celu (`p1_uw`), a
+    ewaluacja wszystkie trzy źródła — więc sygnał z reguły dało się mierzyć, ale
+    nie dało się z nim uczyć."""
+    from tsc_marl.robustness import controllers as c  # noqa: PLC0415
+
+    tau = uw.get("tau")
+    zrodlo = uw.get("u", "head")
+    channels = uw.get("channels", "all")
+    edge_index = env.graph.edge_index
+    if zrodlo == "oracle":
+        return c.OracleUncertainty(
+            env, edge_index, tau=float(0.25 if tau is None else tau), channels=channels
+        )
+    if zrodlo == "rule":
+        progi = gate_reference(network)
+        return c.RuleUncertainty(
+            edge_index,
+            window=progi.window,
+            threshold=float(uw.get("threshold", progi.rule)),
+            n_mov=env.features.n_mov,
+            tau=float(0.25 if tau is None else tau),
+            channels=channels,
+        )
+    return online_uncertainty(
+        network, env.features.n_mov, edge_index, tau=tau, side=uw.get("side", "target")
+    )
+
+
 class UWStream:
     """log ρ krok po kroku + diagnostyka epizodu — to samo, co robi `UWPolicyController`.
 
@@ -277,4 +370,8 @@ def uw_config_from_registry() -> dict[str, Any] | None:
     raw = Registry.mapping["model_mapping"]["setting"].param.get("uw")
     if not raw:
         return None
-    return {} if raw is True else dict(raw)
+    uw = {} if raw is True else dict(raw)
+    blad = check_uw(uw)
+    if blad:
+        raise SystemExit(f"model.uw w suite: {blad}")
+    return uw
