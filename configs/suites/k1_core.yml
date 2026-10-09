@@ -1,0 +1,23 @@
+# Kraków (SUMO, `cracow-case-study`): rdzeń GAT+PPO+CTDE uczony na CZYSTYM ruchu —
+# odpowiednik `p1_gate` (JiNan/HangZhou). Rodzic kolumny `gatppo` w `t2_krakow`.
+#
+# Uczony WYŁĄCZNIE na `mid` (4500 poj/h, tuż przed kolanem nasycenia — kalibracja
+# w `data/raw_data/krakow_3w/README.md`); `low` i `high` są w `t2_krakow` ruchem SPOZA
+# treningu, jak warianty popytu `_d0p25` / `_r2000` na JiNan w `t2_ood`. Ta sama sieć,
+# więc ten sam wymiar obserwacji i ten sam graf — checkpoint przenosi się wprost.
+#
+# Trening na CPU (`ngpu: -1`): GPU nic tu nie przyspiesza — wąskim gardłem jest SUMO —
+# a 2026-10-09 karta glidera była zajęta przez innego użytkownika (15,6 z 16 GB). Równolegle:
+#     tsc suite run k1_core -j 3
+# Sufiks run_id = nazwa pliku: `gatppo__sumo_krakow3w_mid__s<seed>_y5__k1_core`.
+entry: core
+mode: realistic
+timeout: 86400
+ngpu: "-1"           # CPU: wąskim gardłem jest SUMO, a GPU glidera bywa zajęte przez innych
+
+defaults:
+  world: sumo
+
+grid:
+  network: [sumo_krakow3w_mid]
+  seed: [0, 1, 2]

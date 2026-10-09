@@ -127,6 +127,20 @@ def obshead(
 
 
 @app.command()
+def rulecal(
+    network: str = typer.Option(..., "-n", help="sieć (np. sumo_krakow3w_mid)"),
+    episodes: int = typer.Option(3, help="ile czystych epizodów pod ekspertem"),
+    expert: str = typer.Option("advancedmp", help="sterownik, pod którym mierzymy czysty ruch"),
+) -> None:
+    """Próg SAMEJ bramki-reguły (bez głowy) -> runs/heads/rule_ref__<sieć>.json."""
+    from tsc_marl.robustness import rule_ref
+
+    path = rule_ref.calibrate(network, episodes=episodes, expert=expert)
+    print(path.read_text())
+    print(path)
+
+
+@app.command()
 def demand(
     network: str = typer.Option("cityflow_jinan3x4_4ph", "-n", help="sieć bazowa"),
     factors: str = typer.Option("0.5,1.5", help="mnożniki natężenia, po przecinku"),

@@ -218,6 +218,34 @@ def gate_reference(unit: Unit):
     return wczytaj(base_network(unit.network))
 
 
+def fixed_time_program(network: str) -> dict[str, dict[str, float]] | None:
+    """Program stałoczasowy sieci (`fixedTimeProgram` w `configs/sim/<sieć>.cfg`) albo None.
+
+    Kraków: Webster osobno dla każdego poziomu popytu (`data/raw_data/krakow_3w/build.py
+    webster`) — tak jak w krakowskiej praktyce programów na pory dnia. Klucz siedzi
+    w configu SIECI, a nie w planie: program należy do scenariusza, więc kolumna
+    `fixedtime` i cel przełączenia bramki dostają go same, a JiNan/HangZhou (bez klucza)
+    zostają przy `t_fixed` — z tymi samymi liczbami co dotąd.
+    """
+    import json  # noqa: PLC0415
+
+    from tsc_marl.paths import CONFIGS, DATA  # noqa: PLC0415
+
+    cfg = CONFIGS / "sim" / f"{network}.cfg"
+    if not cfg.is_file():
+        return None
+    rel = json.loads(cfg.read_text()).get("fixedTimeProgram")
+    if rel is None:
+        return None
+    path = DATA / rel
+    if not path.is_file():
+        raise SystemExit(
+            f"{cfg.name}: brak programu {rel} — policz go: "
+            ".venv/bin/python data/raw_data/krakow_3w/build.py webster"
+        )
+    return json.loads(path.read_text())
+
+
 def build_gate(spec: dict[str, Any], plan: Plan, unit: Unit, env):
     """Sygnał bramki z planu. `kind` waliduje `load_plan`, więc tu tylko wybór.
 
@@ -237,6 +265,7 @@ def build_gate(spec: dict[str, Any], plan: Plan, unit: Unit, env):
             window=progi.window,
             threshold=float(spec.get("threshold", progi.rule)),
             n_mov=env.features.n_mov,
+            real=env.features.movement_mask(),
         )
     return c.UQGate(
         build_uncertainty(plan, unit, env),
@@ -313,7 +342,12 @@ def build_controller(
             # `polityka` z UW, gdy spec ma też `uw` — złożenie (`t2_uw_rule`)
             return c.GatedController(
                 polityka,
-                c.FixedTimeController(feats.intersections, t_fixed=fixed_cycle(spec)),
+                c.FixedTimeController(
+                    feats.intersections,
+                    t_fixed=fixed_cycle(spec),
+                    greens=fixed_time_program(unit.network),
+                    yellow=plan.yellow,
+                ),
                 build_gate(spec, plan, unit, env),
                 k_on=int(spec.get("k_on", 1)),
                 k_off=int(spec.get("k_off", 1)),
@@ -344,7 +378,12 @@ def build_controller(
             w1=w1,
             name=unit.controller,
         )
-    return c.FixedTimeController(feats.intersections, t_fixed=int(model["t_fixed"]))
+    return c.FixedTimeController(
+        feats.intersections,
+        t_fixed=int(model["t_fixed"]),
+        greens=fixed_time_program(unit.network),
+        yellow=plan.yellow,
+    )
 
 
 def main(argv: list[str] | None = None) -> None:

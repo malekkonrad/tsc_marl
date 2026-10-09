@@ -218,10 +218,59 @@ def test_uw_signal_buduje_regule_z_progami_bramki():
 
     env = SimpleNamespace(
         graph=SimpleNamespace(edge_index=torch.tensor([[0, 1], [1, 0]])),
-        features=SimpleNamespace(n_mov=8),
+        features=SimpleNamespace(n_mov=8, movement_mask=lambda: None),
     )
     sygnal = uw_signal({"tau": 0.25, "side": "source", "u": "rule"}, siec, env)
     progi = gate_reference(siec)
     assert isinstance(sygnal, c.RuleUncertainty)
     assert sygnal._gate.window == progi.window
     assert sygnal._gate.threshold == pytest.approx(progi.rule)
+
+
+# ---------------------------------------------- próg samej reguły (sieci bez głowy, SUMO)
+
+
+def test_prog_reguly_to_kwantyl_budzetu_falszywych_alarmow():
+    from tsc_marl.robustness.rule_ref import threshold  # noqa: PLC0415
+
+    wyniki = np.zeros((1000, 1))
+    wyniki[-4:] = 1.0  # 0,4% decyzji z pełnym zamrożeniem — mieści się w budżecie 0,5%
+    assert threshold(wyniki, 0.005) == 0.0
+    wyniki[-6:] = 1.0  # 0,6% — budżet przekroczony, próg musi pójść w górę
+    assert threshold(wyniki, 0.005) > 0.0
+
+
+def test_prog_reguly_zapis_odczyt_i_pierwszenstwo_gate_ref(tmp_path, monkeypatch):
+    """Sieć z `gate_ref` (CityFlow, z głową) czyta GO, a nie `rule_ref` — liczby
+    JiNan/HangZhou nie mogą się zmienić. Sieć bez niego czyta `rule_ref`."""
+    import json  # noqa: PLC0415
+
+    from tsc_marl.robustness import rule_ref, training  # noqa: PLC0415
+
+    monkeypatch.setattr(rule_ref, "rule_path", lambda net: tmp_path / f"rule_ref__{net}.json")
+    blob = {
+        "format": rule_ref.RULE_FORMAT,
+        "network": "sumo_x",
+        "window": 12,
+        "rule": 0.4,
+        "false_alarm": 0.005,
+        "expert": "advancedmp",
+        "episodes": 3,
+        "decisions": 700,
+    }
+    (tmp_path / "rule_ref__sumo_x.json").write_text(json.dumps(blob))
+    ref = training.gate_reference("sumo_x")
+    assert (ref.window, ref.rule, ref.uq) == (12, 0.4, None)
+    with pytest.raises(SystemExit, match="rulecal"):
+        training.gate_reference("sumo_brak")
+    from tsc_marl.uncertainty import obs_head as oh  # noqa: PLC0415
+
+    if oh.gate_path("cityflow_jinan3x4_4ph").is_file():
+        assert training.gate_reference("cityflow_jinan3x4_4ph").uq is not None
+
+
+def test_krakow_dr_ma_mieszanke_z_p1_fail():
+    """Replikacja C6 na Krakowie mierzy TĘ SAMĄ dźwignię co na JiNan/HangZhou."""
+    assert suite_mix("k1_fail") == suite_mix("p1_fail")
+    core = yaml.safe_load((CONFIGS / "suites" / "k1_core.yml").read_text())
+    assert "overrides" not in core or "failure_mix" not in core["overrides"].get("model", {})

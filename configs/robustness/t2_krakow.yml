@@ -1,0 +1,111 @@
+# T2 — Kraków (SUMO): replikacja architektury końcowej na TRZECIEJ sieci i DRUGIM symulatorze.
+#
+# SKĄD. Dwie największe dziury pracy (`tsc_marl_research/kontrybucje.md`, „Dziury"):
+# dwie topologie i jeden symulator. Korytarz al. Trzech Wieszczów łata obie naraz,
+# a do tego jest siecią, której JiNan/HangZhou nie mają: 25 sygnalizacji, 1–7 wlotów,
+# 2–7 faz, zielone warunkowe `g`, klastry skrzyżowań (`data/raw_data/krakow_3w/README.md`).
+# Plan NIE wprowadza nic nowego — powtarza na Krakowie to, co stoi w pracy:
+#
+#   C4  wszystko, co czyta czujniki, przegrywa z FixedTime pod ciężkimi maskami
+#   C6  DR = druga dźwignia: płaski podatek na czystym, zysk pod maskami
+#   rozwiązanie: DR + bramka-reguła schodzi pod FixedTime przy 50% martwych detektorów
+#
+# KOLUMNY (rodzice: suite'y `k1_core` i `k1_fail`, uczone na `mid`, 3 seedy):
+#   gatppo            rdzeń na czystym                         (k1_core)
+#   gatppo_fail       rdzeń z awariami (DR)        vs gatppo   (k1_fail)
+#   gatppo_gate       rdzeń + bramka-reguła        vs gatppo   (k1_core)
+#   gatppo_fail_gate  DR + bramka-reguła   vs gatppo_fail      (k1_fail) ← rozwiązanie
+#   advancedmp, efficientmp   reguły ciśnieniowe (czytają TEN SAM popsuty stan, C4)
+#   fixedtime         WEBSTER per poziom popytu (`fixedTimeProgram` w configu sieci) —
+#                     to on jest też celem przełączenia bramki, nie `t_fixed: 30`
+#
+# SIECI: `mid` = ruch treningowy; `low` i `high` = ruch spoza treningu (ten sam graf,
+# ten sam wymiar obserwacji), jak warianty popytu JiNan w `t2_ood`. Rodzic zawsze z `mid`
+# (`parent` z nazwą sieci na sztywno).
+#
+# PRÓG BRAMKI: `runs/heads/rule_ref__sumo_krakow3w_<poziom>.json` (`tsc rulecal`) —
+# kwantyl 99,5% na czystym ruchu pod Advanced-MP, okno 12, udział zamrożonych liczony po
+# PRAWDZIWYCH ruchach (`StateBuilder.movement_mask`; Kraków dopycha 1–7 wlotów zerami).
+# Głowy niepewności na Krakowie nie ma — UW i bramka UQ są zamknięte (C5).
+# Progi i FAKTYCZNE fałszywe alarmy na czystym (budżet 0,5%): low 1,00 / 2,8% ·
+# mid 0,79 / 0,52% · high 0,79 / 0,63%. Na `low` budżet jest nie do dotrzymania (puste
+# skrzyżowania wyglądają na martwe) — przewidywany mały koszt bramki na `clean` przy `low`.
+#
+# LOSOWANIA: 3 (nie 5 jak na CityFlow) — epizod SUMO jest ~5× droższy; 3 seedy × 3
+# losowania = 9 par na komórkę. Przy małych Δ raportować kierunek i licznik wygranych.
+#
+# BASELINE'Y NA CZYSTYM (2026-10-09, ścieżka `tsc degrade`, ATT [s] / przepustowość):
+#                 low           mid            high
+#   Webster       297,9 / 1645  347,6 / 3972   390,5 / 4374
+#   Efficient-MP  282,6 / 1651  373,5 / 3846   477,2 / 3928
+#   Advanced-MP   279,8 / 1655  396,9 / 3676   481,5 / 3840
+#   t_fixed: 30   331,4 / 1618  390,2 / 3941   471,8 / 4111
+# Przy mid/high metody ciśnieniowe PRZEGRYWAJĄ z Websterem (−7…−23%, mniejsza
+# przepustowość) — na Krakowie adaptacja nie jest za darmo blisko nasycenia.
+#
+# HIPOTEZY ZAPISANE PRZED POMIAREM (na `mid`, tam leży trening):
+#   K0 (WARUNEK, czytać PIERWSZY): rdzeń na czystym `mid` vs Webster. Jeśli rdzeń
+#      przegrywa już na czystym, K1 jest trywialne, a K2–K4 trzeba czytać jako
+#      „która dźwignia zbliża politykę do Webstera", nie „która schodzi pod FixedTime".
+#      Wtedy wynik Krakowa do pracy brzmi: na sieci niejednorodnej blisko nasycenia
+#      dobrze zestrojony program stałoczasowy jest bazą, którą trudno pobić — co samo
+#      w sobie wzmacnia sens fallbacku do niego.
+#   K1 (C4): przy `mask0p5` i `mask*_intersection` rdzeń i obie reguły MP gorsze od
+#      FixedTime-Webster. Smoke 2026-10-09: Advanced-MP przy `mask0p25_intersection`
+#      846 s wobec 283 s na czystym (przepustowość 2750 → 1646) — kierunek już widać.
+#   K2 (C6): DR vs rdzeń — podatek na `clean` (+, mały), istotny zysk przy `mask0p5`
+#      i `mask0p5_intersection`.
+#   K3 (rozwiązanie): DR + bramka poniżej FixedTime-Webster przy `mask0p5`. NAJSŁABSZA
+#      z hipotez: Webster jest tu dużo mocniejszy niż `t_fixed: 30` na CityFlow
+#      (`mid` 347,6 s wobec 390,2 s dla `t_fixed: 30`), więc próg do pobicia jest wyżej.
+#   K4 (bramka): bramka-reguła istotnie lepsza od rdzenia przy maskach skrzyżowań;
+#      przy `drift` — koszt (fałszywe alarmy, jak w `t2_uw_rule`, +11 s JiNan).
+#   K5 (OOD, `low`/`high`): kierunek K1–K3 ten sam; na `high` (za kolanem nasycenia)
+#      polityka może przegrywać z Websterem już na czystym — wtedy to jest wynik
+#      o generalizacji poza ruch treningowy, nie o odporności.
+#   Odczyt: K1+K2+K4 → C4 i C6 replikują się na trzeciej sieci i drugim symulatorze.
+#   K3 obalona → „rozwiązanie schodzi pod FixedTime" zawęzić do FixedTime BEZ programu
+#   na porę dnia; to uczciwsze zdanie, a nie porażka.
+#
+# WYMAGA: suite'ów `k1_core` i `k1_fail` (glider, `world: sumo`) oraz
+#   tsc rulecal -n sumo_krakow3w_{low,mid,high}   (rule_ref — rsync z laptopa albo policzyć)
+#   .venv/bin/python data/raw_data/krakow_3w/build.py webster   (programy w repo)
+name: t2_krakow
+mode: realistic
+draws: 3
+timeout: 14400
+
+networks: [sumo_krakow3w_mid, sumo_krakow3w_low, sumo_krakow3w_high]
+
+controllers:
+  gatppo:
+    seeds: [0, 1, 2]
+    parent: "{agent}__sumo_krakow3w_mid__s{seed}_y{yellow}__k1_core"
+  gatppo_fail:
+    agent: gatppo
+    seeds: [0, 1, 2]
+    parent: "{agent}__sumo_krakow3w_mid__s{seed}_y{yellow}__k1_fail"
+    baseline: gatppo
+  gatppo_gate:
+    agent: gatppo
+    seeds: [0, 1, 2]
+    parent: "{agent}__sumo_krakow3w_mid__s{seed}_y{yellow}__k1_core"
+    gate: {kind: rule, k_on: 3, k_off: 6}
+  gatppo_fail_gate:
+    agent: gatppo
+    seeds: [0, 1, 2]
+    parent: "{agent}__sumo_krakow3w_mid__s{seed}_y{yellow}__k1_fail"
+    gate: {kind: rule, k_on: 3, k_off: 6}
+    baseline: gatppo_fail
+  advancedmp: {}
+  efficientmp: {}
+  fixedtime: {}
+
+scenarios:
+  - {kind: gauss, level: 2.0}
+  - {kind: mask, level: 0.25}
+  - {kind: mask, level: 0.5}
+  - {kind: mask, level: 0.25, unit: intersection}
+  - {kind: mask, level: 0.5, unit: intersection}
+  - {kind: mask, level: 0.5, substitution: hold, onset: 60}
+  - {kind: drift, level: 0.3}

@@ -1232,3 +1232,93 @@ def test_plan_t2_train_uw_rule_paruje_trening_z_doklejeniem():
     )
     assert not wspolny_checkpoint(plan, "gatppo_fail_uw_rule", "gatppo_fail_uwinf")
     assert wspolny_checkpoint(plan, "gatppo_fail_uwinf", "gatppo_fail")
+
+
+# ----------------------------------------------- FixedTime z programem Webstera (Kraków)
+
+
+def skrzyzowanie(id_, faza, czas, n_faz):
+    """Fazy zielone mają STANY `S0`, `S1`, … — po nich dopasowuje się program."""
+    return SimpleNamespace(
+        id=id_,
+        current_phase=faza,
+        current_phase_time=czas,
+        phases=list(range(n_faz)),
+        green_phases=[SimpleNamespace(state=f"S{k}") for k in range(n_faz)],
+    )
+
+
+def test_webster_trzyma_kazda_faze_wlasny_czas_plus_zolte():
+    """Próg = żółte + zielone fazy: licznik nowej fazy rusza razem z przejściem.
+    Program podany w INNEJ kolejności niż fazy — dopasowanie idzie po stanie."""
+    a = skrzyzowanie("A", 0, 24, 2)
+    b = skrzyzowanie("B", 1, 24, 3)
+    programy = {"A": {"S1": 40, "S0": 20}, "B": {"S2": 30, "S0": 10, "S1": 20}}
+    ft = c.FixedTimeController([a, b], t_fixed=30, greens=programy, yellow=5)
+    assert ft.act(None).tolist() == [0, 1]  # A: 24 < 25, B: 24 < 25
+    a.current_phase_time = b.current_phase_time = 25
+    assert ft.act(None).tolist() == [1, 2]  # oba przekroczyły żółte + zielone
+
+
+def test_bez_programu_zachowanie_bez_zmian():
+    """JiNan/HangZhou: `t_fixed` jak dotąd — kolumna `fixedtime` z T1/T2 ta sama."""
+    inter = skrzyzowanie("A", 0, 29, 4)
+    ft = c.FixedTimeController([inter], t_fixed=30)
+    assert ft.act(None).tolist() == [0]
+    inter.current_phase_time = 30
+    assert ft.act(None).tolist() == [1]
+
+
+def test_program_musi_pasowac_do_struktury_faz():
+    with pytest.raises(ValueError, match="struktura faz"):
+        c.FixedTimeController(
+            [skrzyzowanie("A", 0, 0, 3)], t_fixed=30, greens={"A": {"S0": 20, "S1": 40}}
+        )
+    with pytest.raises(ValueError, match="bez skrzyżowań"):
+        c.FixedTimeController([skrzyzowanie("A", 0, 0, 2)], t_fixed=30, greens={})
+
+
+def test_program_stalaczasowy_tylko_tam_gdzie_siec_go_deklaruje():
+    """JiNan/HangZhou bez `fixedTimeProgram` → None, czyli `t_fixed` jak dotąd."""
+    from tsc_marl.paths import DATA  # noqa: PLC0415
+    from tsc_marl.runner.degrade import fixed_time_program  # noqa: PLC0415
+
+    assert fixed_time_program("cityflow_jinan3x4_4ph") is None
+    assert fixed_time_program("cityflow_hangzhou4x4_4ph") is None
+    if not (DATA / "raw_data" / "krakow_3w" / "3w_mid.webster.json").is_file():
+        with pytest.raises(SystemExit, match="webster"):
+            fixed_time_program("sumo_krakow3w_mid")
+    else:
+        program = fixed_time_program("sumo_krakow3w_mid")
+        assert len(program) == 25 and all(program.values())
+
+
+# ------------------------------------- reguła na sieci niejednorodnej (Kraków, 1–7 wlotów)
+
+
+def test_dopchane_ruchy_nie_licza_sie_jako_zamrozone():
+    """Węzeł 1 ma JEDEN prawdziwy ruch (drugi slot dopchany zerem). Zdrowy prawdziwy
+    ruch → 0 zamrożonych, choć dopchany slot stoi. Bez maski wyszłoby 0,5."""
+    podejrzane = np.array([[False, False], [False, True]])
+    real = np.array([[True, True], [True, False]])
+    assert c.frozen_fraction(podejrzane, None).tolist() == [0.0, 0.5]
+    assert c.frozen_fraction(podejrzane, real).tolist() == [0.0, 0.0]
+    podejrzane[1, 0] = True  # teraz martwy jest jedyny prawdziwy ruch
+    assert c.frozen_fraction(podejrzane, real).tolist() == [0.0, 1.0]
+
+
+def test_regula_z_maska_ruchow_na_wezle_z_jednym_wlotem():
+    bramka = c.RuleGate(
+        window=OKNO, threshold=0.5, n_mov=N_MOV, real=np.array([[True, True], [True, False]])
+    )
+    x = obserwacje(OKNO, zamrozony=(1,))  # węzeł 1: zamrożony tylko slot dopchany
+    for t in range(OKNO):
+        maska = bramka.mask(x[t])
+    assert maska.tolist() == [False, False]
+
+
+def test_maska_ruchow_tylko_na_sieci_niejednorodnej():
+    from tsc_marl.core.features import phase_mask  # noqa: PLC0415 - ta sama funkcja
+
+    assert phase_mask([8, 8, 8], 8) is None
+    assert phase_mask([8, 4], 8)[1].tolist() == [True] * 4 + [False] * 4

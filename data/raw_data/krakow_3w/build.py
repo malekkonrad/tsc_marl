@@ -11,6 +11,11 @@ w `tsc_marl_research/krakow-its.md`. Kroki (każdy idempotentny, domyślnie wszy
              skrzyżowań złączone, programy stałoczasowe z heurystyki netconverta.
     demand   randomTrips → `3w_{poziom}.rou.xml`: popyt SYNTETYCZNY (poziom 0 z notatki —
              bez liczników ZDMK), wagi wg liczby pasów i prędkości, 3600 s jak w protokole.
+    webster  tlsCycleAdaptation (Webster) osobno dla KAŻDEGO poziomu popytu →
+             `3w_{poziom}.webster.json` {sygnalizacja: {stan sygnałów fazy: zielone [s]}}.
+             Odpowiednik krakowskiej praktyki „≥4 programy na pory dnia": każdy poziom
+             popytu to inna pora dnia, a FixedTime dostaje program pod TEN popyt, który
+             widzą wszystkie sterowniki (bez tego porównanie byłoby chochołem).
     profile  tabela sygnalizacji (wloty, ruchy, fazy zielone) + bieg SUMO na programach
              stałoczasowych dla każdego poziomu popytu. Nic nie zapisuje.
 
@@ -41,9 +46,15 @@ HIGHWAYS = (
 )
 OVERPASS = "https://overpass-api.de/api/interpreter"
 
-# Okres między wyjazdami w randomTrips [s]. Wartości ROBOCZE — do kalibracji tak,
-# żeby poziomy szły od niedosyconego do przesyconego (warunek z Planu B notatki).
-DEMAND_PERIOD = {"low": 2.0, "mid": 1.2, "high": 0.8}
+# Okres między wyjazdami w randomTrips [s] — SKALIBROWANE 2026-10-09 sweepem popytu
+# (programy netconverta, 1 h ruchu, strata czasu / teleporty / kolejka na wjazd):
+#   1800 poj/h  100 s / 0           → low:  wyraźnie niedosycony
+#   4500 poj/h  141 s / 2           → mid:  tuż przed kolanem nasycenia
+#   5143 poj/h  230 s / 31 (0,6%)   → high: za kolanem, bez masowych teleportów
+#   5538 poj/h  302 s / 107 (1,9%), kolejka na wjazd 18 — teleporty zaczynają psuć ATT
+#   6000+ poj/h zakleszczenie: 239 → 5878 teleportów, ATT bez znaczenia
+# Warunek z Planu B notatki: poziomy od niedosyconego do przesyconego.
+DEMAND_PERIOD = {"low": 2.0, "mid": 0.8, "high": 0.7}
 DEMAND_END = 3600
 SEED = 0
 
@@ -147,6 +158,74 @@ def step_demand() -> None:
         print(f"demand: {level:5s} okres {period} s → {routes(level).name}")
 
 
+# Webster: strata czasu na fazę = przejście z protokołu (3 s żółtego + 2 s all-red,
+# `sumo_world` / `trainer.yellow_length`), nasycenie 1800 poj/h/pas (`-H 2`, wartość
+# podręcznikowa). Cykl w granicach domyślnych narzędzia.
+WEBSTER_LOST_TIME = 5
+WEBSTER_SAT_HEADWAY = 2.0
+
+
+def webster(level: str) -> Path:
+    return HERE / f"3w_{level}.webster.json"
+
+
+def step_webster() -> None:
+    import json  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
+
+    import sumolib  # noqa: PLC0415
+
+    tool = sumo_home() / "tools" / "tlsCycleAdaptation.py"
+    for level in DEMAND_PERIOD:
+        with tempfile.TemporaryDirectory() as tmp:
+            add = Path(tmp) / "webster.add.xml"
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(tool),
+                    "-n",
+                    str(NET),
+                    "-r",
+                    str(routes(level)),
+                    "-b",
+                    "0",
+                    "-y",
+                    "3",
+                    "-l",
+                    str(WEBSTER_LOST_TIME),
+                    "-H",
+                    str(WEBSTER_SAT_HEADWAY),
+                    "-o",
+                    str(add),
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            # Klucz = STAN sygnałów, nie indeks: adapter odkrywa fazy zielone symulacją
+            # (`world_sumo.generate_valid_phase`: unikalne stany bez `y` i bez samych
+            # `r`/`s`), więc indeks fazy w programie nie musi być indeksem akcji.
+            # Ten sam filtr tu i tam — dopasowanie robi `FixedTimeController`.
+            programs = {
+                tl.id: {
+                    ph.state: float(ph.duration)
+                    for ph in tl.phase
+                    if "y" not in ph.state
+                    and ph.state.count("r") + ph.state.count("s") != len(ph.state)
+                }
+                for tl in sumolib.xml.parse(str(add), "tlLogic")
+            }
+        webster(level).write_text(json.dumps(programs, indent=1, sort_keys=True))
+        cykle = sorted(
+            int(sum(g.values()) + WEBSTER_LOST_TIME * len(g)) for g in programs.values() if g
+        )
+        print(
+            f"webster: {level:5s} {len(programs)} sygnalizacji, cykl (zielone + przejścia) "
+            f"min {cykle[0]} / mediana {cykle[len(cykle) // 2]} / max {cykle[-1]} s "
+            f"→ {webster(level).name}"
+        )
+
+
 def step_profile() -> None:
     import sumolib  # noqa: PLC0415
 
@@ -210,7 +289,7 @@ def step_profile() -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
-    steps = ("osm", "net", "demand", "profile")
+    steps = ("osm", "net", "demand", "webster", "profile")
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     # bez `choices`: argparse 3.10 przy nargs="*" odrzuca wtedy także pustą listę
     p.add_argument("steps", nargs="*", metavar="{" + ",".join(steps) + "}")
@@ -225,6 +304,8 @@ def main(argv: list[str] | None = None) -> None:
         step_net()
     if "demand" in args.steps:
         step_demand()
+    if "webster" in args.steps:
+        step_webster()
     if "profile" in args.steps:
         step_profile()
 

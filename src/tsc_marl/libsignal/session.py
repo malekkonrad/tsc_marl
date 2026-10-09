@@ -250,6 +250,14 @@ def session(
         yield Session(run=run, config=config, logger=logger, args=args, device=device)
 
 
+def world_kind(network: str) -> str:
+    """`sumo` dla sieci SUMO (`configs/sim/sumo_*.cfg`, Kraków), `cityflow` dla reszty.
+
+    Po nazwie, bo tak nazwane są configi — a `standalone_world` (ewaluacja T2, zrzuty
+    BC, kalibracja progu) nie dostaje flagi `-w` z linii poleceń jak trening."""
+    return "sumo" if network.startswith("sumo_") else "cityflow"
+
+
 @contextmanager
 def standalone_world(
     agent: str,
@@ -281,15 +289,22 @@ def standalone_world(
     from tsc_marl import paths
     from tsc_marl.runner.train import parse_args
 
-    args = parse_args(["-a", agent, "-n", network])
+    kind = world_kind(network)
+    args = parse_args(["-a", agent, "-w", kind, "-n", network])
     with libsignal.sim_configs_untouched():
         config, _ = resolve(args, config_patch)
         build_interfaces(config)
 
-        from world.world_cityflow import World
-
         cfg = paths.CONFIGS / "sim" / f"{network}.cfg"
-        world = World(str(cfg), thread_num=config["trainer"].get("thread", 4), interface="libsumo")
+        thread = config["trainer"].get("thread", 4)
+        if kind == "sumo":
+            # adapter `sumo_world` (zarejestrowany przez `register_engine_components`),
+            # nie upstreamowy `world_sumo` — ta sama ścieżka co `tsc core -w sumo`
+            world = Registry.mapping["world_mapping"]["sumo"](str(cfg), thread, interface="libsumo")
+        else:
+            from world.world_cityflow import World
+
+            world = World(str(cfg), thread_num=thread, interface="libsumo")
         n = len(world.intersections) if n_agents is None else n_agents
         agents = [Registry.mapping["model_mapping"][agent](world, rank) for rank in range(n)]
         yield world, agents, config

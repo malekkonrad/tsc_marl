@@ -249,15 +249,22 @@ def gate_reference(network: str) -> Any:
     Wspólne dla bramki-reguły w ewaluacji, modulacji z reguły w ewaluacji i modulacji
     z reguły w TRENINGU — jedno ładowanie, żeby polityka nie uczyła się na innym
     oknie albo progu, niż potem mierzy ją `tsc degrade`."""
+    from tsc_marl.robustness import rule_ref  # noqa: PLC0415
     from tsc_marl.uncertainty import obs_head as oh  # noqa: PLC0415
 
     sciezka = oh.gate_path(network)
-    if not sciezka.is_file():
-        raise SystemExit(
-            f"brak progów bramki dla '{network}' ({sciezka.name}) — policz je: "
-            f"tsc obshead -n {network} --save --window 12 --persistence"
-        )
-    return oh.load_gates(sciezka, network=network, head=oh.head_path(network))
+    if sciezka.is_file():
+        return oh.load_gates(sciezka, network=network, head=oh.head_path(network))
+    # Sieć bez głowy (Kraków, SUMO): sam próg reguły, tym samym przepisem — patrz
+    # `robustness/rule_ref.py`. `uq` jest wtedy None i bramka UQ się nie zbuduje.
+    regula = rule_ref.rule_path(network)
+    if regula.is_file():
+        return rule_ref.load_rule(regula, network=network)
+    raise SystemExit(
+        f"brak progów bramki dla '{network}' — policz je: "
+        f"tsc obshead -n {network} --save --window 12 --persistence (CityFlow, z głową) "
+        f"albo tsc rulecal -n {network} (sama reguła, także SUMO)"
+    )
 
 
 def uw_signal(uw: dict[str, Any], network: str, env: Any) -> Any:
@@ -292,6 +299,7 @@ def uw_signal(uw: dict[str, Any], network: str, env: Any) -> Any:
             n_mov=env.features.n_mov,
             tau=float(0.25 if tau is None else tau),
             channels=channels,
+            real=env.features.movement_mask(),
         )
     return online_uncertainty(
         network, env.features.n_mov, edge_index, tau=tau, side=uw.get("side", "target")

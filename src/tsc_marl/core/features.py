@@ -208,6 +208,18 @@ class StateBuilder:
         na poziomie modułu. None na sieciach jednorodnych."""
         return phase_mask([len(inter.phases) for inter in self.intersections], self.n_phases)
 
+    def movement_mask(self) -> np.ndarray | None:
+        """[N, n_mov] bool — które kolumny bloku cech to PRAWDZIWE ruchy skrzyżowania,
+        a które dopchane zerami do `n_mov` (maksimum po sieci). None na sieciach
+        jednorodnych — ta sama konwencja co `phase_mask`.
+
+        Potrzebne licznikowi zamrożonych odczytów (`RuleGate`, `RuleUncertainty`):
+        dopchane zero NIGDY się nie zmienia, więc bez maski węzeł z jednym wlotem
+        (Kraków: 1–7 wlotów) wyglądałby na w większości martwy także na czystym ruchu,
+        a próg kalibrowany kwantylem na czystym wyszedłby ~1,0 — bramka nigdy by nie
+        strzeliła."""
+        return phase_mask([len(st.movements) for st in self.structs], self.n_mov)
+
     # ------------------------------------------------------------------ odczyt
 
     def _snapshot(self) -> tuple[dict, dict, dict]:

@@ -110,25 +110,69 @@ class PressureController:
 
 class FixedTimeController:
     """Jak `agent/fixedtime.py`: trzymaj fazę `t_fixed` sekund, potem następna.
-    Jedyny sterownik niezależny od odczytów — dolna warstwa fallbacku z planu."""
+    Jedyny sterownik niezależny od odczytów — dolna warstwa fallbacku z planu.
+
+    `greens` (opcjonalnie): {id skrzyżowania: {stan sygnałów fazy: zielone [s]}} —
+    program WEBSTERA (Kraków, `data/raw_data/krakow_3w/build.py webster`). Dopasowanie
+    po STANIE fazy (`inter.green_phases[k].state`), nie po indeksie: adapter SUMO odkrywa
+    fazy symulacją, więc indeks akcji nie musi być indeksem fazy w programie. Bez
+    `greens` każda faza trzyma `t_fixed` (JiNan/HangZhou — liczby się nie zmieniają).
+
+    PRÓG Z WEBSTEREM = żółte + zielone. Licznik `current_phase_time` nowej fazy rusza
+    razem z fazą przejściową (`sumo_world`: zmiana fazy zeruje licznik, a po żółtym
+    tylko podmienia `current_phase`), więc sam czas zielonego jako próg obcinałby
+    każdą fazę o długość żółtego. Przy `t_fixed` tej korekty nie ma, bo LibSignalowe
+    `t_fixed` i tak było liczone tym samym licznikiem — zostaje bez zmian, żeby
+    kolumna `fixedtime` z T1/T2 była tą samą liczbą.
+    """
 
     state_independent = True
 
-    def __init__(self, intersections: Sequence[Any], *, t_fixed: int, name: str = "fixedtime"):
+    def __init__(
+        self,
+        intersections: Sequence[Any],
+        *,
+        t_fixed: int,
+        greens: dict[str, dict[str, float]] | None = None,
+        yellow: int = 0,
+        name: str = "fixedtime",
+    ):
         self.intersections = list(intersections)
         self.t_fixed = t_fixed
         self.name = name
+        self.limits: list[list[float]] | None = None
+        if greens is not None:
+            brak = [i.id for i in self.intersections if i.id not in greens]
+            if brak:
+                raise ValueError(f"program stałoczasowy bez skrzyżowań: {brak[:5]}")
+            self.limits = []
+            for inter in self.intersections:
+                program = greens[inter.id]
+                stany = [ph.state for ph in inter.green_phases]
+                brak = [st for st in stany if st not in program]
+                if brak or len(stany) != len(program):
+                    raise ValueError(
+                        f"{inter.id}: program ma {len(program)} faz zielonych, skrzyżowanie "
+                        f"{len(stany)} (bez dopasowania: {brak[:2]}) — struktura faz "
+                        "rozjechała się z siecią"
+                    )
+                self.limits.append([yellow + program[st] for st in stany])
 
     def act(self, obs: np.ndarray) -> np.ndarray:
         return np.array(
             [
                 inter.current_phase
-                if inter.current_phase_time < self.t_fixed
+                if inter.current_phase_time < self._limit(i, inter)
                 else (inter.current_phase + 1) % len(inter.phases)
-                for inter in self.intersections
+                for i, inter in enumerate(self.intersections)
             ],
             dtype=np.int64,
         )
+
+    def _limit(self, i: int, inter: Any) -> float:
+        if self.limits is None:
+            return self.t_fixed
+        return self.limits[i][inter.current_phase]
 
 
 class PolicyController:
@@ -652,11 +696,12 @@ class RuleUncertainty:
         n_mov: int,
         tau: float,
         channels: str = "all",
+        real: np.ndarray | None = None,
     ) -> None:
         if tau <= 0:
             raise ValueError(f"τ musi być dodatnie, jest {tau}")
         _check_channels(channels)
-        self._gate = RuleGate(window=window, threshold=threshold, n_mov=n_mov)
+        self._gate = RuleGate(window=window, threshold=threshold, n_mov=n_mov, real=real)
         self.src = edge_index[0].numpy()
         self.tau = float(tau)
         self.channels = channels
@@ -683,8 +728,12 @@ class RuleGate:
     równie dobrze jak głowa niepewności, głowa nie zarabia w tej pracy na siebie.
     """
 
-    def __init__(self, *, window: int, threshold: float, n_mov: int) -> None:
+    def __init__(
+        self, *, window: int, threshold: float, n_mov: int, real: np.ndarray | None = None
+    ) -> None:
         self.window, self.threshold, self.n_mov = window, threshold, n_mov
+        # [N, n_mov] — prawdziwe ruchy (`StateBuilder.movement_mask`); None = wszystkie
+        self.real = real
         self._buf: list[np.ndarray] = []
 
     def reset(self) -> None:
@@ -706,8 +755,18 @@ class RuleGate:
         hist = np.stack(self._buf)  # [k, N, F]
         win = np.arange(self.window)[None, :]  # okno NAJNOWSZEGO kroku
         podejrzane = suspicious_movements(hist, win, self.n_mov)[0]  # [N, n_mov]
-        self.last_score = podejrzane.mean(-1)
+        self.last_score = frozen_fraction(podejrzane, self.real)
         return self.last_score >= self.threshold
+
+
+def frozen_fraction(podejrzane: np.ndarray, real: np.ndarray | None) -> np.ndarray:
+    """Ułamek zamrożonych ruchów węzła liczony WYŁĄCZNIE po prawdziwych ruchach.
+
+    `real` None (sieć jednorodna) → zwykła średnia, czyli dokładnie to, co liczono
+    dla JiNan/HangZhou. Wspólne dla bramki, modulacji i kalibracji progu."""
+    if real is None:
+        return podejrzane.mean(-1)
+    return (podejrzane & real).sum(-1) / np.maximum(real.sum(-1), 1)
 
 
 class UQGate:

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
-<!-- generated on 2026-09-13 22:29:12.337783 by Eclipse SUMO randomTrips.py v1.27.1
+<!-- generated on 2026-10-09 10:42:50.627654 by Eclipse SUMO randomTrips.py v1.27.1
 <configuration>
     <net-file value="/home/konrad/Projects/thesis/tsc_marl/data/raw_data/krakow_3w/3w.net.xml"/>
     <output-trip-file value="/home/konrad/Projects/thesis/tsc_marl/data/raw_data/krakow_3w/3w_low.trips.xml"/>
@@ -14,7 +14,7 @@
 </configuration>
 -->
 
-<!-- generated on 2026-09-13T22:29:12.140025+01:00 by Eclipse SUMO duarouter 1.27.1
+<!-- generated on 2026-10-09T10:42:50.448339+01:00 by Eclipse SUMO duarouter 1.27.1
 <duarouterConfiguration xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/duarouterConfiguration.xsd">
 
     <input>
