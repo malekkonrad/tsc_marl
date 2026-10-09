@@ -98,9 +98,20 @@ def obshead(
     mask_variants: bool = typer.Option(
         False, help="porównaj warianty na martwych detektorach -> results/gate_2_2_masks.md"
     ),
+    save: bool = typer.Option(
+        False, help="ucz SAMĄ głowę (bez bramki) i zapisz artefakt -> runs/heads/"
+    ),
+    reference: str | None = typer.Option(
+        None,
+        help="policz SAMO u_ref (target|source) dla ISTNIEJĄCEJ głowy, bez przeuczania",
+    ),
 ) -> None:
     """Bramka prototypu 2.2 — głowa obserwacyjna (per ruch → krawędź) -> results/gate_2_2.md."""
     from tsc_marl.uncertainty import obs_head as module
+
+    if reference is not None:
+        print(module.save_reference(network, reference))
+        return
 
     if mask_variants:
         print(module.mask_variants(network=network))
@@ -108,6 +119,10 @@ def obshead(
     cfg = module.ObsConfig(
         window=window, neighbors=neighbors, epochs=epochs, persistence=persistence
     )
+    if save:
+        for path in module.train_head(network, cfg):
+            print(path)
+        return
     print(module.run(cfg, network=network))
 
 
@@ -221,12 +236,20 @@ def degrade_run(
     jobs: int = typer.Option(1, "--jobs", "-j", help="ile punktów liczyć naraz"),
     replace: bool = typer.Option(False, "--replace", help="policz ponownie także gotowe"),
     stagger: float = typer.Option(15.0, help="sekundy między startami podprocesów"),
+    trace: bool = typer.Option(
+        False,
+        "--trace",
+        help="zapisz ślad bramki per (decyzja, węzeł) do gate_trace.csv — do wyjaśniania "
+        "pojedynczych przełączeń; NIE zmienia decyzji ani odcisku biegu",
+    ),
 ) -> None:
     """Policz brakujące punkty planu (sterownik × sieć × seed, wszystkie scenariusze)."""
     from tsc_marl.robustness.degrade import load_plan
     from tsc_marl.runner import degrade
 
-    licznik = degrade.run_plan(load_plan(plan), jobs=jobs, replace=replace, stagger=stagger)
+    licznik = degrade.run_plan(
+        load_plan(plan), jobs=jobs, replace=replace, stagger=stagger, trace=trace
+    )
     if licznik.get("failed") or licznik.get("timeout"):
         raise typer.Exit(1)
 
@@ -239,7 +262,11 @@ def degrade_status(plan: str = typer.Argument(...)) -> None:
 
     for w in degrade.status(load_plan(plan)):
         att = f"{w['att_clean']:.1f}" if w["att_clean"] is not None else "—"
-        print(f"{w['run_id']:64s} {w['status']:8s} {att:>7s}  ← {w['rodzic']}")
+        # marker TYLKO dla biegu, który istnieje, ale ma inne parametry — brakujący
+        # policzy się sam, bez `--replace`, i mylące byłoby sugerowanie inaczej
+        przestarzaly = w["status"] != "brak" and not w["aktualny"]
+        aktualny = "  NIEAKTUALNY (--replace)" if przestarzaly else ""
+        print(f"{w['run_id']:64s} {w['status']:8s} {att:>7s}  ← {w['rodzic']}{aktualny}")
 
 
 @degrade_app.command("ood")

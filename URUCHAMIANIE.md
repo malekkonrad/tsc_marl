@@ -87,6 +87,8 @@ Gotowe siatki:
 | `p1_abl_meanpool` | ablacja: actor z mean-pool (GraphSAGE) zamiast GAT — GPU |
 | `p1_abl_nognn` | ablacja: actor bez sąsiadów (MLP) — GPU |
 | `p1_abl_state_{queue,pressure,ep}` | ablacja stanu zamiast ATS — GPU |
+| `p1_fail` | Faza 3: rdzeń trenowany z awariami, BEZ UW (ramię kontrolne) — GPU |
+| `p1_uw` | Faza 3: rdzeń trenowany z awariami I z UW-attention — GPU |
 
 Punkty liczą się **równolegle** flagą `-j`:
 
@@ -143,6 +145,7 @@ testowi z treningu — inaczej ewaluator mierzyłby inną politykę niż tabela 
 uv run tsc dataset -n cityflow_jinan3x4_4ph --episodes 3   # zrzut BC (stan → akcja Advanced-MP)
 uv run tsc prototype                                        # bramka 2.0 -> results/gate_2_0.md
 uv run tsc obshead                                          # bramka 2.2 -> results/gate_2_2.md
+uv run tsc obshead --save --window 12 --persistence         # sama głowa -> runs/heads/ (Faza 3)
 uv run tsc severity                                         # przelicznik dotkliwości awarii
 ```
 
@@ -158,7 +161,7 @@ Wagi treningów żyją tylko na gliderze (kopie `runs/t1` na laptopie są bez `*
 
 | co | gdzie | dlaczego |
 |---|---|---|
-| `entry: core` (gatppo, ablacje `p1_abl_*`) | glider | GPU |
+| `entry: core` (gatppo, ablacje `p1_abl_*`, `p1_fail`, `p1_uw`) | glider | GPU |
 | `tsc degrade run` dla uczonych | glider | potrzebuje wag |
 | `t1_learned`, `t1_learned_paper` | dowolna, CPU | LibSignal nie ma obsługi GPU |
 | `tsc prototype`, `obshead`, `dataset`, reguły w `degrade` | laptop | CPU, minuty |
@@ -179,6 +182,54 @@ to ta sama komenda: gotowe punkty są pomijane, a bieg przerwany na tej maszynie
 po zapisanym `pid`. `DRY=1` tylko wypisuje komendy; `CPU_J`/`GPU_J` zmieniają
 równoległość.
 
+**UW-attention (Faza 3) — po zakończeniu `noc.sh`:**
+
+```bash
+rsync -av runs/heads/ glider:tsc_marl/runs/heads/   # z LAPTOPA: głowa + u_ref (240 kB)
+bash deploy/glider/uw.sh                            # plan t2_uw w tle
+```
+
+Głowę liczy się na laptopie (`tsc obshead --save`, ~10 s) i kopiuje RAZEM z `u_ref`:
+τ i tabela A3a są zapisane dla TEGO artefaktu, a `u_ref` z innej głowy to liczby
+w innych jednostkach (`load_reference` sprawdza odcisk pliku i odmawia). Skrypt nie
+wystartuje, jeśli brakuje artefaktu dla którejś sieci planu — inaczej punkty
+zostałyby po cichu pominięte.
+
+**Trening polityki Z mechanizmem (Faza 3 §3) — po zakończeniu `noc.sh`:**
+
+```bash
+rsync -av runs/heads/ glider:tsc_marl/runs/heads/   # z LAPTOPA, jeśli jeszcze nie ma
+bash deploy/glider/train_uw.sh                      # 2 treningi + T2 w tle
+```
+
+Odpowiada na pytanie, którego `t2_uw` nie rozstrzygnęło: modulacji nie da się
+**dokleić** do gotowej polityki — ale czy polityka **trenowana** z log ρ nauczyłaby
+się na nim polegać. Trzy ramiona, bo bez ramienia kontrolnego poprawę dałoby się
+przypisać samemu treningowi z awariami:
+
+| ramię | co | gdzie |
+|---|---|---|
+| 1 | rdzeń trenowany na czystym | `p1_gate` (liczy `noc.sh`) |
+| 2 | rdzeń trenowany **z awariami**, bez UW | `p1_fail` |
+| 3 | rdzeń trenowany z awariami **i z UW** | `p1_uw` |
+| — | T2 na wszystkich trzech | `t2_train_uw` → `results/t2_train_uw.md` |
+
+Raport czyta się dwoma odczytami: **2 vs 1** = ile daje sam trening z awariami,
+**3 vs 2** = ile daje mechanizm ponad to. Kolumna odniesienia jest w planie jawna
+(`baseline: gatppo_fail`) — bez tego raport sparowałby ramię 3 z ramieniem 1 i mierzył
+obie przyczyny naraz.
+
+Awarie w treningu wstrzykuje `model.failure_mix` (blok `overrides` w obu suite'ach,
+**identyczny** — pilnuje tego test). Scenariusz losuje się na epizod ze strumienia
+niezależnego od `--seed`, żeby oba ramiona widziały ten sam harmonogram. Skala
+domyślna to wersja minimalna: JiNan × 3 seedy × 2 ramiona = 6 biegów; poszerzenie to
+dopisanie sieci/seedów do `grid` (policzone punkty zostają pominięte).
+
+Czy mechanizm w ogóle żyje w treningu — kolumny `uw_spread` / `uw_active`
+w `runs/t1/gatppo__*__p1_uw/metrics.csv` (`split=train`). Na starcie będą wysokie,
+bo nieuczona polityka korkuje sieć i `u` wychodzi ponad `u_ref` wszędzie (`u_ref` jest
+skalibrowane na zrzucie BC — ograniczenie opisane w `robustness/training.py`).
+
 **Test gałęzi epistemic — po zakończeniu `noc.sh`:**
 
 ```bash
@@ -190,6 +241,12 @@ treningowym, lżejszym (JiNan ×0,25, inny wzorzec) i cięższym (realny HangZho
 pojazdów). Werdykt w `results/t2_ood_epistemic.md`: czy polityka przegrywa z MaxPressure na nowym
 ruchu i czy rozbieżność actorów rośnie tam mocniej niż pod szumem detektorów.
 
+**Podział własności: glider liczy BIEGI (`runs/`), raporty robi laptop (`results/`).**
+Skrypty z `deploy/glider/` celowo nie wołają `tsc degrade report` ani `tsc table` —
+`results/` jest katalogiem wersjonowanym, więc generowanie go na gliderze kończy się
+zablokowanym `git pull` („untracked working tree files would be overwritten"). Raport
+to sekundy liczenia z `runs/`, więc nic na tym nie tracisz.
+
 Nie licz tego samego `run_id` na obu maszynach — przy synchronizacji jeden katalog
 nadpisze drugi. Po liczeniu na gliderze przenieś wyniki razem z wagami:
 
@@ -197,6 +254,10 @@ nadpisze drugi. Po liczeniu na gliderze przenieś wyniki razem z wagami:
 rsync -av glider:tsc_marl/runs/t1/ runs/t1/      # z wagami (potrzebne do degrade)
 rsync -av glider:tsc_marl/runs/t2/ runs/t2/
 ```
+
+Wyniki T2 to katalogi `runs/t2/<run_id>/` (`result.json`, `metrics.csv`, `config.resolved.yml`),
+więc przenoszą się tym samym `rsync` co reszta. Raport przelicza się z nich na laptopie
+(`uv run tsc degrade report t2_uw`) — nie trzeba go kopiować.
 
 ---
 

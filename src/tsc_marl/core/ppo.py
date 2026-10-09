@@ -10,7 +10,7 @@ KAŻDY AGENT JEST OSOBNĄ PRÓBKĄ w batchu. Przy współdzielonych wagach (patr
 siedzi w tym, co widzi krytyk (2-hop + kontekst globalny) i czego nie widzi
 actor (tylko o_i i sąsiedzi) — czyli w `nets.py`, nie tutaj.
 
-CZTERY PUŁAPKI, KTÓRE TEN PLIK OBSŁUGUJE JAWNIE:
+PIĘĆ PUŁAPEK, KTÓRE TEN PLIK OBSŁUGUJE JAWNIE:
 
 1. TRUNCATION ≠ TERMINATION. Epizod kończy się po 3600 s, a nie dlatego, że stan
    jest końcowy — ruch płynie dalej. Ustawienie `done=True` na ostatnim kroku
@@ -31,6 +31,12 @@ CZTERY PUŁAPKI, KTÓRE TEN PLIK OBSŁUGUJE JAWNIE:
 4. GRADIENT W ROLLOUTCIE. Zbieranie danych musi lecieć w `torch.no_grad()` —
    inaczej graf obliczeniowy z całego epizodu (240 decyzji) zostaje w pamięci.
    To odpowiedzialność wołającego, tak samo jak przy `ActorCritic.act`.
+
+5. SKLEJANIE log ρ W MINIBATCHU (Faza 3). Bufor trzyma [T, E+N] — każdy krok
+   w jednym kawałku — a warstwa attention oczekuje układu sklejonego grafu:
+   najpierw WSZYSTKIE krawędzie k grafów, dopiero potem k·N pętli własnych.
+   Naiwne `reshape(-1)` ma poprawną długość i mylny układ, i nie zgłasza tego
+   nic. Robi to `tiled_log_rho`, jedyną drogą, i tylko ona.
 """
 
 from __future__ import annotations
@@ -166,6 +172,39 @@ def batch_vector(n_nodes: int, k: int, device: torch.device | None = None) -> Te
     return torch.arange(k, device=device).repeat_interleave(n_nodes)
 
 
+def tiled_log_rho(log_rho: Tensor, n_edges: int, n_nodes: int) -> Tensor:
+    """[k, E+N] (log ρ per KROK CZASU) -> [k·(E+N)] w kolejności sklejonego grafu.
+
+    JEDYNE MIEJSCE NA CICHY BŁĄD W CAŁEJ FAZIE 3 — pułapka nr 3 z docstringu
+    `uw_attention.py`, tu uderzająca realnie. Kontrakt warstwy brzmi „ta sama
+    kolejność co `edge_index` PRZEKAZANY DO `forward`", a ten dla minibatcha
+    powstaje z `tiled_edge_index`, czyli:
+
+        wszystkie E krawędzi grafu 0, potem grafu 1, …, potem grafu k−1,
+        a NA SAMYM KOŃCU k·N pętli własnych, w kolejności węzłów 0…k·N−1
+        (bo `add_self_loops` dokłada je na końcu, już po sklejeniu).
+
+    Czyli bloki krawędzi i bloki pętli są PRZEPLATANE inaczej niż w buforze,
+    gdzie każdy krok trzyma swoje [E+N] w jednym kawałku. Naiwne spłaszczenie
+
+        log_rho.reshape(-1)                          # ŹLE
+        torch.cat([log_rho[0]] * k)                  # ŹLE
+
+    ma POPRAWNĄ DŁUGOŚĆ k·(E+N), przechodzi asercję w `_forward` i liczy bzdury:
+    pierwsze k·E pozycji dostaje pomieszane krawędzie z pętlami. Nic tego nie
+    zgłasza — PyG przepuszcza argumenty `propagate` do `message` nietknięte.
+    Dlatego rozdzielamy jawnie i testujemy porównaniem z forwardami per krok.
+    """
+    if log_rho.dim() != 2 or log_rho.shape[1] != n_edges + n_nodes:
+        raise ValueError(
+            f"log_rho ma być [k, E+N] = [k, {n_edges + n_nodes}], jest {tuple(log_rho.shape)}"
+        )
+    k = log_rho.shape[0]
+    krawedzie = log_rho[:, :n_edges].reshape(k * n_edges)  # graf 0, graf 1, …
+    petle = log_rho[:, n_edges:].reshape(k * n_nodes)  # węzeł 0…N−1 grafu 0, potem grafu 1, …
+    return torch.cat([krawedzie, petle])
+
+
 def compute_gae(
     rewards: Tensor,
     values: Tensor,
@@ -212,6 +251,11 @@ class Minibatch:
     old_values: Tensor  # [k·N], skala SUROWA
     advantages: Tensor  # [k·N]
     returns: Tensor  # [k·N], skala SUROWA
+    #: [k·(E+N)] w kolejności sklejonego grafu (patrz `tiled_log_rho`) albo None,
+    #: gdy bieg idzie bez mechanizmu. None znaczy „warstwa ma liczyć jak oryginał",
+    #: a nie „wektor zer" — to są dwie różne ścieżki w `uw_attention` i tylko
+    #: pierwsza jest bit w bit zgodna z rdzeniem z Fazy 1.
+    log_rho: Tensor | None = None
 
 
 class RolloutBuffer:
@@ -233,16 +277,28 @@ class RolloutBuffer:
         ob_length: int,
         edge_index: Tensor,
         device: torch.device | str = "cpu",
+        *,
+        with_log_rho: bool = False,
     ) -> None:
         self.capacity = capacity
         self.n_nodes = n_nodes
         self.ob_length = ob_length
         self.device = torch.device(device)
         self.edge_index = edge_index.to(self.device)
+        self.n_edges = int(self.edge_index.shape[1])
         self.pos = 0
 
         shape = (capacity, n_nodes)
         self.obs = torch.zeros((*shape, ob_length), device=self.device)
+        # log ρ ZAPISUJEMY, a nie przeliczamy w update. Głowa obserwacyjna widzi
+        # OKNO ostatnich odczytów (`OnlineUncertainty`), więc z samego `obs[t]`
+        # nie da się jej wyniku odtworzyć — a `evaluate` musi dostać dokładnie ten
+        # wektor, który widział `act`, inaczej ratio w pierwszej epoce ≠ 1.
+        self.log_rho = (
+            torch.zeros((capacity, self.n_edges + n_nodes), device=self.device)
+            if with_log_rho
+            else None
+        )
         self.actions = torch.zeros(shape, dtype=torch.long, device=self.device)
         self.log_probs = torch.zeros(shape, device=self.device)
         self.values = torch.zeros(shape, device=self.device)
@@ -271,11 +327,17 @@ class RolloutBuffer:
         values: Tensor,
         rewards: Tensor,
         dones: Tensor | bool = False,
+        log_rho: Tensor | None = None,
     ) -> None:
         """Jedna DECYZJA (Δt = 15 s symulacji), nie jeden krok symulatora.
 
         `values` na skali SUROWEJ — denormalizację robi wołający, bo tylko on wie,
         czy krytyk liczył w przestrzeni znormalizowanej.
+
+        `log_rho` [E+N] dla TEGO kroku, w kolejności kontraktu `uw_attention`
+        (krawędzie `edge_index`, potem pętle własne w kolejności węzłów).
+        Obecność musi się zgadzać z `with_log_rho` — pomyłka w tę stronę jest
+        cicha (bieg bez mechanizmu, który miał go mieć), więc jest wyjątkiem.
         """
         if self.full:
             raise IndexError(f"bufor pełny ({self.capacity}) — zawołaj reset() albo update()")
@@ -283,8 +345,20 @@ class RolloutBuffer:
             raise ValueError(
                 f"obs ma być [{self.n_nodes}, {self.ob_length}], jest {tuple(obs.shape)}"
             )
+        if (log_rho is None) != (self.log_rho is None):
+            raise ValueError(
+                "bufor zbudowany z with_log_rho="
+                f"{self.log_rho is not None}, a add() dostał log_rho={log_rho is not None}"
+            )
+        if log_rho is not None and log_rho.shape != (self.n_edges + self.n_nodes,):
+            raise ValueError(
+                f"log_rho ma być [{self.n_edges + self.n_nodes}] = E + N, "
+                f"jest {tuple(log_rho.shape)}"
+            )
         t = self.pos
         self.obs[t] = obs
+        if self.log_rho is not None:
+            self.log_rho[t] = log_rho
         self.actions[t] = actions
         self.log_probs[t] = log_probs
         self.values[t] = values
@@ -346,6 +420,13 @@ class RolloutBuffer:
                 old_values=self.values[idx].reshape(-1),
                 advantages=self.advantages[idx].reshape(-1),
                 returns=self.returns[idx].reshape(-1),
+                # NIE `self.log_rho[idx].reshape(-1)` — patrz `tiled_log_rho`:
+                # to spłaszczenie ma poprawną długość i mylny układ.
+                log_rho=(
+                    tiled_log_rho(self.log_rho[idx], self.n_edges, self.n_nodes)
+                    if self.log_rho is not None
+                    else None
+                ),
             )
 
 
@@ -383,11 +464,18 @@ class PPO:
 
     @torch.no_grad()
     def act(
-        self, x: Tensor, edge_index: Tensor, *, deterministic: bool = False
+        self,
+        x: Tensor,
+        edge_index: Tensor,
+        *,
+        deterministic: bool = False,
+        log_rho: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor]:
         """(akcje, log_prob, wartości surowe). `no_grad` JEST tutaj, bo to jedyna
         ścieżka zbierania danych — w `evaluate` go być nie może (pułapka 4)."""
-        actions, log_probs, values = self.ac.act(x, edge_index, deterministic=deterministic)
+        actions, log_probs, values = self.ac.act(
+            x, edge_index, deterministic=deterministic, log_rho=log_rho
+        )
         if self.value_norm:
             values = self.value_norm.denormalize(values)
         return actions, log_probs, values
@@ -415,7 +503,7 @@ class PPO:
         for _ in range(cfg.epochs):
             for mb in buffer.minibatches(cfg.n_minibatches, generator):
                 log_probs, entropy, values = self.ac.evaluate(
-                    mb.x, mb.edge_index, mb.actions, mb.batch
+                    mb.x, mb.edge_index, mb.actions, mb.batch, log_rho=mb.log_rho
                 )
                 ratio = torch.exp(log_probs - mb.old_log_probs)
 

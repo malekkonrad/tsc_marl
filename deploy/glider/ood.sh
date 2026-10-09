@@ -10,10 +10,18 @@
 # Wznowienie: to samo polecenie — policzone punkty są pomijane.
 #
 # Zmienne: J (ile punktów naraz), DRY=1 (tylko wypisz komendy).
+# PODZIAŁ WŁASNOŚCI: glider liczy BIEGI (`runs/`), raporty robi laptop (`results/`).
+# Raport to sekundy liczenia z `runs/`, a `results/` jest katalogiem WERSJONOWANYM,
+# którego właścicielem jest laptop — generowanie go tutaj dwa razy zablokowało
+# `git pull` („untracked working tree files would be overwritten by merge”) i za
+# każdym razem trzeba było ręcznie odkładać pliki na bok.
 set -u
 cd "$(dirname "$0")/../.."
 TSC=.venv/bin/tsc
-N=$(nproc)
+# OMP_NUM_THREADS= przed `nproc`: ta zmienna JEST przez nproc honorowana, a kolejki
+# startują przez `setsid nohup bash "$0" …`, czyli w potomku, który dziedziczy nasz
+# własny eksport. Bez tego `nproc` zwraca 1 i J spada do minimum (2) na 32 rdzeniach.
+N=$(OMP_NUM_THREADS= OMP_THREAD_LIMIT= nproc)
 J=${J:-$(( N / 5 > 2 ? N / 5 : 2 ))}
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
 
@@ -26,8 +34,6 @@ run() {
 
 if [ "${1:-}" = "_run" ]; then
   run degrade run t2_ood -j "$J"
-  run degrade report t2_ood
-  run degrade ood t2_ood
   exit
 fi
 
@@ -49,5 +55,7 @@ cat <<EOF
 Ruszyło: $N rdzeni, J=$J.
 Postęp:   tail -f $LOG/ood.log
 Stan:     $TSC degrade status t2_ood
-Wynik:    results/t2_ood_epistemic.md (werdykt) + results/t2_ood.md (tabela)
+Wynik:    runs/t2/*__t2_ood/ — tabelę i werdykt złóż NA LAPTOPIE:
+          rsync -av glider:tsc_marl/runs/t2/ runs/t2/
+          tsc degrade report t2_ood && tsc degrade ood t2_ood
 EOF

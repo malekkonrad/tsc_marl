@@ -41,7 +41,25 @@ KINDS = {
 }
 #: `ensemble` = kilka actorów rdzenia naraz: decyduje pierwszy, reszta głosuje — rozbieżność
 #: ich rozkładów to epistemic W SAMEJ POLITYCE RL (test gałęzi epistemic, plan t2_ood).
-LEARNED = ("policy", "colight", "ensemble")
+#: `policy_uw` = TEN SAM checkpoint co `policy`, tylko attention dostaje log ρ z głowy
+#: obserwacyjnej (Faza 3). Modulacja jest bezparametrowa, więc kolumny „rdzeń" i
+#: „rdzeń + UW-attention" różnią się wyłącznie mechanizmem — ten sam plik z wagami.
+#: `policy_gate` = TEN SAM checkpoint co `policy`, ale akcja każdego węzła idzie
+#: z polityki ALBO z reguły, zależnie od bramki (Faza 3, dolny poziom fallbacku).
+#: `policy_mask` = TEN SAM checkpoint co `policy`, ale akcja węzła jest nadpisywana,
+#: gdy legalna faza czeka dłużej niż `k_max` decyzji (Faza 4, action masking).
+LEARNED = ("policy", "colight", "ensemble", "policy_uw", "policy_gate", "policy_mask")
+#: Rodzaje bramek. `oracle` czyta prawdę z warstwy awarii i jest GÓRNYM
+#: OGRANICZENIEM, nie sterownikiem do wdrożenia. `rule` (licznik zamrożonych
+#: detektorów) i `uq` (głowa obserwacyjna) są wdrażalne i mierzy się je WZGLĘDEM
+#: wyroczni — ta ablacja rozstrzyga, czy głowa niepewności zarabia na siebie.
+GATE_KINDS = ("oracle", "rule", "uq")
+#: Klucze spec sterownika, które zmieniają MECHANIZM, a nie tylko etykietę kolumny:
+#: `uw` niesie τ modulacji, `gate` — rodzaj bramki, próg i długość cyklu reguły.
+#: MUSZĄ wejść do odcisku biegu (`unit_params`), inaczej sweep po τ albo po progu
+#: liczy pierwszą wartość, a każdą następną pomija jako „jest wynik" — ten sam błąd,
+#: przed którym ostrzega docstring `FailureSpec`.
+MECHANISM_KEYS = ("uw", "gate", "mask")
 #: Sufiks wariantu ruchu w nazwie sieci (`_d0p25`, `_d1p5`, `_r2000`, `_r5816`). `{base}`
 #: w szablonie rodzica = sieć bez sufiksu, czyli sieć, NA KTÓREJ polityka się uczyła.
 VARIANT_SUFFIX = re.compile(r"_(?:d\d+(?:p\d+)?|r\d+)$")
@@ -51,7 +69,22 @@ def base_network(network: str) -> str:
     return VARIANT_SUFFIX.sub("", network)
 
 
-METRICS = ("att", "throughput", "queue", "delay", "reward")
+#: Kolumny zapisywane do `metrics.csv` każdego biegu T2. `queue_max`/`queue_p90`/
+#: `wait_max` to OGON (Faza 4): średnia sieciowa nie widzi jednego skrzyżowania
+#: trzymanego w martwej fazie ani ćwiartki sieci zepsutej przy zdrowej reszcie.
+#: Dopisane PRZED biegami maskingu i Krakowa celowo — metryki liczą się w epizodzie,
+#: więc dodanie ich później oznacza przeliczenie wszystkiego od nowa.
+METRICS = (
+    "att",
+    "throughput",
+    "queue",
+    "delay",
+    "reward",
+    "queue_max",
+    "queue_p90",
+    "wait_max",
+    "wait_max_demand",
+)
 
 
 def slug(spec: FailureSpec) -> str:
@@ -90,9 +123,29 @@ class Plan:
         return self.controllers[controller].get("agent", controller)
 
     def kind(self, controller: str) -> str:
-        if "ensemble" in self.controllers[controller]:
+        spec = self.controllers[controller]
+        if "ensemble" in spec:
             return "ensemble"
+        # bramka PRZED UW: spec z obydwoma to złożenie, w którym bramka owija politykę
+        # z modulacją (`GatedController` z `UWPolicyController` w środku, `t2_uw_rule`)
+        if spec.get("gate"):
+            return "policy_gate"
+        if spec.get("uw"):
+            return "policy_uw"
+        if spec.get("mask"):
+            return "policy_mask"
         return KINDS[self.agent(controller)]
+
+    def baseline(self, controller: str) -> str | None:
+        """Kolumna, z którą raport ma SPAROWAĆ ten sterownik, gdy domyślny wybór
+        („pierwsza kolumna `policy` tego samego agenta") byłby zły.
+
+        Potrzebne od planu `t2_train_uw`: są tam DWA ramiona bez mechanizmu
+        (trening na czystym i trening z awariami), oba z agentem `gatppo`, więc
+        domyśl trafiłby w pierwsze i mierzył trening razem z mechanizmem zamiast
+        samego mechanizmu. Różnica jest cicha — tabela wychodzi, tylko odpowiada
+        na inne pytanie."""
+        return self.controllers[controller].get("baseline")
 
     def units(self) -> list[Unit]:
         """Uczone sterowniki × ich seedy; reguły MP i FixedTime są deterministyczne,
@@ -180,6 +233,46 @@ def load_plan(path: str | Path) -> Plan:
             raise SystemExit(f"plan '{p.name}': ensemble tylko z actorów rdzenia ('{label}')")
         if "ensemble" in spec and len(spec["ensemble"]) < 2:
             raise SystemExit(f"plan '{p.name}': ensemble '{label}' potrzebuje ≥ 2 seedów")
+        if spec.get("uw") and KINDS[plan.agent(label)] != "policy":
+            raise SystemExit(f"plan '{p.name}': UW-attention tylko z actorem rdzenia ('{label}')")
+        # Literówka w `side`, `u` albo `channels` nie może po cichu dać wariantu
+        # domyślnego — jeden walidator z treningiem (`training.check_uw`). Import tu,
+        # nie na górze: `obs_head` ciągnie torcha, a ładowanie planu ma zostać lekkie.
+        if spec.get("uw"):
+            from tsc_marl.robustness.training import check_uw  # noqa: PLC0415
+
+            blad = check_uw(spec["uw"])
+            if blad:
+                raise SystemExit(f"plan '{p.name}': UW '{label}': {blad}")
+        if spec.get("gate"):
+            if KINDS[plan.agent(label)] != "policy":
+                raise SystemExit(f"plan '{p.name}': bramka tylko z actorem rdzenia ('{label}')")
+            # Literówka w `kind` nie ma prawa po cichu zbudować wyroczni: to ona jest
+            # górnym ograniczeniem, więc pomylona z realną bramką zawyżyłaby wynik.
+            if spec["gate"].get("kind") not in GATE_KINDS:
+                raise SystemExit(
+                    f"plan '{p.name}': bramka '{label}' ma kind="
+                    f"{spec['gate'].get('kind')!r}, dozwolone: {GATE_KINDS}"
+                )
+        if spec.get("mask"):
+            if KINDS[plan.agent(label)] != "policy":
+                raise SystemExit(f"plan '{p.name}': maska tylko z actorem rdzenia ('{label}')")
+            # `k_max` jest CAŁYM mechanizmem tej maski — literówka w nazwie klucza dałaby
+            # po cichu wartość domyślną i sweep po ograniczeniu liczyłby jedną kolumnę.
+            if "k_max" not in spec["mask"]:
+                raise SystemExit(
+                    f"plan '{p.name}': maska '{label}' musi podać `k_max` (liczba decyzji)"
+                )
+            if int(spec["mask"]["k_max"]) < 1:
+                raise SystemExit(f"plan '{p.name}': maska '{label}' ma k_max < 1")
+        baza = spec.get("baseline")
+        if baza is not None and baza not in plan.controllers:
+            raise SystemExit(
+                f"plan '{p.name}': '{label}' wskazuje baseline '{baza}', którego nie ma "
+                f"w `controllers` ({sorted(plan.controllers)})"
+            )
+        if baza is not None and baza == label:
+            raise SystemExit(f"plan '{p.name}': '{label}' wskazuje sam siebie jako baseline")
     slugs = [slug(s) for s in plan.scenarios]
     if len(set(slugs)) != len(slugs):
         raise SystemExit(f"plan '{p.name}': zdublowane scenariusze {slugs}")
@@ -199,6 +292,7 @@ def evaluate(
     make_builder: Callable[[FailureSpec], Any],
     decisions: int,
     on_row: Callable[[dict[str, Any]], None] | None = None,
+    on_trace: Callable[[str, int, list[Any]], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Każdy scenariusz × losowanie = jeden pełny epizod testowy. -> wiersze metryk.
 
@@ -224,6 +318,12 @@ def evaluate(
             rows.append(row)
             if on_row is not None:
                 on_row(row)
+            # Ślad bramki (opcjonalny) wychodzi PO metrykach i przed `reset_stats`
+            # następnego epizodu — czyli w jedynym momencie, w którym jest kompletny.
+            if on_trace is not None and hasattr(controller, "episode_trace"):
+                slad = controller.episode_trace()
+                if slad:
+                    on_trace(slug(spec), draw, slad)
     return rows
 
 
@@ -234,9 +334,19 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, float]:
     for r in rows:
         by.setdefault(r["scenario"], []).append(r)
     for name, group in by.items():
-        for metric in ("att", "throughput", "ens_mi", "ens_disagree"):
-            if metric in group[0]:
-                out[f"{metric}__{name}"] = sum(r[metric] for r in group) / len(group)
+        for metric in (
+            "att", "throughput", "ens_mi", "ens_disagree", "uw_spread", "uw_active",
+            "gate_share", "gate_switches", "gate_precision", "gate_recall",
+        ):  # fmt: skip
+            # Średnia po losowaniach, w których metryka BYŁA OKREŚLONA — sprawdzanie
+            # samego `group[0]` zakładało, że wszystkie wiersze mają ten sam komplet
+            # kluczy. `gate_precision`/`gate_recall` tego nie spełniają: przy części
+            # losowań mianownik nie istnieje (nie było czego wykrywać), więc klucza
+            # nie ma. Skutkiem był `KeyError` po POLICZENIU całego punktu — wszystkie
+            # epizody przeliczone, wynik wyrzucony w ostatniej linii.
+            wartosci = [r[metric] for r in group if metric in r]
+            if wartosci:
+                out[f"{metric}__{name}"] = sum(wartosci) / len(wartosci)
     if "att__clean" in out:
         out["att"] = out["att__clean"]
     return out

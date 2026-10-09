@@ -54,9 +54,19 @@ def main(argv: list[str] | None = None) -> None:
 
         from tsc_marl.core.loop import CoreTrainer
         from tsc_marl.core.ppo import PPOConfig
+        from tsc_marl.robustness import training
+        from tsc_marl.robustness.degrade import base_network
 
         cmd = Registry.mapping["command_mapping"]["setting"].param
         started = time.time()
+
+        # Faza 3, trening Z mechanizmem. Oba przełączniki czytają się z sekcji
+        # `model` (czyli wchodzą do `config_hash`), a nie z flag CLI — bieg
+        # z inną mieszanką awarii MUSI unieważnić skip-if-done, inaczej runner
+        # uzna go za już policzony. Ustawiają je `overrides` suite'ów
+        # `p1_fail` / `p1_uw`; bez nich to jest dokładnie rdzeń z Fazy 1.
+        failures = training.FailureMix.from_registry()
+        uw = training.uw_config_from_registry()
 
         # Świat budujemy przez Registry, a nie `from world.world_cityflow import World`,
         # żeby `-w sumo` (Faza 5) działało tą samą ścieżką. To ten sam sposób,
@@ -73,11 +83,33 @@ def main(argv: list[str] | None = None) -> None:
             run=s.run,
             logger=s.logger,
             device=s.device,
+            failures=failures,
         )
+        if uw is not None:
+            # PO zbudowaniu rdzenia, bo głowa potrzebuje `n_mov` ze stanu i
+            # `edge_index` z grafu. Artefakty są ZAMROŻONE (`no_grad`, poza
+            # `parameters()`), a `u_ref` skalibrowane na zrzucie BC — ograniczenie
+            # do wypisania w rozdziale 4, patrz `robustness/training.py`.
+            # `uw_signal` — ta sama funkcja co w `tsc degrade`, więc `u`, `side`,
+            # `channels` i τ z suite'a dają DOKŁADNIE sygnał, którym bieg będzie
+            # potem mierzony (`p1_uw` = głowa po stronie celu, `p1_uw_rule` = reguła)
+            core.uncertainty = training.UWStream(
+                training.uw_signal(uw, base_network(args.network), core.env),
+                core.env.graph.edge_index,
+                core.device,
+                n_nodes=core.env.graph.n_nodes,
+            )
         s.logger.info(
             f"rdzeń: {core.env.graph} | ob_length {core.env.features.ob_length} "
             f"| device {core.device}"
         )
+        if failures is not None:
+            s.logger.info(f"awarie w treningu: {failures.describe()} (seed {failures.seed})")
+        if uw is not None:
+            s.logger.info(
+                f"UW-attention w treningu: u={uw.get('u', 'head')} "
+                f"side={uw.get('side', 'target')} tau={uw.get('tau', 'domyślne')}"
+            )
         result = core.train()
         core.save(s.run.engine_dir / "core.pt")
         s.logger.info(f"Total time taken: {time.time() - started:.1f}s | {result}")

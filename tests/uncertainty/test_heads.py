@@ -105,16 +105,24 @@ def test_zerohop_izoluje_wezly():
     assert not torch.allclose(a[1:], b[1:], atol=1e-6)
 
 
-def test_PUSTY_edge_index_zeruje_wyjscie():
+def test_PUSTY_edge_index_jest_bledem():
     """Pułapka, która kosztowała pełny przebieg bramki: `MultiHeadAttModel` woła
     `add_self_loops` BEZ `num_nodes`, więc z pustego `edge_index` wnioskuje zero
     węzłów, nie dokłada pętli i agregacja zwraca zera — model przestaje zależeć
     od wejścia i trenuje sam bias, bez żadnego błędu. Test istnieje po to, żeby
-    nikt nie „uprościł" 0-hopu z powrotem do pustej listy krawędzi."""
+    nikt nie „uprościł" 0-hopu z powrotem do pustej listy krawędzi.
+
+    Do Kroku 1 UW-attention test asertował samą CISZĘ (dwa różne wejścia, jedno
+    wyjście). Od kiedy `GATEncoder` składa się z `UncertaintyWeightedAttention`,
+    głowa dziedziczy jej strażnika `maybe_num_nodes(edge_index) != x.size(0)`
+    i pusty `edge_index` jest wyjątkiem, a nie cichą stałą. Ta sama intencja,
+    mocniejszy sposób jej pilnowania. 0-hop realizują pętle własne — patrz
+    `_edges` w `uncertainty/prototype.py` i test wyżej."""
     torch.manual_seed(0)
     model = UncertainPolicy(20, K, dropout=0.0).eval()
     pusty = torch.zeros((2, 0), dtype=torch.long)
-    assert torch.allclose(model(torch.randn(5, 20), pusty), model(torch.randn(5, 20), pusty))
+    with pytest.raises(ValueError, match="izolowany"):
+        model(torch.randn(5, 20), pusty)
 
 
 def test_jeden_hop_widzi_sasiada():

@@ -47,10 +47,12 @@ from typing import Any
 # Tak samo zachowuje się `features` (przez `tsc_marl.libsignal.agents`), więc to spójne
 # z resztą repo; samodzielny zostaje tylko `graph`.
 import torch
-from agent.colight import Embedding_MLP, MultiHeadAttModel
+from agent.colight import Embedding_MLP
 from torch import Tensor, nn
 from torch.distributions import Categorical
 from torch_geometric.nn import SAGEConv, global_mean_pool
+
+from tsc_marl.core.uw_attention import UncertaintyWeightedAttention
 
 # Domyślne = `configs/tsc/colight.yml`, czyli konfiguracja, na której zmierzyliśmy
 # baseline. Powtórzone tutaj, żeby encoder dało się zbudować w teście bez Registry.
@@ -99,7 +101,7 @@ class GATEncoder(nn.Module):
         # ich parametry nie trafiają do `.parameters()`, optymalizator ich nie
         # widzi i sieć uczy się samym embeddingiem — cicho, bez błędu.
         self.blocks = nn.ModuleList(
-            MultiHeadAttModel(
+            UncertaintyWeightedAttention(
                 d=int(input_dim[i]),
                 dv=int(dims_each_head[i]),
                 d_out=int(output_dim[i]),
@@ -174,7 +176,14 @@ class GATEncoder(nn.Module):
         `StateBuilder.ob_length` z definicji stanu (24 przy 8 fazach i ATS)."""
         return cls(ob_length, **{**cls.registry_kwargs(), **overrides})
 
-    def forward(self, x: Tensor, edge_index: Tensor) -> Tensor:  # [N, F] -> [N, out_dim]
+    def forward(
+        self, x: Tensor, edge_index: Tensor, *, log_rho: Tensor | None = None
+    ) -> Tensor:  # [N, F] -> [N, out_dim]
+        """`log_rho` KEYWORD-ONLY we wszystkich trzech encoderach i w `Actor` —
+        ten sam powód co w `UncertaintyWeightedAttention.forward`, plus lokalny:
+        `Critic.forward` ma na trzeciej pozycji `batch` (przypisanie węzeł→graf).
+        Oba są `Tensor | None`, więc zamiana nie rzuciłaby wyjątkiem, tylko
+        policzyła kontekst z wektora wiarygodności."""
         if x.dim() != 2:
             raise ValueError(
                 f"GATEncoder przyjmuje [N, ob_length], dostał {tuple(x.shape)}; "
@@ -185,7 +194,7 @@ class GATEncoder(nn.Module):
 
         h = self.embedding_mlp(x, True)  # `True` zawsze — patrz decyzja 2 w docstringu
         for block in self.blocks:
-            h = block(h, edge_index, True)
+            h = block(h, edge_index, True, log_rho=log_rho)
         return h
 
     def extra_repr(self) -> str:
@@ -235,9 +244,18 @@ class _AblationEncoder(nn.Module):
     def _aggregate(self, block: nn.Module, h: Tensor, edge_index: Tensor) -> Tensor:
         raise NotImplementedError
 
-    def forward(self, x: Tensor, edge_index: Tensor) -> Tensor:
+    def forward(self, x: Tensor, edge_index: Tensor, *, log_rho: Tensor | None = None) -> Tensor:
         if x.dim() != 2 or x.shape[1] != self.ob_length:
             raise ValueError(f"oczekiwane [N, {self.ob_length}], jest {tuple(x.shape)}")
+        # `raise`, nie ciche ignorowanie: `mean` waży każdego sąsiada tak samo,
+        # `none` nie widzi sąsiadów w ogóle, więc nie ma czego modulować. Gdyby
+        # wariant argument przyjął i wyrzucił, bieg „UW-attention + mean-pool"
+        # doszedłby do końca i dał liczby nieodróżnialne od wyniku.
+        if log_rho is not None:
+            raise ValueError(
+                f"{type(self).__name__} nie ma wag attention do modulowania — "
+                "UW-attention ma sens tylko przy encoder='gat'"
+            )
         h = self.embedding_mlp(x, True)
         for block in self.blocks:
             h = torch.relu(self._aggregate(block, h, edge_index))
@@ -389,8 +407,10 @@ class Actor(nn.Module):
         kwargs = {"encoder": encoder_kind(), **GATEncoder.registry_kwargs()}
         return cls(ob_length, n_phases, **{**kwargs, **overrides})
 
-    def forward(self, x: Tensor, edge_index: Tensor) -> Tensor:  # [N, F] -> [N, n_phases]
-        logits = self.head(self.encoder(x, edge_index))
+    def forward(
+        self, x: Tensor, edge_index: Tensor, *, log_rho: Tensor | None = None
+    ) -> Tensor:  # [N, F] -> [N, n_phases]
+        logits = self.head(self.encoder(x, edge_index, log_rho=log_rho))
         if self.phase_mask is None:
             return logits
         n_nodes = self.phase_mask.shape[0]
@@ -422,10 +442,19 @@ class Critic(nn.Module):
     MAPPO regularnie destabilizuje, bo gradient straty wartości ma inną skalę
     niż policy gradient i zaczyna dominować wspólną część.
 
-    CZEGO TU NIE MA: normalizacji zwrotów. ATS jest nieznormalizowany (pressure
-    bywa rzędu dziesiątek), więc V ma dużą skalę i strata wartości potrafi
-    zdominować policy loss. Lekarstwo (bieżąca normalizacja zwrotów / PopArt)
-    należy do pętli PPO w 1.4 — ten moduł zostaje bezstanowy.
+    CZEGO TU NIE MA, RAZ: normalizacji zwrotów. ATS jest nieznormalizowany
+    (pressure bywa rzędu dziesiątek), więc V ma dużą skalę i strata wartości
+    potrafi zdominować policy loss. Lekarstwo (bieżąca normalizacja zwrotów /
+    PopArt) należy do pętli PPO w 1.4 — ten moduł zostaje bezstanowy.
+
+    CZEGO TU NIE MA, DWA: `log_rho`. Brak tego argumentu jest DECYZJĄ, nie
+    przeoczeniem — `forward` woła `self.encoder(x, edge_index)` świadomie.
+    UW-attention wygasza sąsiadów, których czujniki padły, a to zdarza się we
+    WDROŻENIU; krytyk żyje wyłącznie w treningu, gdzie odczyty są czyste, więc
+    nie ma czego modulować. Co więcej, podanie mu wiarygodności byłoby wyciekiem
+    od tej gorszej strony CTDE: krytyk uczyłby wartość z informacji, której actor
+    w inferencji nie ma, a od tego zależy poprawność przewag. Modulacja wchodzi
+    w `Actor` i kończy się na nim — patrz `robustness/controllers.py`.
     """
 
     def __init__(
@@ -526,10 +555,21 @@ class ActorCritic(nn.Module):
         kwargs = {"encoder": encoder_kind(), **GATEncoder.registry_kwargs()}
         return cls(ob_length, n_phases, **{**kwargs, **overrides})
 
-    def distribution(self, x: Tensor, edge_index: Tensor) -> Categorical:
+    def distribution(
+        self, x: Tensor, edge_index: Tensor, *, log_rho: Tensor | None = None
+    ) -> Categorical:
         """Rozkład nad fazami. Każdy WIERSZ to osobny agent — przy współdzielonych
-        wagach 12 skrzyżowań × T kroków to po prostu 12·T próbek w batchu."""
-        return Categorical(logits=self.actor(x, edge_index))
+        wagach 12 skrzyżowań × T kroków to po prostu 12·T próbek w batchu.
+
+        `log_rho` JEST TU OD FAZY 3 (trening polityki Z mechanizmem). Do T2
+        modulacja doklejała się po fakcie, w `robustness/controllers.py`, i
+        `ActorCritic` nie musiał o niej wiedzieć. Trening musi: przez ten sam
+        `distribution` idzie i rollout (`act`), i strata polityki (`evaluate`),
+        więc podanie log ρ tylko w jednym z nich dałoby ratio ≠ 1 w pierwszej
+        epoce PPO — czyli update liczony z gradientu INNEJ sieci niż ta, która
+        zbierała dane. Bez wyjątku, bez ostrzeżenia; łapie to test.
+        """
+        return Categorical(logits=self.actor(x, edge_index, log_rho=log_rho))
 
     def act(
         self,
@@ -538,14 +578,18 @@ class ActorCritic(nn.Module):
         *,
         deterministic: bool = False,
         batch: Tensor | None = None,
+        log_rho: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor]:
         """Rollout: -> (akcje [N], log_prob [N], wartości [N]).
 
         `deterministic=True` to argmax i tryb EWALUACJI (kolumna T1
         „GAT+PPO+CTDE (deterministic)"); w treningu zawsze próbkujemy, bo
         eksploracja w PPO bierze się właśnie stąd, nie z epsilon-greedy.
+
+        `log_rho` idzie WYŁĄCZNIE do actora — krytyk go nie dostaje i to jest
+        decyzja z docstringu `Critic`, nie przeoczenie.
         """
-        dist = self.distribution(x, edge_index)
+        dist = self.distribution(x, edge_index, log_rho=log_rho)
         actions = dist.logits.argmax(-1) if deterministic else dist.sample()
         return actions, dist.log_prob(actions), self.critic(x, edge_index, batch)
 
@@ -555,14 +599,21 @@ class ActorCritic(nn.Module):
         edge_index: Tensor,
         actions: Tensor,
         batch: Tensor | None = None,
+        *,
+        log_rho: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor]:
         """Update: -> (log_prob [N], entropia [N], wartości [N]) dla ZADANYCH akcji.
 
         W pierwszej epoce PPO `exp(log_prob - log_prob_stary)` musi wyjść dokładnie
         1.0. Jeśli nie wychodzi, to nie jest problem uczenia, tylko rozjazd między
         ścieżką `act` a `evaluate` — pilnuje tego test.
+
+        `log_rho` MUSI tu być tym samym wektorem, który widział `act` w tamtym
+        kroku — dlatego bufor rolloutu go ZAPISUJE, a nie przelicza. Głowa
+        obserwacyjna widzi OKNO ostatnich odczytów, więc przeliczenie po fakcie
+        z samego `x` dałoby inną liczbę przy tej samej obserwacji.
         """
-        dist = self.distribution(x, edge_index)
+        dist = self.distribution(x, edge_index, log_rho=log_rho)
         return dist.log_prob(actions), dist.entropy(), self.critic(x, edge_index, batch)
 
     def value(self, x: Tensor, edge_index: Tensor, batch: Tensor | None = None) -> Tensor:

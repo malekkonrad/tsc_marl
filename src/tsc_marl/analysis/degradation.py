@@ -42,6 +42,41 @@ COLORS = {
     # z rdzeniem: CVD ΔE ≥ 13,0, normal ≥ 27,5)
     "gatppo_mean": "#e87ba4",
     "gatppo_nognn": "#4a3aa7",
+    # mechanizmy Fazy 3 (plany t2_uw, t2_gate). Kolejne sloty tej samej palety;
+    # ΔE nie przeliczane, bo te kolumny nie pojawiają się na jednym wykresie
+    # z wariantami ablacyjnymi — w swoich planach sąsiadują tylko z rdzeniem.
+    "gatppo_uw": "#d63f6e",
+    "gatppo_gate": "#7a4fd6",
+    # SWEEP PROGU bramki (t2_gate) to dane UPORZĄDKOWANE — jeden parametr rosnący —
+    # więc rampa jednej barwy od jasnej do ciemnej, a nie cztery kolory kategorialne.
+    # Kategorialne sugerowałyby cztery różne mechanizmy zamiast czterech nastawień
+    # jednego; kolejność progów przestałaby być czytelna z samego wykresu.
+    "gatppo_gate_t0p25": "#b49ae8",
+    "gatppo_gate_t0p50": "#8f66dd",
+    "gatppo_gate_t0p75": "#6a3fc4",
+    "gatppo_gate_t1p00": "#452a8a",
+    # bramki realne (t2_gate_real): wyrocznia zostaje fioletowa jak sweep, a dwa
+    # sygnały wdrażalne dostają własne barwy — tu to SĄ różne mechanizmy, nie
+    # nastawienia jednego, więc kategorialnie, a nie rampą.
+    "gatppo_gate_oracle": "#7a4fd6",
+    "gatppo_gate_rule": "#1baf7a",
+    "gatppo_gate_uq": "#eda100",
+    # sweep τ (t2_uw_tau): znowu JEDEN parametr rosnący, więc rampa — od słabej
+    # modulacji (jasna) do najsilniejszej (ciemna). Uwaga na kierunek: NIŻSZE τ
+    # znaczy SILNIEJSZA modulacja, więc ciemny = mała liczba.
+    "gatppo_uw_t0p25": "#f3a6bd",
+    "gatppo_uw_t0p10": "#d63f6e",
+    "gatppo_uw_t0p05": "#8c1c40",
+    # ramiona 2 i 3 z planu `t2_train_uw` — sloty 6 i 8 palety, dobrane tak, żeby
+    # odróżniały się od rdzenia (slot 1) także w symulacji CVD
+    "gatppo_fail": "#00a3a3",
+    "gatppo_fail_uw": "#a8442c",
+    # t2_uw_src: strona celu zostaje w kolorze `gatppo_uw`, strona źródła dostaje
+    # ciemniejszy odcień tej samej barwy — to jeden mechanizm w dwóch mapowaniach,
+    # nie dwa różne mechanizmy
+    "gatppo_uw_src": "#8c1c40",
+    # wyrocznia modulacji: fiolet wyroczni bramki — ta sama rola (sufit), inny mechanizm
+    "gatppo_uw_oracle": "#7a4fd6",
 }
 LABELS = {
     "gatppo": "rdzeń GAT+PPO+CTDE",
@@ -52,6 +87,23 @@ LABELS = {
     "gatppo_mean": "actor mean-pool",
     "gatppo_nognn": "actor bez GNN",
     "gatppo_ens": "ensemble 5 actorów (decyduje seed 0)",
+    "gatppo_uw": "rdzeń + UW-attention",
+    "gatppo_gate": "rdzeń + bramka (wyrocznia)",
+    "gatppo_gate_t0p25": "bramka, próg 0,25",
+    "gatppo_gate_t0p50": "bramka, próg 0,50",
+    "gatppo_gate_t0p75": "bramka, próg 0,75",
+    "gatppo_gate_t1p00": "bramka, próg 1,00",
+    "gatppo_gate_oracle": "bramka: wyrocznia (sufit)",
+    "gatppo_gate_rule": "bramka: reguła (trwałość)",
+    "gatppo_gate_uq": "bramka: UQ (głowa)",
+    "gatppo_uw_t0p25": "UW-attention, τ = 0,25",
+    "gatppo_uw_t0p10": "UW-attention, τ = 0,10",
+    "gatppo_uw_t0p05": "UW-attention, τ = 0,05",
+    "gatppo_fail": "rdzeń trenowany z awariami",
+    "gatppo_fail_uw": "rdzeń z awariami + UW-attention",
+    "gatppo_fail_gate_rule": "rdzeń z awariami + bramka: reguła",
+    "gatppo_uw_src": "rdzeń + UW-attention (strona źródła)",
+    "gatppo_uw_oracle": "UW-attention: wyrocznia (sufit)",
 }
 INK, INK2, MUTED = "#0b0b0b", "#52514e", "#898781"
 GRID, AXIS, SURFACE = "#e1e0d9", "#c3c2b7", "#fcfcfb"
@@ -86,6 +138,13 @@ def load(plan: Plan, metrics: tuple[str, ...] = ("att", "throughput")):
         wide = m.pivot_table(index=["split", "step"], columns="metric", values="value")
         wide = wide.reset_index().rename(columns={"split": "scenario", "step": "draw"})
         p = run.params
+        # Tylko kolumny TEGO planu. Filtr po sufiksie `__<plan>` nie wystarcza:
+        # przemianowanie kolumny (np. `gatppo_gate` -> `gatppo_gate_t0p50` przy
+        # sweepie progu) zostawia w `runs/t2` biegi ze starą nazwą i pasującym
+        # sufiksem. Wchodziły do ramki jako widmowa kolumna i wywalały wykres na
+        # `plan.kind()` — a w tabelach były niewidoczne, bo te iterują po planie.
+        if p["controller"] not in plan.controllers:
+            continue
         wide["controller"], wide["network"], wide["seed"] = p["controller"], p["network"], p["seed"]
         wide["parent_run"] = p.get("parent_run")
         frames.append(wide)
@@ -123,8 +182,192 @@ def aggregate(df):
     return out
 
 
-def parent_consistency(df) -> list[dict[str, Any]]:
-    """Czysty wynik ewaluatora vs ostatni test treningu — dla każdego uczonego biegu."""
+#: Tytuł raportu zależy od planu — „T2 bez mechanizmu" było zaszyte na sztywno i
+#: kłamało w raportach `t2_ablations` (ablacje agregacji) oraz `t2_uw` (plan istnieje
+#: WYŁĄCZNIE po to, żeby zmierzyć mechanizm).
+TITLES = {
+    "t2_nomech": "T2 bez mechanizmu",
+    "t2_ablations": "T2 dla ablacji agregacji",
+    "t2_uw": "T2 z UW-attention",
+    "t2_ood": "T2 na ruchu spoza treningu",
+    "t2_gate": "T2 z bramką fallbacku",
+    "t2_gate_real": "T2 z bramką realną (reguła vs UQ)",
+    "t2_uw_tau": "T2 — sweep τ dla UW-attention",
+    "t2_train_uw": "T2 dla polityki trenowanej z mechanizmem",
+}
+
+#: Próg |t| dla różnicy parowanej. 2,8 ≈ poprawka Bonferroniego na ~26 porównań
+#: (13 scenariuszy × 2 sieci) przy α = 0,05 — bo tabelę czyta się CAŁĄ i wybranie
+#: z niej najładniejszego wiersza po fakcie jest testowaniem wielokrotnym.
+T_THRESHOLD = 2.8
+
+
+def mechanism_pairs(plan: Plan) -> list[tuple[str, str]]:
+    """[(kolumna porównywana, kolumna odniesienia)] — pary do tabeli Δ.
+
+    Dwa źródła pary. (a) Kolumna z MECHANIZMEM inferencyjnym (`policy_uw`,
+    `policy_gate`) — liczona z tego samego checkpointu co odniesienie, więc różni je
+    wyłącznie mechanizm. (b) Kolumna z JAWNYM `baseline:` w planie, niezależnie od
+    rodzaju — bo jawne odniesienie jest deklaracją „to porównanie jest wynikiem".
+
+    Gałąź (b) dopisana po `t2_train_uw`: ramię `gatppo_fail` (trening z awariami)
+    jest gołym `policy`, więc mimo `baseline:` nie trafiało do żadnej tabeli i
+    najmocniejsza liczba planu — −140 s przy `mask0p5`, t = −10,8, lepszy w 15/15 —
+    musiała być doliczona ręcznie z `metrics.csv`. Raport milczał, bo nie miał
+    o czym mówić, a nie dlatego, że nie było wyniku. Patrz `Plan.baseline`.
+    """
+    out = []
+    for label in plan.controllers:
+        mechanizmy = ("policy_uw", "policy_gate", "policy_mask")
+        if plan.kind(label) not in mechanizmy and not plan.baseline(label):
+            continue
+        # `baseline:` z planu wygrywa z domyślem. Domyśl („pierwsza kolumna `policy`
+        # tego samego agenta") jest dobry tam, gdzie kolumna bez mechanizmu jest
+        # jedna (`t2_uw`), i zły tam, gdzie są dwie (`t2_train_uw`: trening na
+        # czystym i trening z awariami). Patrz `Plan.baseline`.
+        jawna = plan.baseline(label)
+        if jawna:
+            out.append((label, jawna))
+            continue
+        baza = [
+            c
+            for c in plan.controllers
+            if plan.kind(c) == "policy" and plan.agent(c) == plan.agent(label)
+        ]
+        if baza:
+            out.append((label, baza[0]))
+    return out
+
+
+def wspolny_checkpoint(plan: Plan, mechanizm: str, baza: str) -> bool:
+    """Czy para jedzie TYM SAMYM checkpointem — rozstrzyga szablon rodzica, a nie to,
+    czy odniesienie jest jawne. Jawne `baseline:` wskazuje bowiem raz osobny trening
+    (`t2_train_uw`), a raz tę samą politykę z innym mechanizmem (złożenie bramka + UW
+    w `t2_uw_rule`) — i opis pod nagłówkiem pary mylił drugi przypadek z pierwszym.
+    Liczby to nie zmienia: parowanie po (sieć, scenariusz, seed, losowanie) jest jedno."""
+    from tsc_marl.robustness.degrade import Unit  # noqa: PLC0415
+
+    net = plan.networks[0]
+    seed = int(plan.controllers[mechanizm].get("seeds", [0])[0])
+    return plan.parent_id(Unit(mechanizm, net, seed)) == plan.parent_id(Unit(baza, net, seed))
+
+
+#: rodzaj mechanizmu -> (metryki z `result.json`, zdanie tłumaczące je w raporcie).
+#: Każdy mechanizm musi mieć diagnostykę „czy w ogóle zadziałał", bo bez niej pusty
+#: wynik jest nieodróżnialny od mechanizmu, który przez cały epizod milczał.
+DIAGNOSTICS = {
+    "policy_uw": (
+        ("uw_spread", "uw_active"),
+        "`uw_spread` = średni rozstęp log ρ w GRUPIE SOFTMAXU węzła, czyli jedyna część "
+        "sygnału, którą attention widzi (na stałą wspólną dla grupy jest niezmienniczy). "
+        "0 = warstwa nie widzi różnicy między sąsiadami, ln 10 ≈ 2,3 = różnią się 10×. "
+        "`uw_active` = odsetek krawędzi z niezerowym log ρ.",
+    ),
+    "policy_gate": (
+        ("gate_share", "gate_switches", "gate_precision", "gate_recall"),
+        "`gate_share` = odsetek par (decyzja, węzeł), w których sterowanie przejęła "
+        "reguła. `gate_switches` = liczba ZMIAN trybu na węzłach w epizodzie — to one "
+        "psują ruch (przełączenie resetuje fazę), a nie sam udział. `gate_precision` "
+        "i `gate_recall` liczą się względem WYROCZNI (prawda z warstwy awarii, "
+        "wyłącznie diagnostycznie) i rozdzielają „detektor jest słaby” od "
+        "„przełączanie mało daje” — dwie rzeczy, które samo ATT skleja.",
+    ),
+    "policy_mask": (
+        ("mask_share", "mask_forced"),
+        "`mask_share` = odsetek par (decyzja, węzeł), w których maska ZMIENIŁA akcję "
+        "polityki (nie tych, w których była aktywna i zgodziła się z nią). `mask_forced` "
+        "= liczba takich nadpisań w epizodzie. Maska celuje w GŁODZENIE, nie w przejazd, "
+        "więc jej efekt czyta się w kolumnach `wait_max` / `wait_max_demand`, a nie "
+        "w `att` — mierzenie jej samym ATT daje zero z powodu niezgodności metryki "
+        "z celem (patrz `faza3-po-t2.md` §8.7).",
+    ),
+    # Goła kolumna `policy` z jawnym `baseline:` — kolumny różni TRENING, nie mechanizm
+    # działający w inferencji, więc nie ma czego diagnozować per krok. `_mechanism_section`
+    # indeksuje ten słownik po `plan.kind()`, więc brak wpisu = KeyError w środku raportu.
+    "policy": (
+        (),
+        "Kolumny różni SPOSÓB TRENOWANIA, nie mechanizm włączany w inferencji, więc nie "
+        "ma diagnostyki „czy mechanizm wystartował” — jest albo go nie ma już na poziomie "
+        "wag. Rozrzut między seedami wchodzi tu do różnicy w całości (patrz zdanie o "
+        "parowaniu wyżej), a liczba NIEZALEŻNYCH replikacji to liczba seedów, nie liczba "
+        "par: losowania awarii dzielą checkpoint, więc |t| jest wobec nich optymistyczne.",
+    ),
+}
+
+
+def mechanism_diagnostics(
+    plan: Plan, controller: str, metrics: tuple[str, ...]
+) -> dict[tuple[str, str], dict[str, float]]:
+    """(sieć, scenariusz) -> średnie `metrics` po seedach.
+
+    Te liczby siedzą w `result.json` (metryki epizodu sterownika), nie w `metrics.csv`,
+    i bez nich raport NIE ODRÓŻNIA „mechanizm nie pomógł" od „mechanizm nie wystartował".
+    To jest różnica między wynikiem a brakiem wyniku.
+    """
+    from runlog import Experiment  # noqa: PLC0415
+
+    zebrane: dict[tuple[str, str], dict[str, list[float]]] = {}
+    exp = Experiment(EXPERIMENT, root=RUNS)
+    for run in exp.runs():
+        if run.status != "ok" or not run.id.endswith(f"__{plan.name}"):
+            continue
+        if run.params.get("controller") != controller:
+            continue
+        net = run.params["network"]
+        for key, value in run.result.items():
+            for metric in metrics:
+                if key.startswith(f"{metric}__"):
+                    scen = key[len(metric) + 2 :]
+                    zebrane.setdefault((net, scen), {}).setdefault(metric, []).append(float(value))
+    return {k: {m: float(np.mean(v)) for m, v in d.items()} for k, d in zebrane.items()}
+
+
+def paired_delta(df, mechanizm: str, baza: str):
+    """Różnica ATT sparowana po (sieć, scenariusz, seed, losowanie).
+
+    Dlaczego parowanie, a nie ±std z tabeli: obie kolumny jadą TYM SAMYM checkpointem
+    i TYMI SAMYMI losowaniami awarii (`draw` wybiera, które detektory padły), więc
+    rozrzut między seedami i między losowaniami jest WSPÓLNY dla obu i w różnicy się
+    skraca. Porównanie nieparowane topi efekt rzędu 1 s w odchyleniu rzędu 30 s —
+    i odwrotnie, potrafi pokazać różnicę 3%, która po sparowaniu jest szumem.
+    """
+    import pandas as pd  # noqa: PLC0415
+    from scipy.stats import ttest_1samp  # noqa: PLC0415
+
+    sub = df[df["controller"].isin([mechanizm, baza])]
+    wide = sub.pivot_table(
+        index=["network", "scenario", "seed", "draw"], columns="controller", values="att"
+    ).dropna()
+    if wide.empty:
+        return pd.DataFrame()
+    wide["delta"] = wide[mechanizm] - wide[baza]
+    out = []
+    for (net, scen), g in wide.groupby(["network", "scenario"]):
+        d = g["delta"].to_numpy()
+        t, pval = (
+            ttest_1samp(d, 0.0) if len(d) > 1 and d.std() > 0 else (float("nan"), float("nan"))
+        )
+        # REMISY liczone osobno i WYŁĄCZONE z „lepszy w". Przy bramce fallbacku remis
+        # to najczęstszy wynik — mechanizm nie strzelił, epizod poszedł identycznie —
+        # a wliczony do mianownika udawałby przegraną: wiersz z Δ = +0,0 pokazywał
+        # „lepszy w 0/15", co czyta się jak porażkę zamiast jak brak zmiany.
+        out.append({
+            "network": net, "scenario": scen, "n": len(d), "remis": int((d == 0).sum()),
+            "delta": float(d.mean()), "sd": float(d.std(ddof=1)) if len(d) > 1 else 0.0,
+            "t": float(t), "p": float(pval), "lepszy": int((d < 0).sum()),
+        })  # fmt: skip
+    return pd.DataFrame(out)
+
+
+def parent_consistency(df, skip: frozenset[str] = frozenset()) -> list[dict[str, Any]]:
+    """Czysty wynik ewaluatora vs ostatni test treningu — dla każdego uczonego biegu.
+
+    `skip` = etykiety sterowników, dla których różnica jest OCZEKIWANA i nie jest
+    rozjazdem: kolumna UW-attention jedzie tym samym checkpointem, ale z modulacją
+    attention, więc na czystym z definicji NIE MUSI dać liczby z T1 co do setnej.
+    To, jak bardzo się różni, jest wynikiem (A3a) i stoi w tabeli wyżej — kontrola
+    „ewaluator mierzy tę samą politykę" dotyczy sterowników bez mechanizmu.
+    """
     import pandas as pd  # noqa: PLC0415
 
     from tsc_marl.libsignal import experiment as t1  # noqa: PLC0415
@@ -133,6 +376,8 @@ def parent_consistency(df) -> list[dict[str, Any]]:
     runs = {r.id: r for r in t1.experiment().runs()}
     clean = df[(df["scenario"] == "clean") & df["parent_run"].notna()]
     for r in clean.itertuples():
+        if r.controller in skip:
+            continue
         parent = runs.get(r.parent_run)
         path = parent.path / "metrics.csv" if parent else None
         if path is None or not path.is_file():
@@ -158,12 +403,229 @@ def _spec_by_slug(plan: Plan) -> dict[str, FailureSpec]:
     return {slug(s): s for s in plan.scenarios}
 
 
-def to_markdown(plan: Plan, agg, checks: list[dict[str, Any]], figures: dict[str, Path]) -> str:
+def _mechanism_section(plan: Plan, df, mechanizm: str, baza: str) -> list[str]:
+    """Dwie tabele, które rozstrzygają o wyniku planu z mechanizmem: CZY zadziałał
+    i CZY zmienił ATT. Bez pierwszej druga jest nieinterpretowalna."""
+    metryki, wyjasnienie = DIAGNOSTICS[plan.kind(mechanizm)]
+    if plan.kind(mechanizm) == "policy_gate" and plan.controllers[mechanizm].get("uw"):
+        # złożenie bramka + UW: obie diagnostyki, inaczej milcząca modulacja
+        # byłaby nieodróżnialna od modulacji, która nie pomogła
+        metryki = metryki + DIAGNOSTICS["policy_uw"][0]
+        wyjasnienie = wyjasnienie + " " + DIAGNOSTICS["policy_uw"][1]
+    diag = mechanism_diagnostics(plan, mechanizm, metryki)
+    pary = paired_delta(df, mechanizm, baza) if df is not None and not df.empty else None
+    if not diag and (pary is None or pary.empty):
+        return []
+
+    etykieta = LABELS.get(mechanizm, mechanizm)
+    # Goła kolumna `policy` nie jest MECHANIZMEM — różni ją od odniesienia trening.
+    # Nazwanie jej mechanizmem w nagłówku byłoby przekłamaniem wyniku, nie kosmetyką.
+    ramie = plan.kind(mechanizm) == "policy"
+    czym = "Ramię" if ramie else "Mechanizm"
+    lepszy = "ramię lepsze" if ramie else "mechanizm lepszy"
+    neutralny = (
+        "ramię jest wobec ATT **neutralne**" if ramie else "mechanizm jest wobec ATT **neutralny**"
+    )
+    lines = [
+        f"## {czym}: {etykieta} vs {LABELS.get(baza, baza)}",
+        "",
+        (
+            "Obie kolumny liczą się z TEGO SAMEGO checkpointu i tych samych losowań awarii "
+            "(`draw` wybiera, które detektory padły), więc porównujemy je **parami**, nie "
+            "przez ±std z tabeli wyżej: wspólny rozrzut między seedami i losowaniami skraca "
+            "się w różnicy."
+            if wspolny_checkpoint(plan, mechanizm, baza)
+            else "Kolumny mają RÓŻNE checkpointy (osobne treningi), więc parujemy po "
+            "(sieć, scenariusz, seed, losowanie): wspólne zostają ruch i wzorzec awarii, "
+            "rozrzut między seedami wchodzi do różnicy. Kolumna odniesienia jest wskazana "
+            f"w planie (`baseline: {plan.baseline(mechanizm)}`), a nie domyślona."
+        )
+        + f" `Δ` < 0 = {lepszy}. `|t| ≥ "
+        + f"{T_THRESHOLD}` to próg po poprawce na tyle porównań, ile ma ta tabela.",
+        "",
+        wyjasnienie,
+        "",
+    ]
+    for net in plan.networks:
+        wiersze = pary[pary["network"] == net] if pary is not None and not pary.empty else None
+        if wiersze is None or wiersze.empty:
+            continue
+        kolejnosc = [s for s in (slug(x) for x in plan.scenarios) if s in set(wiersze["scenario"])]
+        lines += [
+            f"### {net}",
+            "",
+            "| " + " | ".join(("scenariusz", *metryki, "Δ ATT [s]", "sd", "t", "lepszy w")) + " |",
+            "|---|" + "---:|" * (len(metryki) + 4),
+        ]
+        for scen in kolejnosc:
+            r = wiersze[wiersze["scenario"] == scen].iloc[0]
+            d = diag.get((net, scen), {})
+            # udziały procentowo, reszta (rozstęp log ρ, liczba przełączeń) liczbowo
+            komorki = [
+                (
+                    "—"
+                    if m not in d
+                    else f"{d[m]:.1%}"
+                    if m.endswith(("_active", "_share"))
+                    else f"{d[m]:.2f}"
+                )
+                for m in metryki
+            ]
+            mocny = "**" if abs(r["t"]) >= T_THRESHOLD else ""
+            # sd = 0 (scenariusz deterministyczny, np. `clean`) -> t nieokreślone.
+            # „—" zamiast `nan`: brak rozrzutu to nie jest brak wyniku.
+            t = "—" if not np.isfinite(r["t"]) else f"{r['t']:+.2f}"
+            lines.append(
+                "| "
+                + " | ".join(
+                    (
+                        f"`{scen}`",
+                        *komorki,
+                        f"{mocny}{r['delta']:+.2f}{mocny}",
+                        f"{r['sd']:.1f}",
+                        t,
+                        f"{int(r['lepszy'])}/{int(r['n'] - r['remis'])}",
+                    )
+                )
+                + " |"
+            )
+        istotne = wiersze[wiersze["t"].abs() >= T_THRESHOLD]
+        lines += [
+            "",
+            (
+                f"* Żaden scenariusz nie przekracza progu — {neutralny}."
+                if istotne.empty
+                else "* Powyżej progu: "
+                + ", ".join(
+                    f"`{r.scenario}` ({r.delta:+.2f} s, t = {r.t:+.2f}, lepszy w "
+                    f"{int(r.lepszy)}/{int(r.n)} parach)"
+                    for r in istotne.itertuples()
+                )
+            ),
+            "",
+        ]
+    return lines
+
+
+def _sweep_section(plan: Plan, df, pary: list[tuple[str, str]]) -> list[str]:
+    """KRZYWA ZAPASU: próg bramki × scenariusz -> Δ ATT (i `gate_share`).
+
+    Zastępuje osobne sekcje per kolumna, gdy plan jest sweepem jednego parametru —
+    cztery prawie identyczne tabele nie są czytelne, a to właśnie ta jedna jest
+    wynikiem do rozdziału 4: mówi, jak agresywna ma być realna bramka.
+
+    Czytać po KIERUNKU, nie po pojedynczym `t`: przy kilkunastu komórkach jedna
+    przekroczy próg przypadkiem, a spójność znaku w kolumnie „lepszy w" nie.
+    """
+    # Wiersze po KOLUMNIE, nie po progu. Plan bywa sweepem jednego parametru
+    # (`t2_gate`: cztery progi) albo zestawem RÓŻNYCH mechanizmów (`t2_gate_real`:
+    # reguła, UQ, wyrocznia). Klucz po progu sklejał te drugie w jeden wiersz —
+    # `rule` i `uq` nie mają progu w planie, więc obie lądowały pod 0,5 i jedna
+    # nadpisywała drugą, znikając z raportu bez śladu.
+    mechanizmy = [m for m, _ in pary]
+    bazy = {b for _, b in pary}
+    if len(bazy) != 1:
+        raise ValueError(
+            f"_sweep_section: jedna tabela = jedno odniesienie, a plan ma {sorted(bazy)}. "
+            "Taki plan idzie w osobne sekcje (patrz warunek w `build_report`)."
+        )
+    baza = pary[0][1]
+
+    # Zdanie wstępne było pisane pod bramki („w nawiasie gate_share", „Δ < 0 = bramka
+    # lepsza") i po wpuszczeniu tu ablacji agregacji kłamało w obie strony: ablacje nie
+    # mają udziału, a kolumną ocenianą jest wariant architektury, nie bramka.
+    z_udzialem = any(
+        any("gate_share" in v for v in mechanism_diagnostics(plan, m, ("gate_share",)).values())
+        for m in mechanizmy
+    )
+    lines = [
+        "## Mechanizmy × scenariusz",
+        "",
+        f"Δ ATT [s] KOLUMNY OCENIANEJ względem `{LABELS.get(baza, baza)}`, sparowana po "
+        "(seed, losowanie)"
+        + (
+            ". W nawiasie odsetek par (decyzja, węzeł) przejętych przez regułę"
+            if z_udzialem
+            else ""
+        )
+        + f". **pogrubienie** = |t| ≥ {T_THRESHOLD}. Δ < 0 = kolumna oceniana lepsza od "
+        "odniesienia.",
+        "",
+        "",
+    ]
+    for net in plan.networks:
+        kolejnosc, wiersze = None, []
+        for mechanizm in mechanizmy:
+            pary_df = paired_delta(df, mechanizm, baza)
+            if pary_df.empty:
+                continue
+            sub = pary_df[pary_df["network"] == net]
+            if sub.empty:
+                continue
+            diag = mechanism_diagnostics(
+                plan, mechanizm, ("gate_share", "gate_precision", "gate_recall")
+            )
+            wiersze.append((mechanizm, sub.set_index("scenario"), diag))
+            if kolejnosc is None:
+                kolejnosc = [
+                    s for s in (slug(x) for x in plan.scenarios) if s in sub["scenario"].values
+                ]
+        if not wiersze:
+            continue
+        lines += [
+            f"### {net}",
+            "",
+            "| mechanizm | " + " | ".join(f"`{s}`" for s in kolejnosc) + " |",
+            "|---|" + "---:|" * len(kolejnosc),
+        ]
+        for mechanizm, sub, diag in wiersze:
+            komorki = []
+            for scen in kolejnosc:
+                r = sub.loc[scen]
+                mocny = "**" if abs(r["t"]) >= T_THRESHOLD else ""
+                share = diag.get((net, scen), {}).get("gate_share")
+                udzial = "" if share is None else f" ({share:.0%})"
+                komorki.append(f"{mocny}{r['delta']:+.1f}{mocny}{udzial}")
+            lines.append(f"| {LABELS.get(mechanizm, mechanizm)} | " + " | ".join(komorki) + " |")
+
+        # Jakość detekcji — tylko dla bramek, które mają odniesienie (wyrocznia jako
+        # diagnostyka). Rozdziela „detektor jest słaby" od „przełączanie mało daje".
+        detekcja = [(m, d) for m, _, d in wiersze if any("gate_recall" in v for v in d.values())]
+        if detekcja:
+            lines += [
+                "",
+                "Jakość detekcji względem wyroczni (precyzja / czułość; „—” = nie było "
+                "czego wykrywać albo bramka nie strzeliła):",
+                "",
+                "| mechanizm | " + " | ".join(f"`{s}`" for s in kolejnosc) + " |",
+                "|---|" + "---:|" * len(kolejnosc),
+            ]
+            for mechanizm, diag in detekcja:
+                komorki = []
+                for scen in kolejnosc:
+                    d = diag.get((net, scen), {})
+                    p_, r_ = d.get("gate_precision"), d.get("gate_recall")
+                    komorki.append(
+                        "—"
+                        if p_ is None and r_ is None
+                        else f"{'—' if p_ is None else f'{p_:.2f}'} / "
+                        f"{'—' if r_ is None else f'{r_:.2f}'}"
+                    )
+                lines.append(
+                    f"| {LABELS.get(mechanizm, mechanizm)} | " + " | ".join(komorki) + " |"
+                )
+        lines.append("")
+    return lines
+
+
+def to_markdown(
+    plan: Plan, agg, checks: list[dict[str, Any]], figures: dict[str, Path], df=None
+) -> str:
     specs = _spec_by_slug(plan)
     order = [slug(s) for s in plan.scenarios]
     ctrls = [c for c in plan.controllers if c != "fixedtime"]
     lines = [
-        f"# T2 bez mechanizmu — plan `{plan.name}`",
+        f"# {TITLES.get(plan.name, 'T2')} — plan `{plan.name}`",
         "",
         f"Tryb {plan.mode} (yellow={plan.yellow}), {plan.draws} losowań awarii na scenariusz, "
         "ewaluacja ZAMROŻONYCH sterowników (`tsc degrade`). Wszystkie czytają tę samą warstwę "
@@ -212,6 +674,20 @@ def to_markdown(plan: Plan, agg, checks: list[dict[str, Any]], figures: dict[str
         lines += _findings(sub, present, ft_att, specs)
         if net in figures:
             lines += ["", f"![krzywe degradacji {net}](figures/{figures[net].name})", ""]
+
+    pary = mechanism_pairs(plan)
+    # Sweep (jedna zbiorcza tabela zamiast N sekcji) wolno złożyć TYLKO wtedy, gdy
+    # wszystkie kolumny mierzą się względem TEGO SAMEGO odniesienia — `_sweep_section`
+    # ma jedną kolumnę bazową na tabelę. Plan z kilkoma odniesieniami (`t2_gate_dr`:
+    # bramka vs rdzeń czysty, DR vs rdzeń czysty, bramka+DR vs DR) dostaje osobne
+    # sekcje. Bez tego warunku wiersz „bramka na rdzeniu DR" liczyłby się przeciw
+    # rdzeniowi CZYSTEMU i mierzył bramkę razem z treningiem z awariami — dokładnie
+    # ten cichy błąd, przed którym powstało `Plan.baseline`, tylko piętro wyżej.
+    if len(pary) > 1 and len({baza for _, baza in pary}) == 1:
+        lines += _sweep_section(plan, df, pary)
+    else:
+        for mechanizm, baza in pary:
+            lines += _mechanism_section(plan, df, mechanizm, baza)
 
     if checks:
         worst = max(abs(c["diff"]) for c in checks)
@@ -349,9 +825,12 @@ def main(plan: Plan) -> Path:
         p = plot(plan, agg, net, RESULTS / "figures" / f"{plan.name}_{net}.png")
         if p is not None:
             figures[net] = p
-    checks = parent_consistency(df) if not df.empty else []
+    z_mechanizmem = frozenset(
+        c for c in plan.controllers if plan.kind(c) in ("policy_uw", "policy_gate")
+    )
+    checks = parent_consistency(df, z_mechanizmem) if not df.empty else []
     out = RESULTS / f"{plan.name}.md"
-    out.write_text(to_markdown(plan, agg, checks, figures), encoding="utf-8")
+    out.write_text(to_markdown(plan, agg, checks, figures, df), encoding="utf-8")
     if not agg.empty:
         agg.to_csv(RESULTS / f"{plan.name}.csv", index=False)
     return out

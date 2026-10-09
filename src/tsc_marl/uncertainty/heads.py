@@ -41,10 +41,14 @@ class UncertainPolicy(nn.Module):
     Encoder jest DOKŁADNIE tym samym `GATEncoder`, którego używa rdzeń — prototyp
     ma mierzyć głowę niepewności, a nie różnicę architektur.
 
-    „Jedno skrzyżowanie" z 2.0 realizujemy PUSTYM `edge_index`, nie innym modelem:
-    warstwa GAT dokłada pętle własne sama, więc bez krawędzi każdy węzeł widzi
-    wyłącznie siebie. Druga iteracja 2.0 (uncertainty-weighted attention) to
-    wtedy podanie prawdziwego `edge_index` — ta sama sieć, te same wagi.
+    „Jedno skrzyżowanie" z 2.0 realizujemy JAWNYMI PĘTLAMI WŁASNYMI, nie innym
+    modelem i NIE pustym `edge_index`: `add_self_loops` woła się bez `num_nodes`,
+    więc z pustej listy krawędzi wnioskuje zero węzłów i nie dokłada niczego —
+    agregacja zwraca zera, a model uczy się samego biasu (kosztowało to jeden
+    przebieg bramki 2.2; buduje je `_edges` w `prototype.py`, a od Kroku 1
+    UW-attention pusty `edge_index` jest wyjątkiem, nie cichą stałą).
+    Druga iteracja 2.0 (uncertainty-weighted attention) to wtedy podanie
+    prawdziwego `edge_index` — ta sama sieć, te same wagi.
     """
 
     def __init__(
@@ -78,11 +82,6 @@ class UncertainPolicy(nn.Module):
         # softplus, nie exp: exp saturuje i wysadza gradient, gdy sieć nabierze
         # pewności — a evidence ma rosnąć bez ograniczenia
         return torch.nn.functional.softplus(out) + 1.0  # alpha = evidence + 1
-
-    @staticmethod
-    def no_edges(device=None) -> Tensor:
-        """Pusty `edge_index` — wariant 0-hop („jedno skrzyżowanie")."""
-        return torch.zeros((2, 0), dtype=torch.long, device=device)
 
 
 # --------------------------------------------------------------------- EDL

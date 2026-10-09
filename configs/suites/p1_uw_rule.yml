@@ -1,0 +1,92 @@
+# Ramię 3b (Faza 3, po `t2_uw_rule`): rdzeń trenowany Z AWARIAMI i Z UW-attention,
+# którego u pochodzi z LICZNIKA ZAMROŻONYCH DETEKTORÓW, po stronie ŹRÓDŁA krawędzi.
+#
+# Dlaczego jest potrzebne, skoro `p1_uw` już było. `p1_uw` uczyło się z głowy
+# obserwacyjnej po stronie CELU — z sygnałem, o którym dziś wiadomo, że karał w dużej
+# części nie te krawędzie (`results/t2_uw_src.md`) i trafiał w zepsute źródło z AUROC
+# ~0,5. Zero tamtego ramienia (`t2_train_uw`) nie mówi więc nic o tym, czy polityka
+# NAUCZYŁABY SIĘ korzystać z modulacji, gdyby sygnał był dobry. Sygnał z reguły jest
+# dobry: doklejony do gotowej polityki zbiera 45–73% sufitu wyroczni (`t2_uw_rule`).
+#
+# Pytanie: czy polityka uczona Z TYM sygnałem wyciąga z niego więcej niż polityka,
+# której doklejono go dopiero w ewaluacji — w szczególności czy uczy się kanału
+# KRAWĘDZI (ochrona sąsiadów przed wiadomością martwego węzła), który na zamrożonej
+# polityce jest wart ~0 i przez który UW jest redundantne wobec bramki. Odpowiada
+# plan `configs/robustness/t2_train_uw_rule.yml`.
+#
+# ⚠ BLOK `failure_mix` MUSI BYĆ IDENTYCZNY Z `p1_fail.yml` (kontrola, ramię 2) —
+# skopiowany co do znaku. Jedyną różnicą między tymi suite'ami jest klucz `uw`.
+# Pilnuje tego `tests/robustness/test_training.py`.
+#
+# Sygnał budowany przez `robustness.training.uw_signal` — tę samą funkcję, przez którą
+# `tsc degrade` buduje go w ewaluacji, z tymi samymi oknem i progiem bramki-reguły
+# (`runs/heads/gate_ref__<sieć>.npz`), więc polityka uczy się na DOKŁADNIE tym
+# sygnale, którym potem jest mierzona. Rozgrzewka okna (12 decyzji bez modulacji na
+# starcie epizodu) jest częścią sygnału także w treningu.
+#
+# ⚠ SYGNAŁ ZALEŻY OD POLITYKI (zmierzone 2026-10-08 przed biegiem, JiNan, czysty ruch,
+# jeden epizod): FixedTime → `uw_active` 5,5%; nienauczona polityka (argmax z losowych
+# wag, ani jednej zmiany fazy) → 87,2%. Polityka, która głodzi wloty, zapycha je do
+# pojemności, odczyty STOJĄ, a reguła nie odróżnia zatoru od martwego detektora
+# (`obs_head.suspicious_movements`). W pierwszych epizodach treningu modulacja będzie
+# więc w dużej części fałszywa i ma opadać razem z nauką polityki.
+# WARUNEK WAŻNOŚCI, sprawdzany PRZED czytaniem `t2_train_uw_rule`: `uw_active` epizodów
+# testowych (czystych) w `runs/t1/gatppo__*__p1_uw_rule/metrics.csv`, `split=test`,
+# w ostatnich 10 epizodach ≤ 5% (poziom FixedTime; wytrenowany rdzeń w `t2_uw_rule`:
+# 1,2%). Jeśli zostaje wyżej, polityka przez trening widziała szum, a nie awarie —
+# wynik ramienia jest wtedy NIEWAŻNY, nie zerowy (ta sama pułapka co w `p1_uw`).
+#
+# WYMAGA: runs/heads/gate_ref__<sieć>.npz i obs_head__<sieć>.pt (odcisk progu) dla obu
+# sieci — są na gliderze.
+#
+# GPU (entry: core), ~25 min/bieg na gliderze. Sufiks run_id = nazwa pliku:
+# `gatppo__<sieć>__s<seed>_y5__p1_uw_rule`.
+entry: core
+mode: realistic
+timeout: 86400
+ngpu: "0"
+
+grid:
+  network: [cityflow_jinan3x4_4ph, cityflow_hangzhou4x4_4ph]
+  seed: [0, 1, 2]
+
+overrides:
+  model:
+    # τ, strona i źródło jak w kolumnie `gatppo_uw_rule` planu `t2_uw_rule`.
+    uw: {tau: 0.25, side: source, u: rule}
+    # Scenariusz losowany NA EPIZOD ze strumienia (seed mixu, numer epizodu) —
+    # niezależnego od `--seed` polityki, żeby oba ramiona widziały ten sam
+    # harmonogram awarii (patrz `robustness/training.py`). KTÓRE detektory padną,
+    # wybiera już `SensorModel` z (spec.seed, episode), więc dwa epizody z tym
+    # samym scenariuszem psują inne pasy.
+    failure_mix:
+      seed: 0
+      scenarios:
+        # 1/3 epizodów czystych. Nie ostrożność, tylko warunek A3a: polityka ma
+        # zostać porównywalna z rdzeniem na czystym ruchu, a kolumna `clean` w T2
+        # jest odniesieniem dla wszystkich degradacji.
+        - {weight: 4, kind: none}
+        # szum pomiarowy — poziom OBSERWOWALNY, `uw_spread` na T2: 0,74 / 2,21
+        - {weight: 1, kind: gauss, level: 1.0}
+        - {weight: 1, kind: gauss, level: 2.0}
+        # martwe detektory ze śladem (`zero`) — poziom WNIOSKOWALNY, tu leży
+        # większość zysku fallbacku i tu mechanizm ma największą szansę
+        - {weight: 2, kind: mask, level: 0.25}
+        - {weight: 1, kind: mask, level: 0.5}
+        # całe skrzyżowanie bez czujników: wszystkie krawędzie wchodzące równie
+        # niepewne, softmax na wspólną stałą niezmienniczy — scenariusz, w którym
+        # mechanizm Z DEFINICJI nie ma czego różnicować. Zostaje w mieszance, żeby
+        # polityka nie uczyła się, że „awaria ⇒ zawsze da się wybrać sąsiada".
+        - {weight: 1, kind: mask, level: 0.25, unit: intersection}
+        # martwe BEZ śladu: zamrożony odczyt zamiast zera. `onset: 60` jest
+        # konieczne — detektor martwy od pierwszej decyzji nie ma czego trzymać
+        # i `hold` degeneruje się do `zero` (patrz `domain/sensors.py`).
+        - {weight: 1, kind: mask, level: 0.25, substitution: hold, onset: 60}
+        # rozkalibrowanie — poziom NIEOBSERWOWALNY; głowa go nie wykrywa
+        # (AUROC 0,536), więc jest tu jako test, czy nie szkodzi
+        - {weight: 1, kind: drift, level: 0.3}
+    #
+    # CZEGO W MIESZANCE NIE MA I DLACZEGO: `mask 0.75` i `gauss 4.0`. Przy tych
+    # poziomach WSZYSTKO, co czyta czujniki, przegrywa z FixedTime o 45% — to jest
+    # dziedzina bramki fallbacku (§2 notatki), nie ważenia sąsiadów. O
+    # publikowalności decyduje zakres środkowy i on jest tu przeważony.
