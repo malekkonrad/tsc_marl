@@ -9,7 +9,8 @@
 # Trening na CPU (`ngpu: -1`): GPU nic tu nie przyspiesza — wąskim gardłem jest SUMO —
 # a 2026-10-09 karta glidera była zajęta przez innego użytkownika (15,6 z 16 GB). Równolegle:
 #     tsc suite run k1_core -j 3
-# Sufiks run_id = nazwa pliku: `gatppo__sumo_krakow3w_mid__s<seed>_y5__k1_core`.
+# run_id BEZ sufiksu: `gatppo__sumo_krakow3w_mid__s<seed>_y5` — suite bez nadpisań configu
+# liczy bieg referencyjny i sufiksu nie dostaje (`runner/suite.Suite.suffix`).
 entry: core
 mode: realistic
 timeout: 86400

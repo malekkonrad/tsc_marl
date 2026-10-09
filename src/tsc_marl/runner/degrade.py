@@ -293,9 +293,16 @@ def build_controller(
     if KINDS[plan.agent(unit.controller)] == "policy":
         from tsc_marl.core.nets import ActorCritic  # noqa: PLC0415
 
+        # Maska faz jak w `CoreTrainer.from_world`: na sieci niejednorodnej (Kraków, 2–7 faz)
+        # actor bez niej wybiera fazę, której skrzyżowanie nie ma, i SUMO się wywala
+        # (`phase index 2 is not in the allowed range [0,0]`). Bufor nie jest w `state_dict`
+        # (`persistent=False`), więc checkpoint go nie przyniesie — trzeba go podać tu.
+        # Na JiNan/HangZhou `phase_mask()` to None i sieć buduje się jak dotąd.
+        mask = feats.phase_mask()
+        extra = {} if mask is None else {"phase_mask": torch.from_numpy(mask)}
         actors = []
         for path in ckpts:
-            ac = ActorCritic.from_registry(feats.ob_length, feats.n_phases)
+            ac = ActorCritic.from_registry(feats.ob_length, feats.n_phases, **extra)
             ac.actor.load_state_dict(
                 torch.load(path, map_location="cpu", weights_only=True)["actor"]
             )

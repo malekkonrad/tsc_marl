@@ -575,7 +575,11 @@ class OracleGate:
             self._built_for = features  # ale nie podmianę scenariusza
 
         broken = sensors.broken
-        part = [sum(lane in broken for lane in lanes) / len(lanes) for lanes in self._in_lanes]
+        # `max(…, 1)`: Kraków ma sygnalizacje bez pasów wjazdowych w `in_lanes` (np. same
+        # przejścia dla pieszych) — węzeł bez detektorów nie może być oślepiony, udział 0
+        part = [
+            sum(lane in broken for lane in lanes) / max(len(lanes), 1) for lanes in self._in_lanes
+        ]
         self.last_score = np.asarray(part, dtype=np.float64)
         return self.last_score >= self.threshold
 

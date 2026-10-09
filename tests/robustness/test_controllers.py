@@ -1322,3 +1322,12 @@ def test_maska_ruchow_tylko_na_sieci_niejednorodnej():
 
     assert phase_mask([8, 8, 8], 8) is None
     assert phase_mask([8, 4], 8)[1].tolist() == [True] * 4 + [False] * 4
+
+
+def test_wyrocznia_wezel_bez_pasow_wjazdowych():
+    """Kraków: sygnalizacja bez pasów w `in_lanes` — udział 0, nie dzielenie przez zero."""
+    env = SimpleNamespace(features=features({"1_a", "1_b"}))
+    env.features.structs[2] = SimpleNamespace(in_lanes=[])
+    bramka = c.OracleGate(env)
+    assert bramka.mask(None).tolist() == [False, True, False, False]
+    assert bramka.last_score[2] == 0.0

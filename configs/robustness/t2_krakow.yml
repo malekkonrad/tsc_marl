@@ -11,7 +11,8 @@
 #   rozwiązanie: DR + bramka-reguła schodzi pod FixedTime przy 50% martwych detektorów
 #
 # KOLUMNY (rodzice: suite'y `k1_core` i `k1_fail`, uczone na `mid`, 3 seedy):
-#   gatppo            rdzeń na czystym                         (k1_core)
+#   gatppo            rdzeń na czystym                         (k1_core, run_id BEZ sufiksu —
+#                     suite bez nadpisań liczy bieg referencyjny, `Suite.suffix`)
 #   gatppo_fail       rdzeń z awariami (DR)        vs gatppo   (k1_fail)
 #   gatppo_gate       rdzeń + bramka-reguła        vs gatppo   (k1_core)
 #   gatppo_fail_gate  DR + bramka-reguła   vs gatppo_fail      (k1_fail) ← rozwiązanie
@@ -80,7 +81,7 @@ networks: [sumo_krakow3w_mid, sumo_krakow3w_low, sumo_krakow3w_high]
 controllers:
   gatppo:
     seeds: [0, 1, 2]
-    parent: "{agent}__sumo_krakow3w_mid__s{seed}_y{yellow}__k1_core"
+    parent: "{agent}__sumo_krakow3w_mid__s{seed}_y{yellow}"
   gatppo_fail:
     agent: gatppo
     seeds: [0, 1, 2]
@@ -89,7 +90,7 @@ controllers:
   gatppo_gate:
     agent: gatppo
     seeds: [0, 1, 2]
-    parent: "{agent}__sumo_krakow3w_mid__s{seed}_y{yellow}__k1_core"
+    parent: "{agent}__sumo_krakow3w_mid__s{seed}_y{yellow}"
     gate: {kind: rule, k_on: 3, k_off: 6}
   gatppo_fail_gate:
     agent: gatppo
