@@ -843,8 +843,12 @@ def main(plan: Plan) -> Path:
         p = plot(plan, agg, net, RESULTS / "figures" / f"{plan.name}_{net}.png")
         if p is not None:
             figures[net] = p
+    # pomijane w kontroli: mechanizm (inna polityka niż w teście treningu) albo NAJLEPSZY
+    # checkpoint (`checkpoint: best` — inne wagi niż te z OSTATNIEGO testu treningu)
     z_mechanizmem = frozenset(
-        c for c in plan.controllers if plan.kind(c) in ("policy_uw", "policy_gate")
+        c
+        for c, spec in plan.controllers.items()
+        if plan.kind(c) in ("policy_uw", "policy_gate") or spec.get("checkpoint") == "best"
     )
     checks = parent_consistency(df, z_mechanizmem) if not df.empty else []
     out = RESULTS / f"{plan.name}.md"
