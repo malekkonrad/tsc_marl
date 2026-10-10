@@ -1,0 +1,64 @@
+# Kraków: rdzeń z awariami (DR) — POWTÓRKA `k1_fail` z zapisem NAJLEPSZEGO checkpointu (`model.save_best`).
+#
+# Po co: w `t2_krakow` polityka przegrała z Websterem już na czystym `mid`, ale jej
+# epizody testowe pod koniec treningu skakały w zakresie ~340–430 s, a `att_best`
+# (320–338 s) leżał PONIŻEJ Webstera (347,6). Pytanie: czy przegrana to wybór końcowego
+# checkpointu, czy możliwości polityki. Odpowiada `t2_krakow_best` na ruchu ODŁOŻONYM
+# (`sumo_krakow3w_mid_s1`) — na `mid` czysty wynik najlepszego checkpointu to z definicji
+# `att_best`, bo epizod testowy treningu = czysty `mid` w `tsc degrade`.
+#
+# Konfiguracja identyczna z `k1_fail` poza `save_best` (test w `test_training.py`); klucz
+# siedzi w `model`, więc zmienia `config_hash` i daje sufiks — biegi `k1_fail` zostają.
+# Sufiks run_id: `gatppo__sumo_krakow3w_mid__s<seed>_y5__k2_fail`.
+#
+entry: core
+mode: realistic
+timeout: 86400
+ngpu: "-1"           # CPU: wąskim gardłem jest SUMO, a GPU glidera bywa zajęte przez innych
+
+defaults:
+  world: sumo
+
+grid:
+  network: [sumo_krakow3w_mid]
+  seed: [0, 1, 2]
+
+overrides:
+  model:
+    save_best: true
+    # Scenariusz losowany NA EPIZOD ze strumienia (seed mixu, numer epizodu) —
+    # niezależnego od `--seed` polityki, żeby oba ramiona widziały ten sam
+    # harmonogram awarii (patrz `robustness/training.py`). KTÓRE detektory padną,
+    # wybiera już `SensorModel` z (spec.seed, episode), więc dwa epizody z tym
+    # samym scenariuszem psują inne pasy.
+    failure_mix:
+      seed: 0
+      scenarios:
+        # 1/3 epizodów czystych. Nie ostrożność, tylko warunek A3a: polityka ma
+        # zostać porównywalna z rdzeniem na czystym ruchu, a kolumna `clean` w T2
+        # jest odniesieniem dla wszystkich degradacji.
+        - {weight: 4, kind: none}
+        # szum pomiarowy — poziom OBSERWOWALNY, `uw_spread` na T2: 0,74 / 2,21
+        - {weight: 1, kind: gauss, level: 1.0}
+        - {weight: 1, kind: gauss, level: 2.0}
+        # martwe detektory ze śladem (`zero`) — poziom WNIOSKOWALNY, tu leży
+        # większość zysku fallbacku i tu mechanizm ma największą szansę
+        - {weight: 2, kind: mask, level: 0.25}
+        - {weight: 1, kind: mask, level: 0.5}
+        # całe skrzyżowanie bez czujników: wszystkie krawędzie wchodzące równie
+        # niepewne, softmax na wspólną stałą niezmienniczy — scenariusz, w którym
+        # mechanizm Z DEFINICJI nie ma czego różnicować. Zostaje w mieszance, żeby
+        # polityka nie uczyła się, że „awaria ⇒ zawsze da się wybrać sąsiada".
+        - {weight: 1, kind: mask, level: 0.25, unit: intersection}
+        # martwe BEZ śladu: zamrożony odczyt zamiast zera. `onset: 60` jest
+        # konieczne — detektor martwy od pierwszej decyzji nie ma czego trzymać
+        # i `hold` degeneruje się do `zero` (patrz `domain/sensors.py`).
+        - {weight: 1, kind: mask, level: 0.25, substitution: hold, onset: 60}
+        # rozkalibrowanie — poziom NIEOBSERWOWALNY; głowa go nie wykrywa
+        # (AUROC 0,536), więc jest tu jako test, czy nie szkodzi
+        - {weight: 1, kind: drift, level: 0.3}
+    #
+    # CZEGO W MIESZANCE NIE MA I DLACZEGO: `mask 0.75` i `gauss 4.0`. Przy tych
+    # poziomach WSZYSTKO, co czyta czujniki, przegrywa z FixedTime o 45% — to jest
+    # dziedzina bramki fallbacku (§2 notatki), nie ważenia sąsiadów. O
+    # publikowalności decyduje zakres środkowy i on jest tu przeważony.

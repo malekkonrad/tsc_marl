@@ -202,6 +202,18 @@ TITLES = {
 T_THRESHOLD = 2.8
 
 
+#: Podpisy kolumn z planu (`label:` w spec sterownika) — wypełniane w `main`, mają
+#: pierwszeństwo przed `LABELS`. Nazwa kolumny jest częścią `run_id`, więc jej zmiana
+#: oznacza przeliczenie; podpis nie wchodzi do odcisku biegu i można go poprawić bez
+#: liczenia. Potrzebne od `t2_krakow`: `gatppo_gate` jest tam bramką-REGUŁĄ, a w `LABELS`
+#: ta nazwa niesie podpis wyroczni ze starego `t2_gate` (stare biegi zostają w `runs/t2`).
+_PLAN_LABELS: dict[str, str] = {}
+
+
+def podpis(kolumna: str) -> str:
+    return _PLAN_LABELS.get(kolumna) or LABELS.get(kolumna, kolumna)
+
+
 def mechanism_pairs(plan: Plan) -> list[tuple[str, str]]:
     """[(kolumna porównywana, kolumna odniesienia)] — pary do tabeli Δ.
 
@@ -249,7 +261,12 @@ def wspolny_checkpoint(plan: Plan, mechanizm: str, baza: str) -> bool:
 
     net = plan.networks[0]
     seed = int(plan.controllers[mechanizm].get("seeds", [0])[0])
-    return plan.parent_id(Unit(mechanizm, net, seed)) == plan.parent_id(Unit(baza, net, seed))
+    ten_sam_plik = plan.controllers[mechanizm].get("checkpoint", "last") == plan.controllers[
+        baza
+    ].get("checkpoint", "last")  # najlepszy vs końcowy z tego samego biegu to INNE wagi
+    return ten_sam_plik and plan.parent_id(Unit(mechanizm, net, seed)) == plan.parent_id(
+        Unit(baza, net, seed)
+    )
 
 
 #: rodzaj mechanizmu -> (metryki z `result.json`, zdanie tłumaczące je w raporcie).
@@ -417,7 +434,7 @@ def _mechanism_section(plan: Plan, df, mechanizm: str, baza: str) -> list[str]:
     if not diag and (pary is None or pary.empty):
         return []
 
-    etykieta = LABELS.get(mechanizm, mechanizm)
+    etykieta = podpis(mechanizm)
     # Goła kolumna `policy` nie jest MECHANIZMEM — różni ją od odniesienia trening.
     # Nazwanie jej mechanizmem w nagłówku byłoby przekłamaniem wyniku, nie kosmetyką.
     ramie = plan.kind(mechanizm) == "policy"
@@ -427,7 +444,7 @@ def _mechanism_section(plan: Plan, df, mechanizm: str, baza: str) -> list[str]:
         "ramię jest wobec ATT **neutralne**" if ramie else "mechanizm jest wobec ATT **neutralny**"
     )
     lines = [
-        f"## {czym}: {etykieta} vs {LABELS.get(baza, baza)}",
+        f"## {czym}: {etykieta} vs {podpis(baza)}",
         "",
         (
             "Obie kolumny liczą się z TEGO SAMEGO checkpointu i tych samych losowań awarii "
@@ -541,7 +558,7 @@ def _sweep_section(plan: Plan, df, pary: list[tuple[str, str]]) -> list[str]:
     lines = [
         "## Mechanizmy × scenariusz",
         "",
-        f"Δ ATT [s] KOLUMNY OCENIANEJ względem `{LABELS.get(baza, baza)}`, sparowana po "
+        f"Δ ATT [s] KOLUMNY OCENIANEJ względem `{podpis(baza)}`, sparowana po "
         "(seed, losowanie)"
         + (
             ". W nawiasie odsetek par (decyzja, węzeł) przejętych przez regułę"
@@ -586,7 +603,7 @@ def _sweep_section(plan: Plan, df, pary: list[tuple[str, str]]) -> list[str]:
                 share = diag.get((net, scen), {}).get("gate_share")
                 udzial = "" if share is None else f" ({share:.0%})"
                 komorki.append(f"{mocny}{r['delta']:+.1f}{mocny}{udzial}")
-            lines.append(f"| {LABELS.get(mechanizm, mechanizm)} | " + " | ".join(komorki) + " |")
+            lines.append(f"| {podpis(mechanizm)} | " + " | ".join(komorki) + " |")
 
         # Jakość detekcji — tylko dla bramek, które mają odniesienie (wyrocznia jako
         # diagnostyka). Rozdziela „detektor jest słaby" od „przełączanie mało daje".
@@ -611,9 +628,7 @@ def _sweep_section(plan: Plan, df, pary: list[tuple[str, str]]) -> list[str]:
                         else f"{'—' if p_ is None else f'{p_:.2f}'} / "
                         f"{'—' if r_ is None else f'{r_:.2f}'}"
                     )
-                lines.append(
-                    f"| {LABELS.get(mechanizm, mechanizm)} | " + " | ".join(komorki) + " |"
-                )
+                lines.append(f"| {podpis(mechanizm)} | " + " | ".join(komorki) + " |")
         lines.append("")
     return lines
 
@@ -647,8 +662,7 @@ def to_markdown(
             lines += ["_Brak policzonych sterowników dla tej sieci._", ""]
             continue
         head = "| scenariusz | " + " | ".join(
-            f"{LABELS.get(c, c)} (n={int(sub[sub['controller'] == c]['n_seeds'].max())})"
-            for c in present
+            f"{podpis(c)} (n={int(sub[sub['controller'] == c]['n_seeds'].max())})" for c in present
         )
         lines += [head + " |", "|---|" + "---:|" * len(present)]
         for name in order:
@@ -667,7 +681,7 @@ def to_markdown(
         lines.append("")
         if missing:
             lines += [
-                f"_Niepoliczone na tej maszynie: {', '.join(LABELS.get(c, c) for c in missing)} "
+                f"_Niepoliczone na tej maszynie: {', '.join(podpis(c) for c in missing)} "
                 "(brak checkpointów rodzica — patrz `tsc degrade status`)._",
                 "",
             ]
@@ -724,7 +738,7 @@ def _findings(sub, present, ft_att, specs) -> list[str]:
         worst = rows.loc[rows["att_mean"].idxmax()]
         above = rows[rows["att_mean"] > ft_att]["scenario"].tolist()
         text = (
-            f"* **{LABELS.get(c, c)}** — najgorszy scenariusz `{worst.scenario}`: "
+            f"* **{podpis(c)}** — najgorszy scenariusz `{worst.scenario}`: "
             f"{worst.att_mean:.1f} s ({worst.delta:+.1%}). "
         )
         if above:
@@ -786,7 +800,7 @@ def plot(plan: Plan, agg, network: str, path: Path) -> Path | None:
                 sd.append(float(row["att_std"].iloc[0]))
             xs, ys, sd = np.array(xs), np.array(ys), np.array(sd)
             ax.plot(xs, ys, color=COLORS[c], lw=2, marker="o", ms=5.5, mec=SURFACE, mew=1.5,
-                    solid_capstyle="round", label=LABELS[c], zorder=3)  # fmt: skip
+                    solid_capstyle="round", label=podpis(c), zorder=3)  # fmt: skip
             if plan.kind(c) in LEARNED and (sd > 0).any():
                 ax.fill_between(xs, ys - sd, ys + sd, color=COLORS[c], alpha=0.10, lw=0)
         if ft_att is not None:
@@ -818,6 +832,10 @@ def plot(plan: Plan, agg, network: str, path: Path) -> Path | None:
 
 
 def main(plan: Plan) -> Path:
+    _PLAN_LABELS.clear()
+    _PLAN_LABELS.update(
+        {c: spec["label"] for c, spec in plan.controllers.items() if spec.get("label")}
+    )
     df = load(plan)
     agg = aggregate(df)
     figures = {}

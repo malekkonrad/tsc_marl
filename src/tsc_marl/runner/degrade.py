@@ -97,7 +97,10 @@ def checkpoint(plan: Plan, unit: Unit, parent) -> Path | None:
     # nieprzetrenowany seed nie wywalał planu), więc plan liczy się dalej BEZ kolumny,
     # dla której powstał, i raport wychodzi z kompletem tabel o jedną kolumnę uboższy.
     if KINDS[plan.agent(unit.controller)] == "policy":
-        return parent.path / "engine" / "core.pt"
+        # `checkpoint: best` = najlepszy epizod testowy treningu (`model.save_best`,
+        # `CoreTrainer.best_path`); domyślnie końcowy, jak we wszystkich planach dotąd
+        best = plan.controllers[unit.controller].get("checkpoint") == "best"
+        return parent.path / "engine" / ("core_best.pt" if best else "core.pt")
 
     from tsc_marl.runner.evaluate import available_checkpoints, engine_run_dir  # noqa: PLC0415
 
@@ -133,6 +136,10 @@ def unit_params(plan: Plan, unit: Unit, parents: list[Any]) -> dict[str, Any]:
     # progu i wypisuje „pomijam (jest wynik)" — sweep zwróciłby trzy razy tę samą
     # liczbę pod trzema etykietami.
     spec = plan.controllers[unit.controller]
+    # inne WAGI z tego samego rodzica — bez tego kolumna `best` miałaby odcisk kolumny
+    # z końcowym checkpointem i `is_done` pominąłby ją jako „jest wynik"
+    if spec.get("checkpoint", "last") != "last":
+        params["checkpoint"] = spec["checkpoint"]
     mechanizm = {k: spec[k] for k in MECHANISM_KEYS if k in spec}
     if mechanizm:
         params["mechanism"] = mechanizm

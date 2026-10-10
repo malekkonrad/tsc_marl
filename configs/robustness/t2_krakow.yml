@@ -84,16 +84,19 @@ controllers:
     parent: "{agent}__sumo_krakow3w_mid__s{seed}_y{yellow}"
   gatppo_fail:
     agent: gatppo
+    label: rdzeń z awariami (DR)
     seeds: [0, 1, 2]
     parent: "{agent}__sumo_krakow3w_mid__s{seed}_y{yellow}__k1_fail"
     baseline: gatppo
   gatppo_gate:
     agent: gatppo
+    label: rdzeń + bramka-reguła
     seeds: [0, 1, 2]
     parent: "{agent}__sumo_krakow3w_mid__s{seed}_y{yellow}"
     gate: {kind: rule, k_on: 3, k_off: 6}
   gatppo_fail_gate:
     agent: gatppo
+    label: DR + bramka-reguła
     seeds: [0, 1, 2]
     parent: "{agent}__sumo_krakow3w_mid__s{seed}_y{yellow}__k1_fail"
     gate: {kind: rule, k_on: 3, k_off: 6}

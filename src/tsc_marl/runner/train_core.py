@@ -99,6 +99,11 @@ def main(argv: list[str] | None = None) -> None:
                 core.device,
                 n_nodes=core.env.graph.n_nodes,
             )
+        # `model.save_best` (suite'y `k2_*`): zapis checkpointu z najlepszym epizodem
+        # testowym obok końcowego `core.pt`. Klucz siedzi w `model`, więc wchodzi do
+        # `config_hash` i suite dostaje sufiks — biegi nie nadpiszą `k1_*`.
+        if Registry.mapping["model_mapping"]["setting"].param.get("save_best"):
+            core.best_path = s.run.engine_dir / "core_best.pt"
         s.logger.info(
             f"rdzeń: {core.env.graph} | ob_length {core.env.features.ob_length} "
             f"| device {core.device}"

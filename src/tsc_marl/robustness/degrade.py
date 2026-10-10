@@ -265,6 +265,13 @@ def load_plan(path: str | Path) -> Plan:
                 )
             if int(spec["mask"]["k_max"]) < 1:
                 raise SystemExit(f"plan '{p.name}': maska '{label}' ma k_max < 1")
+        if spec.get("checkpoint", "last") not in ("last", "best"):
+            raise SystemExit(
+                f"plan '{p.name}': '{label}' ma checkpoint={spec['checkpoint']!r}, "
+                "dozwolone: last, best"
+            )
+        if "checkpoint" in spec and KINDS[plan.agent(label)] != "policy":
+            raise SystemExit(f"plan '{p.name}': checkpoint tylko dla rdzenia ('{label}')")
         baza = spec.get("baseline")
         if baza is not None and baza not in plan.controllers:
             raise SystemExit(

@@ -1,0 +1,79 @@
+# T2 — Kraków: czy przegrana z Websterem to wybór checkpointu, czy możliwości polityki?
+#
+# SKĄD. W `t2_krakow` polityka (końcowy checkpoint) przegrała z FixedTime-Webster już na
+# czystym `mid`: 344 / 356 / 429 s per seed wobec 347,6. Ale epizody testowe pod koniec
+# treningu skakały w zakresie ~340–430 s, a `att_best` (320–338 s) leżał PONIŻEJ Webstera.
+# Końcowy checkpoint jest więc losową próbką z zaszumionej końcówki treningu.
+#
+# PUŁAPKA, KTÓREJ TEN PLAN UNIKA. Epizod testowy treningu to dokładnie czysty `mid`
+# w `tsc degrade` (zgodność 0,000 s), więc najlepszy checkpoint wybrany po teście ma na
+# `mid` czysty wynik równy `att_best` — z definicji. To byłby wybór na zbiorze pomiarowym.
+# Dlatego miarą jest RUCH ODŁOŻONY `sumo_krakow3w_mid_s1`: ten sam poziom popytu (4500
+# poj/h), trasy z seedem 1, własny Webster i własny próg reguły. Trening go nie widział.
+# Na `mid` plan liczy się tylko dla kontroli (pokazuje rozmiar optymizmu wyboru).
+#
+# KOLUMNY (rodzice `k2_core` / `k2_fail` — powtórki `k1_*` z `model.save_best`):
+#   gatppo / gatppo_best             rdzeń: końcowy vs najlepszy checkpoint
+#   gatppo_fail / gatppo_fail_best   DR: końcowy vs najlepszy
+#   gatppo_fail_gate_best            DR (najlepszy) + bramka-reguła — rozwiązanie
+#   advancedmp, fixedtime (Webster)
+#
+# HIPOTEZY ZAPISANE PRZED POMIAREM (na `mid_s1`):
+#   B1: na czystym najlepszy checkpoint ≤ końcowy (średnio po seedach) i mniejszy rozrzut
+#       między seedami — wybór zdejmuje ogon w rodzaju 429 s.
+#   B2 (ROZSTRZYGAJĄCA): najlepszy checkpoint na czystym vs Webster. Bez przekonania co do
+#       znaku: `att_best` był 3–8% poniżej Webstera, ale to optymistyczne (maksimum z 200
+#       zaszumionych prób na tym samym epizodzie); na ruchu odłożonym przewaga może zniknąć.
+#       Odczyt: polityka ≤ Webster → przegrana w `t2_krakow` była artefaktem wyboru
+#       checkpointu; polityka > Webster → przegrana jest realna i zdanie w pracy zostaje.
+#   B3: pod `mask0p5_intersection` DR + bramka ≈ własny czysty wynik (jak w `t2_krakow`).
+#   B4 (kontrola optymizmu): na `mid` najlepszy checkpoint wygląda lepiej niż na `mid_s1`
+#       o więcej niż końcowy — różnica to rozmiar biasu wyboru.
+#
+# WYMAGA: suite'ów `k2_core`, `k2_fail` (glider) oraz `rule_ref__sumo_krakow3w_mid_s1.json`
+# i `rule_ref__sumo_krakow3w_mid.json` (`tsc rulecal`, rsync z laptopa).
+name: t2_krakow_best
+mode: realistic
+draws: 3
+timeout: 14400
+
+networks: [sumo_krakow3w_mid_s1, sumo_krakow3w_mid]
+
+controllers:
+  gatppo:
+    seeds: [0, 1, 2]
+    parent: "{agent}__sumo_krakow3w_mid__s{seed}_y{yellow}__k2_core"
+    label: rdzeń (końcowy)
+  gatppo_best:
+    agent: gatppo
+    seeds: [0, 1, 2]
+    parent: "{agent}__sumo_krakow3w_mid__s{seed}_y{yellow}__k2_core"
+    checkpoint: best
+    label: rdzeń (najlepszy)
+    baseline: gatppo
+  gatppo_fail:
+    agent: gatppo
+    seeds: [0, 1, 2]
+    parent: "{agent}__sumo_krakow3w_mid__s{seed}_y{yellow}__k2_fail"
+    label: DR (końcowy)
+  gatppo_fail_best:
+    agent: gatppo
+    seeds: [0, 1, 2]
+    parent: "{agent}__sumo_krakow3w_mid__s{seed}_y{yellow}__k2_fail"
+    checkpoint: best
+    label: DR (najlepszy)
+    baseline: gatppo_fail
+  gatppo_fail_gate_best:
+    agent: gatppo
+    seeds: [0, 1, 2]
+    parent: "{agent}__sumo_krakow3w_mid__s{seed}_y{yellow}__k2_fail"
+    checkpoint: best
+    gate: {kind: rule, k_on: 3, k_off: 6}
+    label: DR (najlepszy) + bramka-reguła
+    baseline: gatppo_fail_best
+  advancedmp: {}
+  fixedtime: {}
+
+scenarios:
+  - {kind: mask, level: 0.5}
+  - {kind: mask, level: 0.5, unit: intersection}

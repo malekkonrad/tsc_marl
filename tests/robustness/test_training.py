@@ -274,3 +274,18 @@ def test_krakow_dr_ma_mieszanke_z_p1_fail():
     assert suite_mix("k1_fail") == suite_mix("p1_fail")
     core = yaml.safe_load((CONFIGS / "suites" / "k1_core.yml").read_text())
     assert "overrides" not in core or "failure_mix" not in core["overrides"].get("model", {})
+
+
+def test_k2_to_k1_plus_zapis_najlepszego_checkpointu():
+    """Powtórka ma różnić się od `k1_*` WYŁĄCZNIE `save_best` — inaczej porównanie
+    końcowego i najlepszego checkpointu z `t2_krakow` przestaje dotyczyć tych samych biegów."""
+    for k1, k2 in (("k1_core", "k2_core"), ("k1_fail", "k2_fail")):
+        a = yaml.safe_load((CONFIGS / "suites" / f"{k1}.yml").read_text())
+        b = yaml.safe_load((CONFIGS / "suites" / f"{k2}.yml").read_text())
+        model_a = (a.get("overrides") or {}).get("model", {})
+        model_b = dict(b["overrides"]["model"])
+        assert model_b.pop("save_best") is True
+        assert model_a == model_b
+        assert {k: v for k, v in a.items() if k != "overrides"} == {
+            k: v for k, v in b.items() if k != "overrides"
+        }

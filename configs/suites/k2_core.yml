@@ -1,0 +1,28 @@
+# Kraków: rdzeń na czystym — POWTÓRKA `k1_core` z zapisem NAJLEPSZEGO checkpointu (`model.save_best`).
+#
+# Po co: w `t2_krakow` polityka przegrała z Websterem już na czystym `mid`, ale jej
+# epizody testowe pod koniec treningu skakały w zakresie ~340–430 s, a `att_best`
+# (320–338 s) leżał PONIŻEJ Webstera (347,6). Pytanie: czy przegrana to wybór końcowego
+# checkpointu, czy możliwości polityki. Odpowiada `t2_krakow_best` na ruchu ODŁOŻONYM
+# (`sumo_krakow3w_mid_s1`) — na `mid` czysty wynik najlepszego checkpointu to z definicji
+# `att_best`, bo epizod testowy treningu = czysty `mid` w `tsc degrade`.
+#
+# Konfiguracja identyczna z `k1_core` poza `save_best` (test w `test_training.py`); klucz
+# siedzi w `model`, więc zmienia `config_hash` i daje sufiks — biegi `k1_core` zostają.
+# Sufiks run_id: `gatppo__sumo_krakow3w_mid__s<seed>_y5__k2_core`.
+#
+entry: core
+mode: realistic
+timeout: 86400
+ngpu: "-1"           # CPU: wąskim gardłem jest SUMO, a GPU glidera bywa zajęte przez innych
+
+defaults:
+  world: sumo
+
+grid:
+  network: [sumo_krakow3w_mid]
+  seed: [0, 1, 2]
+
+overrides:
+  model:
+    save_best: true

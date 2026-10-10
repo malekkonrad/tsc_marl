@@ -1331,3 +1331,30 @@ def test_wyrocznia_wezel_bez_pasow_wjazdowych():
     bramka = c.OracleGate(env)
     assert bramka.mask(None).tolist() == [False, True, False, False]
     assert bramka.last_score[2] == 0.0
+
+
+# ------------------------------------------- najlepszy checkpoint (Kraków, `t2_krakow_best`)
+
+
+def test_checkpoint_best_wskazuje_inny_plik_i_zmienia_odcisk(tmp_path):
+    """`checkpoint: best` = `core_best.pt` tego samego rodzica; musi zmieniać odcisk biegu,
+    inaczej kolumna z najlepszym checkpointem zostałaby pominięta jako „jest wynik"."""
+    from tsc_marl.analysis.degradation import wspolny_checkpoint  # noqa: PLC0415
+    from tsc_marl.runner.degrade import checkpoint, unit_params  # noqa: PLC0415
+
+    plan = d.load_plan("t2_krakow_best")
+    rodzic = SimpleNamespace(path=tmp_path, id="r", meta={"params_hash": "abc"})
+    net = "sumo_krakow3w_mid_s1"
+    assert checkpoint(plan, d.Unit("gatppo", net, 0), rodzic).name == "core.pt"
+    assert checkpoint(plan, d.Unit("gatppo_best", net, 0), rodzic).name == "core_best.pt"
+    a = unit_params(plan, d.Unit("gatppo", net, 0), [rodzic])
+    b = unit_params(plan, d.Unit("gatppo_best", net, 0), [rodzic])
+    assert "checkpoint" not in a and b["checkpoint"] == "best"
+    assert not wspolny_checkpoint(plan, "gatppo_best", "gatppo")
+
+
+def test_checkpoint_z_literowka_odrzucony(tmp_path):
+    p = plan_uw(tmp_path)
+    p.write_text(p.read_text().replace("uw: {tau: 0.25}", "checkpoint: najlepszy"))
+    with pytest.raises(SystemExit, match="checkpoint"):
+        d.load_plan(p)

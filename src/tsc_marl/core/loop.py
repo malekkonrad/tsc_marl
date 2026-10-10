@@ -353,6 +353,14 @@ class CoreTrainer:
         self.device = next(ppo.ac.parameters()).device
         self.edge_index = env.graph.edge_index.to(self.device)
         self.history: list[dict[str, float]] = []
+        # Ścieżka NAJLEPSZEGO checkpointu (min ATT epizodu testowego) albo None = nie
+        # zapisujemy. Ustawia ją `train_core` przy `model.save_best` (suite'y `k2_*`).
+        # UWAGA metodologiczna: epizod testowy jest TYM SAMYM epizodem, który `tsc degrade`
+        # liczy jako `clean` na sieci treningowej — czysty wynik najlepszego checkpointu
+        # na tej sieci to z definicji `att_best`. Porównanie uczciwe tylko na ruchu
+        # ODŁOŻONYM (`sumo_krakow3w_mid_s1`, plan `t2_krakow_best`).
+        self.best_path: Path | None = None
+        self._best_att = float("inf")
         self._episode_failure = "clean"
 
     # --------------------------------------------------------------- budowanie
@@ -516,6 +524,9 @@ class CoreTrainer:
                 self._log(e, "test", {**test_metrics, **self._mechanism_metrics(test=True)})
                 test_att.append(test_metrics["att"])
                 self.history.append(test_metrics)
+                if self.best_path is not None and test_metrics["att"] < self._best_att:
+                    self._best_att = test_metrics["att"]
+                    self.save(self.best_path)
             self._say(e, train_metrics, stats, test_metrics, mech)
 
         return self._report(test_att)

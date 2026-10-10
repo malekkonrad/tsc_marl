@@ -55,6 +55,18 @@ OVERPASS = "https://overpass-api.de/api/interpreter"
 #   6000+ poj/h zakleszczenie: 239 → 5878 teleportów, ATT bez znaczenia
 # Warunek z Planu B notatki: poziomy od niedosyconego do przesyconego.
 DEMAND_PERIOD = {"low": 2.0, "mid": 0.8, "high": 0.7}
+# Ruch ODŁOŻONY: ten sam poziom popytu, inny seed tras. Polityka uczy się na `mid`
+# (seed 0), a jej epizod testowy to dokładnie czysty `mid` z `tsc degrade` — więc
+# wybór najlepszego checkpointu po teście i porównanie na `mid` byłyby wyborem na
+# zbiorze pomiarowym. `mid_s1` jest zbiorem, którego trening nie widział (`t2_krakow_best`).
+DEMAND_HELDOUT = {"mid_s1": ("mid", 1)}
+
+
+def demand_levels() -> dict[str, tuple[float, int]]:
+    """{poziom: (okres randomTrips, seed tras)} — poziomy główne + odłożone."""
+    out = {level: (period, SEED) for level, period in DEMAND_PERIOD.items()}
+    out |= {name: (DEMAND_PERIOD[base], seed) for name, (base, seed) in DEMAND_HELDOUT.items()}
+    return out
 DEMAND_END = 3600
 SEED = 0
 
@@ -124,7 +136,7 @@ def step_net() -> None:
 
 def step_demand() -> None:
     random_trips = sumo_home() / "tools" / "randomTrips.py"
-    for level, period in DEMAND_PERIOD.items():
+    for level, (period, seed) in demand_levels().items():
         trips = HERE / f"3w_{level}.trips.xml"
         subprocess.run(
             [
@@ -141,7 +153,7 @@ def step_demand() -> None:
                 "-p",
                 str(period),
                 "--seed",
-                str(SEED),
+                str(seed),
                 "--fringe-factor",
                 "10",
                 "--lanes",
@@ -155,7 +167,7 @@ def step_demand() -> None:
             stderr=subprocess.DEVNULL,  # proj.db: sumolib nie potrzebuje projekcji
         )
         trips.unlink(missing_ok=True)  # pośredni plik — routes wystarczą do odtworzenia
-        print(f"demand: {level:5s} okres {period} s → {routes(level).name}")
+        print(f"demand: {level:6s} okres {period} s, seed {seed} → {routes(level).name}")
 
 
 # Webster: strata czasu na fazę = przejście z protokołu (3 s żółtego + 2 s all-red,
@@ -176,7 +188,7 @@ def step_webster() -> None:
     import sumolib  # noqa: PLC0415
 
     tool = sumo_home() / "tools" / "tlsCycleAdaptation.py"
-    for level in DEMAND_PERIOD:
+    for level in demand_levels():
         with tempfile.TemporaryDirectory() as tmp:
             add = Path(tmp) / "webster.add.xml"
             subprocess.run(
