@@ -1,35 +1,17 @@
-"""Pętla środowiskowa rdzenia — spina `ppo.py` z symulatorem CityFlow.
+"""Environment loop of the core: couples `ppo.py` with the simulator.
 
-`ppo.py` nie zna symulatora, `features.py` nie zna uczenia. Tutaj obie strony się
-spotykają, i to jest jedyne miejsce w rdzeniu, które musi ODTWORZYĆ PROTOKÓŁ
-`trainer/tsc_trainer.py:train()` co do joty — inaczej nasze liczby przestaną być
-porównywalne z CoLightem i Advanced-CoLightem, a cała tabela T1 traci sens.
+The protocol follows LibSignal's `trainer/tsc_trainer.py`, so the numbers stay
+comparable with CoLight and Advanced-CoLight:
 
-CZTERY RZECZY PRZEPISANE Z `tsc_trainer` DOSŁOWNIE (i po co):
+1. One decision per `action_interval` (15 s), then 15 engine steps of 1 s with
+   the same action; a 3600 s episode is 240 decisions.
+2. The reward of a decision is the mean over those steps, not the sum.
+3. Queue and delay are read once per decision and averaged with LibSignal's
+   divisors: queue and delay by decisions x intersections, reward by decisions.
+4. Actions are permuted from graph order to the world's order (`world_order`).
 
-1. DECYZJA CO Δt, NIE CO KROK. Akcja zapada raz na `action_interval` (15 s), po
-   czym silnik robi 15 kroków po 1 s z tą samą akcją. Epizod 3600 s = 240 decyzji.
-
-2. NAGRODA TO ŚREDNIA Z TYCH 15 KROKÓW, nie suma i nie wartość na końcu. Suma
-   byłaby 15× większa, co samo w sobie nic by nie psuło, ale przewagi i strata
-   wartości wyszłyby w innej skali niż u baseline'u — a porównujemy właśnie
-   nagrody.
-
-3. KOLEJKĘ I OPÓŹNIENIE ZBIERAMY RAZ NA DECYZJĘ, po wykonaniu interwału (tak
-   robi `Metrics.update`), i uśredniamy tak samo: `queue` i `delay` dzielone
-   przez (liczba decyzji × liczba skrzyżowań), `reward` tylko przez liczbę decyzji.
-   Te dzielniki są różne w LibSignalu i to nie jest pomyłka — powtarzamy je,
-   żeby kolumny znaczyły to samo.
-
-4. KOLEJNOŚĆ AKCJI. `World.step` robi `self.intersections[i].step(actions[i])`,
-   czyli indeksuje po SWOJEJ liście, a nasz wektor akcji jest indeksowany
-   `node_idx` z grafu. Bez przenumerowania akcja jednego skrzyżowania trafiłaby
-   do drugiego — nic by się nie wywaliło, sieć uczyłaby się szumu. Permutację
-   liczymy raz w konstruktorze i testujemy osobno.
-
-CZEGO TU NIE MA: epsilon-greedy, `learning_start`, sieci target. PPO uczy się
-z każdego zebranego segmentu, a eksploracja bierze się z entropii polityki —
-dlatego pętla jest krótsza niż DQN-owa i nie ma w niej `total_decision_num`.
+No epsilon-greedy, warm-up or target network: PPO learns from every collected
+segment and explores through the policy's entropy.
 """
 
 from __future__ import annotations
@@ -56,15 +38,14 @@ if TYPE_CHECKING:
     from runlog import Run
     from tsc_marl.robustness.training import FailureMix, UWStream
 
-# Protokół raportowania z papieru (Advanced-CoLight 5.1): wynik biegu to ŚREDNIA
-# Z 10 OSTATNICH epizodów testowych, nie pojedynczy test po treningu. Przy
-# niestabilnym uczeniu różnica sięgała w tym repo setek sekund.
+# Reporting protocol of Advanced-CoLight: a run's result is the MEAN of the last
+# 10 test episodes, not a single test after training.
 REPORT_WINDOW = 10
 
 
 @dataclass(frozen=True)
 class LoopConfig:
-    """Parametry przebiegu. Wartości domyślne = zamrożony protokół pracy."""
+    """Run length parameters; defaults are the thesis protocol."""
 
     steps: int = 3600
     test_steps: int = 3600
@@ -82,7 +63,7 @@ class LoopConfig:
 
     @classmethod
     def from_registry(cls, **overrides: Any) -> LoopConfig:
-        from common.registry import Registry  # noqa: PLC0415 - dopiero po bootstrapie
+        from common.registry import Registry
 
         param = Registry.mapping["trainer_mapping"]["setting"].param
         keys = ("steps", "test_steps", "action_interval", "episodes", "test_when_train")
@@ -91,12 +72,11 @@ class LoopConfig:
 
 
 class TrafficEnv:
-    """`World` LibSignala widziany na poziomie DECYZJI, nie kroku symulacji.
+    """LibSignal's `World` seen at the level of DECISIONS, not simulator steps.
 
-    Nie dziedziczy po `TSCEnv` z submodułu, bo tamten woła `agent.get_ob()` na
-    agentach LibSignala — a nasz rdzeń nie jest agentem LibSignala. Robimy to
-    samo, co `TSCEnv.step` robi z `world`, tylko obserwacje bierzemy ze
-    `StateBuilder`.
+    Not a `TSCEnv`: that one asks LibSignal agents for observations, and the core
+    is not one. It does what `TSCEnv.step` does with the world, with observations
+    from `StateBuilder`.
     """
 
     def __init__(
@@ -114,25 +94,21 @@ class TrafficEnv:
         self.features = features
         self.action_interval = action_interval
 
-        # AWARIE W TRENINGU (Faza 3). `StateBuilder` dostaje scenariusz w
-        # konstruktorze, a nie w `reset` — poziom szumu i sposób podstawienia są
-        # jego stanem, nie stanem epizodu. Zmiana scenariusza między epizodami
-        # znaczy więc NOWY builder; `make_features` jest tą samą fabryką, której
-        # `robustness/degrade.py` używa do przechodzenia po scenariuszach T2.
-        # Buforujemy po specyfikacji, bo mieszanka ma kilka pozycji, a epizodów
-        # są setki — i bo `_build_structs` czyta topologię, nie stan ruchu.
+        # Failures in training. A failure scenario is part of the `StateBuilder`,
+        # so switching scenarios between episodes means another builder, made by
+        # the same factory `robustness/degrade.py` uses. Builders are cached per spec.
         self._make_features = make_features
         self.failures = failures
         self._builders: dict[FailureSpec, StateBuilder] = {}
         if failures is not None and make_features is None:
-            raise ValueError("mieszanka awarii bez `make_features` — nie ma czym przebudować stanu")
+            raise ValueError("a failure mix needs `make_features` to rebuild the state")
 
         self.episode = -1
         self._to_world = world_order(graph, world)
         self._delay = _delay_generators(world, graph.order_intersections(world))
         self._reset_stats()
 
-    # ---------------------------------------------------------------- protokół
+    # ---------------------------------------------------------------- protocol
 
     def _reset_stats(self) -> None:
         n = self.graph.n_nodes
@@ -140,25 +116,17 @@ class TrafficEnv:
         self._reward_sum = np.zeros(n, dtype=np.float64)
         self._queue_sum = np.zeros(n, dtype=np.float64)
         self._delay_sum = np.zeros(n, dtype=np.float64)
-        # WIEK OBSŁUGI (Faza 4). Ile decyzji minęło, odkąd dana faza dostała zielone.
-        # Metryka GŁODZENIA, której `att`/`queue` nie widzą: uśrednianie po sieci i po
-        # czasie zamazuje jedno skrzyżowanie trzymane w martwej fazie przez pół epizodu.
-        # Indeks [węzeł, faza] w KOLEJNOŚCI GRAFU — tej samej co `_queue_sum`, `_delay`
-        # i wektor akcji (permutacja do świata jest dopiero w `step`). Maska legalnych
-        # faz jest konieczna, bo `n_phases` to MAKSIMUM po sieci i węzły o 2 fazach mają
-        # resztę kolumn martwych; bez niej `wait_max` mierzyłby fazy nieistniejące
-        # i rósł liniowo z długością epizodu na każdej sieci niejednorodnej.
+        # Service age: decisions since each phase last got green, [node, phase] in
+        # graph order. A starvation metric that network-wide averages hide. Only
+        # phases that exist count (`n_phases` is the network maximum).
         self._since_green = np.zeros((n, self.features.n_phases), dtype=np.float64)
         self._legal_phase = np.zeros((n, self.features.n_phases), dtype=bool)
         for idx, inter in enumerate(self.features.intersections):
             self._legal_phase[idx, : len(inter.phases)] = True
         self._age_max = 0.0
-        # WIEK OBSŁUGI Z POPYTEM. Sam `_age_max` nie wie, czy na zagłodzonej fazie
-        # ktokolwiek stoi — a faza bez ruchu może legalnie czekać dowolnie długo
-        # (w praktyce miejskiej bywa to celowe: wloty bez detekcji dostają zielone
-        # bezwarunkowo, patrz `tsc_marl_research/krakow-its.md`). Bez tego rozróżnienia
-        # metryka karze politykę za to, że nie obsługuje pustego wlotu.
-        self._phase_mov = self.features.phase_incidence()  # [N, n_faz, n_mov]
+        # Service age with demand: only phases with someone waiting, since a phase
+        # without traffic may legitimately wait as long as it likes.
+        self._phase_mov = self.features.phase_incidence()  # [N, n_phases, n_mov]
         self._age_demand_max = 0.0
 
     def _builder(self, spec: FailureSpec) -> StateBuilder:
@@ -169,16 +137,12 @@ class TrafficEnv:
     def reset(
         self, episode: int | None = None, *, failure: FailureSpec | None = None
     ) -> np.ndarray:
-        """Nowy epizod. -> obserwacja [N, ob_length].
+        """New episode. -> observation [N, ob_length].
 
-        `episode` steruje LOSOWANIEM AWARII (`features.reset_sensors`), więc
-        podany jawnie czyni bieg eval-only odtwarzalnym niezależnie od tego, ile
-        epizodów treningowych go poprzedziło. Domyślnie licznik idzie sam.
-
-        `failure` wymusza scenariusz zamiast losowania z mieszanki — tak
-        `CoreTrainer.evaluate` trzyma epizod TESTOWY na czystym: krzywa `att` ma
-        pozostać porównywalna z rdzeniem z Fazy 1 i z tabelą T1, a odporność
-        mierzy się osobno (`tsc degrade`), na zamrożonym checkpoincie.
+        `episode` seeds the failure draw (`features.reset_sensors`), so passing it
+        makes an evaluation reproducible regardless of what ran before.
+        `failure` forces a scenario instead of sampling the mix; this keeps test
+        episodes clean (robustness is measured by `tsc degrade`).
         """
         self.episode = self.episode + 1 if episode is None else episode
         if self._make_features is not None:
@@ -187,24 +151,21 @@ class TrafficEnv:
                 spec = self.failures.sample(self.episode) if self.failures else FailureSpec()
             self.features = self._builder(spec)
         elif failure is not None and failure.active:
-            raise ValueError("env bez `make_features` nie umie włączyć awarii w locie")
+            raise ValueError("an env without `make_features` cannot switch failures on")
         self.world.reset()
         self.features.reset_sensors(self.episode)
         self._reset_stats()
         return self.features.observe()
 
     def step(self, actions: np.ndarray) -> tuple[np.ndarray, np.ndarray, bool]:
-        """Jedna decyzja: `action_interval` kroków silnika z tą samą akcją.
+        """One decision: `action_interval` engine steps with the same action.
 
-        -> (obserwacja, nagroda uśredniona po interwale, done).
-
-        `done` jest ZAWSZE False: epizod urywa się po 3600 s, ale stan nie jest
-        terminalny — ruch płynie dalej. Bootstrap `last_value` załatwia to
-        poprawnie (patrz `ppo.py`, pułapka 1).
+        -> (observation, reward averaged over the interval, done). `done` is always
+        False: the episode is cut, not terminated (`ppo.py`, pitfall 1).
         """
         if actions.shape != (self.graph.n_nodes,):
             raise ValueError(
-                f"akcje mają być [{self.graph.n_nodes}], są {tuple(np.shape(actions))}"
+                f"actions must be [{self.graph.n_nodes}], got {tuple(np.shape(actions))}"
             )
         in_world_order = np.asarray(actions)[self._to_world]
 
@@ -214,95 +175,80 @@ class TrafficEnv:
             reward_acc += self.features.rewards()
         rewards = reward_acc / self.action_interval
 
-        kolejka, popyt = self._queue_and_demand()
+        queue, demand = self._queue_and_demand()
         self._reward_sum += rewards
-        self._queue_sum += kolejka
+        self._queue_sum += queue
         self._delay_sum += np.array([g.generate() for g in self._delay], dtype=np.float64).ravel()
         self._decisions += 1
-        # Faza wybrana w tej decyzji DOSTAŁA zielone, reszta czeka o jedną decyzję dłużej.
-        # `actions` jest w kolejności grafu (permutacja `_to_world` dotyczy tylko silnika).
+        # The chosen phase got green, the rest waited one decision longer.
+        # `actions` is in graph order (`_to_world` is for the engine only).
         self._since_green += 1.0
         self._since_green[np.arange(self.graph.n_nodes), np.asarray(actions, dtype=int)] = 0.0
         self._age_max = max(self._age_max, float(self._since_green[self._legal_phase].max()))
-        # Faza „z popytem" = obsługuje choć jeden ruch, na którym ktoś TERAZ stoi.
-        z_popytem = self._legal_phase & (self._phase_mov & popyt[:, None, :]).any(-1)
-        if z_popytem.any():
+        # A phase "with demand" serves at least one movement where someone waits now.
+        with_demand = self._legal_phase & (self._phase_mov & demand[:, None, :]).any(-1)
+        if with_demand.any():
             self._age_demand_max = max(
-                self._age_demand_max, float(self._since_green[z_popytem].max())
+                self._age_demand_max, float(self._since_green[with_demand].max())
             )
         return self.features.observe(), rewards.astype(np.float32), False
 
     def _queue(self) -> np.ndarray:
-        """Suma oczekujących na pasach wjazdowych, per skrzyżowanie — to samo, co
-        liczy `LaneVehicleGenerator(['lane_waiting_count'], in_only=True)`
-        w `Metrics`. Liczymy z `reward_lanes`, a nie z nagrody, żeby metryka nie
-        zależała od tego, który wariant nagrody jest akurat włączony."""
+        """Waiting vehicles on the incoming lanes per intersection, as LibSignal's
+        `Metrics` computes it; independent of the reward variant."""
         return self._queue_and_demand()[0]
 
     def _queue_and_demand(self) -> tuple[np.ndarray, np.ndarray]:
-        """(kolejka per węzeł [N], czy na ruchu ktoś stoi [N, n_mov]).
+        """(queue per node [N], someone waiting on the movement [N, n_mov]).
 
-        Jedno odpytanie silnika na obie rzeczy. Czytamy PRAWDĘ z silnika, nie wektor
-        obserwacji — bo pod awarią detektora obserwacja kłamie, a metryka głodzenia
-        ma mierzyć, co NAPRAWDĘ stało na wlocie, nie co zaraportował zepsuty czujnik.
+        Read from the engine, not from the observation: under sensor failure the
+        observation lies, and the metrics must measure what really waited.
         """
         waiting = self.world.get_info("lane_waiting_count")
-        kolejka = np.zeros(self.graph.n_nodes, dtype=np.float64)
-        popyt = np.zeros((self.graph.n_nodes, self.features.n_mov), dtype=bool)
+        queue = np.zeros(self.graph.n_nodes, dtype=np.float64)
+        demand = np.zeros((self.graph.n_nodes, self.features.n_mov), dtype=bool)
         for idx, s in enumerate(self.features.structs):
-            kolejka[idx] = sum(waiting[lane] for lane in s.reward_lanes)
-            for m, (wjazdy, _) in enumerate(s.movements):
-                popyt[idx, m] = sum(waiting[lane] for lane in wjazdy) > 0
-        return kolejka, popyt
+            queue[idx] = sum(waiting[lane] for lane in s.reward_lanes)
+            for m, (ins, _) in enumerate(s.movements):
+                demand[idx, m] = sum(waiting[lane] for lane in ins) > 0
+        return queue, demand
 
-    # ---------------------------------------------------------------- metryki
+    # ---------------------------------------------------------------- metrics
 
     def metrics(self) -> dict[str, float]:
-        """Kolumny zgodne z `Metrics` LibSignala — patrz punkt 3 w docstringu."""
+        """Columns as in LibSignal's `Metrics` (point 3 of the module docstring)
+        plus tail metrics."""
         if self._decisions == 0:
-            raise RuntimeError("epizod nie wystartował — najpierw reset() i step()")
+            raise RuntimeError("the episode has not started; call reset() and step()")
         n = self.graph.n_nodes
-        # Kolejka i opóźnienie PER WĘZEŁ (średnia po decyzjach) — z nich liczą się
-        # zarówno kolumny zgodne z LibSignalem (średnia po sieci), jak i OGON.
-        kolejka = self._queue_sum / self._decisions  # [N]
+        queue = self._queue_sum / self._decisions  # [N], mean over decisions
         return {
             "att": float(self.world.get_average_travel_time()),
             "throughput": float(self.world.get_cur_throughput()),
             "reward": float(self._reward_sum.sum() / self._decisions),
-            "queue": float(kolejka.sum() / n),
+            "queue": float(queue.sum() / n),
             "delay": float(self._delay_sum.sum() / (self._decisions * n)),
-            # --- OGON (Faza 4). Średnia sieciowa ukrywa katastrofę na jednej czwartej
-            # sieci — to samo zastrzeżenie, przez które bramka jest per skrzyżowanie,
-            # a nie globalna. Mechanizmy celujące w GŁODZENIE i SPRAWIEDLIWOŚĆ obsługi
-            # (action masking) nie ruszą `att`; ruszą te trzy kolumny. Mierzenie ich
-            # przez `att` daje zero i wygląda jak porażka mechanizmu, a jest
-            # niezgodnością metryki z celem — patrz `faza3-po-t2.md` §7.
-            "queue_max": float(kolejka.max()),
-            "queue_p90": float(np.quantile(kolejka, 0.9)),
-            # Sekundy, nie decyzje — żeby czytało się w tej samej jednostce co `att`.
-            # To MAKSIMUM PO EPIZODZIE z maksimum po (węzeł, faza legalna), czyli
-            # najdłuższe zagłodzenie, jakie w epizodzie wystąpiło gdziekolwiek.
-            # UWAGA przy interpretacji: mierzy odstęp między DECYZJAMI wyboru fazy,
-            # więc nie odejmuje żółtego ani międzyzielonego.
+            # Tail: the network mean hides a failure on a part of the network, and
+            # starvation-targeting mechanisms (masking) move these, not `att`.
+            "queue_max": float(queue.max()),
+            "queue_p90": float(np.quantile(queue, 0.9)),
+            # Longest service age in the episode, in seconds. Measured between
+            # decisions, so yellow is not subtracted.
             "wait_max": float(self._age_max * self.action_interval),
-            # Ten sam wiek, ale liczony TYLKO dla faz, na których ktoś stoi. To jest
-            # metryka, którą należy raportować jako głodzenie; `wait_max` zostaje jako
-            # diagnostyka surowa (odstęp między zielonymi, niezależnie od popytu).
-            # UWAGA przy interpretacji: to GÓRNE ograniczenie czasu oczekiwania
-            # konkretnego pojazdu — wiek fazy liczy się od ostatniego zielonego,
-            # a pojazd mógł podjechać później.
+            # The same for phases with someone waiting: the starvation metric to
+            # report. An upper bound for a single vehicle, which may have arrived
+            # after the phase's last green.
             "wait_max_demand": float(self._age_demand_max * self.action_interval),
         }
 
 
 def world_order(graph: RoadNetGraph, world: World) -> np.ndarray:
-    """Permutacja `pozycja w world.intersections -> node_idx` (punkt 4 w docstringu).
+    """Permutation `position in world.intersections -> node_idx`.
 
-    Użycie: `actions_dla_swiata = actions[world_order(...)]`. Osobna funkcja, bo to
-    najgroźniejszy cichy błąd w całej pętli — akcja jednego skrzyżowania wykonana
-    na drugim nie wywala niczego, po prostu uczy sieć szumu — i chcemy go testować
-    bez stawiania CityFlow. Id świata → id grafu przez `RoadNetGraph.bare_id`, tę
-    samą regułę co `order_intersections` (prefiks `GS_` na SUMO).
+    Usage: `world_actions = actions[world_order(...)]`. A separate function so the
+    most dangerous silent bug of the loop (one intersection's action executed on
+    another) is testable without CityFlow. Ids go through `RoadNetGraph.bare_id`,
+    the same rule as `order_intersections`.
     """
     return np.array(
         [graph.node_id2idx[graph.bare_id(inter.id)] for inter in world.intersections],
@@ -311,7 +257,7 @@ def world_order(graph: RoadNetGraph, world: World) -> np.ndarray:
 
 
 def _delay_generators(world: World, intersections) -> list[Any]:
-    from generator.lane_vehicle import LaneVehicleGenerator  # noqa: PLC0415
+    from generator.lane_vehicle import LaneVehicleGenerator
 
     return [
         LaneVehicleGenerator(world, inter, ["lane_delay"], in_only=True, average="all")
@@ -320,12 +266,11 @@ def _delay_generators(world: World, intersections) -> list[Any]:
 
 
 class CoreTrainer:
-    """Trening rdzenia: epizod zbierania → jeden update PPO → (opcjonalnie) test.
+    """Core training: one collection episode, one PPO update, optionally a test.
 
-    Segment rolloutu = CAŁY epizod (240 decyzji). To wybór, nie konieczność: PPO
-    zwykle tnie epizod na krótsze segmenty, ale przy 12–16 agentach jeden epizod
-    to już 2880–3840 próbek, a segment równy epizodowi znaczy, że każdy update
-    widzi pełny cykl ruchu i nie trzeba bootstrapować w środku.
+    The rollout segment is a whole episode (240 decisions), a choice: with 12-16
+    agents that is already 2880-3840 samples, and every update sees the full
+    traffic profile without bootstrapping mid-episode.
     """
 
     def __init__(
@@ -341,29 +286,21 @@ class CoreTrainer:
         self.ppo = ppo
         self.config = config or LoopConfig()
         self.run = run
-        # `uncertainty is None` = rdzeń Fazy 1 bit w bit (warstwa dostaje log_rho=None,
-        # czyli ścieżkę oryginału z `agent/colight.py`), a nie „wektor zer".
+        # None = the plain core, bit-identical (log_rho=None takes the original path)
         self.uncertainty = uncertainty
-        # Bieg trwa godzinami — bez linii na epizod nie widać, czy uczenie żyje.
-        # `run.log` pisze do CSV, ten logger na konsolę i do logu biegu.
-        self.logger = logger
-        # Urządzenie CZYTAMY z sieci — `from_world` przeniósł ją tam przed
-        # zbudowaniem PPO. `edge_index` jest stały przez cały bieg, więc jedzie
-        # na urządzenie raz, a nie co decyzję.
+        self.logger = logger  # one line per episode; `run.log` writes the CSV
+        # Device read from the network; the static `edge_index` is moved once.
         self.device = next(ppo.ac.parameters()).device
         self.edge_index = env.graph.edge_index.to(self.device)
         self.history: list[dict[str, float]] = []
-        # Ścieżka NAJLEPSZEGO checkpointu (min ATT epizodu testowego) albo None = nie
-        # zapisujemy. Ustawia ją `train_core` przy `model.save_best` (suite'y `k2_*`).
-        # UWAGA metodologiczna: epizod testowy jest TYM SAMYM epizodem, który `tsc degrade`
-        # liczy jako `clean` na sieci treningowej — czysty wynik najlepszego checkpointu
-        # na tej sieci to z definicji `att_best`. Porównanie uczciwe tylko na ruchu
-        # ODŁOŻONYM (`sumo_krakow3w_mid_s1`, plan `t2_krakow_best`).
+        # Path for the BEST checkpoint (min test ATT), or None. Note: the test
+        # episode is the same traffic `tsc degrade` uses as `clean` on the training
+        # network, so a fair comparison of this checkpoint needs held-out traffic.
         self.best_path: Path | None = None
         self._best_att = float("inf")
         self._episode_failure = "clean"
 
-    # --------------------------------------------------------------- budowanie
+    # --------------------------------------------------------------- building
 
     @classmethod
     def from_world(
@@ -379,16 +316,10 @@ class CoreTrainer:
         uncertainty: UWStream | None = None,
         **feature_overrides: Any,
     ) -> CoreTrainer:
-        """Składa graf, cechy, sieci i PPO z żywego `world` + Registry.
+        """Builds graph, state, networks and PPO from a live `world` and Registry.
 
-        Kolejność skrzyżowań idzie WYŁĄCZNIE przez `graph.order_intersections`,
-        czyli przez kontrakt z `graph.py`. To jedyne wejście do świata przy
-        budowie obserwacji, nagród i akcji.
-
-        `device` domyślnie CPU, bo rdzeń ma się dać zbudować i przetestować bez
-        karty. Rozwiązuje je `runner/train_core.py` z `--ngpu` (patrz
-        `libsignal/session.py:torch_device`) — rdzeń go NIE zgaduje ani nie czyta
-        z Registry, żeby dało się go uruchomić poza procesem LibSignala.
+        Intersection order goes only through `graph.order_intersections`. `device`
+        defaults to CPU; `runner/train_core.py` resolves it from `--ngpu`.
         """
         graph = RoadNetGraph.from_registry()
         order = graph.order_intersections(world)
@@ -396,10 +327,8 @@ class CoreTrainer:
         def make_features(spec: FailureSpec) -> StateBuilder:
             return StateBuilder.from_registry(world, order, failure=spec, **feature_overrides)
 
-        # Bez mieszanki budujemy stan dokładnie tak jak dotąd — ze scenariuszem
-        # z configu (`model.failure`, domyślnie brak). Z mieszanką scenariusz
-        # wybiera `TrafficEnv.reset` na epizod, więc startowy builder ma być
-        # czysty i i tak zostanie podmieniony przed pierwszym krokiem.
+        # Without a mix the scenario comes from the config (`model.failure`, default
+        # none). With a mix `TrafficEnv.reset` picks it per episode.
         features = (
             make_features(FailureSpec())
             if failures is not None
@@ -414,31 +343,26 @@ class CoreTrainer:
             make_features=make_features if failures is not None else None,
             failures=failures,
         )
-        # KOLEJNOŚĆ JEST ISTOTNA: sieć na urządzenie, dopiero potem `PPO`.
-        # `PPO.__post_init__` tworzy optymalizatory Adama z parametrów `ac` —
-        # zbudowane przed przeniesieniem trzymałyby stan (`exp_avg`) na CPU,
-        # a parametry na GPU, i pierwszy `step()` by się wywalił.
-        # Maska faz tylko na sieci niejednorodnej (Kraków). Brak kwarga, gdy None:
-        # na JiNan/HangZhou sieć ma się zbudować DOKŁADNIE jak przy GATE Fazy 1.
+        # Order matters: move the network first, then build `PPO`, whose Adam
+        # state would otherwise stay on the CPU. The phase mask is passed only on
+        # heterogeneous networks, so JiNan/HangZhou build exactly as without it.
         mask = features.phase_mask()
         extra = {} if mask is None else {"phase_mask": torch.from_numpy(mask)}
         ac = ActorCritic.from_registry(features.ob_length, features.n_phases, **extra).to(device)
         return cls(env, PPO(ac, ppo_config or PPOConfig()), cfg, run, logger, uncertainty)
 
-    # ---------------------------------------------------------------- epizody
+    # ---------------------------------------------------------------- episodes
 
     def _log_rho(self, obs: np.ndarray) -> torch.Tensor | None:
-        """log ρ [E+N] dla TEGO odczytu albo None (bieg bez mechanizmu).
+        """log_rho [E+N] for this reading, or None without the mechanism.
 
-        Woła się PRZED `act`, bo głowa ma zobaczyć ten sam wektor stanu, który
-        widzi polityka — razem z awarią, jeśli akurat trwa. To jest cała idea:
-        głowa nie ma dostępu do warstwy awarii ani do prawdy, tak jak nie miałaby
-        go na skrzyżowaniu.
+        Called before `act`, on the same (possibly corrupted) observation the
+        policy sees: the head has no access to the failure layer or the truth.
         """
         return None if self.uncertainty is None else self.uncertainty.log_rho(obs)
 
     def collect(self, episode: int | None = None) -> tuple[RolloutBuffer, dict[str, float]]:
-        """Jeden epizod treningowy: polityka PRÓBKUJE (eksploracja PPO)."""
+        """One training episode; the policy samples (PPO exploration)."""
         cfg = self.config
         buffer = RolloutBuffer(
             cfg.decisions,
@@ -450,33 +374,25 @@ class CoreTrainer:
         )
         raw = self.env.reset(episode)
         if self.uncertainty is not None:
-            self.uncertainty.reset()  # bufor okna — patrz `UWStream.reset`
+            self.uncertainty.reset()  # window buffer, see `UWStream.reset`
         obs, log_rho = self._obs(raw), self._log_rho(raw)
         for _ in range(cfg.decisions):
             actions, log_probs, values = self.ppo.act(obs, self.edge_index, log_rho=log_rho)
             next_raw, rewards, _ = self.env.step(self._actions(actions))
             buffer.add(obs, actions, log_probs, values, self._obs(rewards), log_rho=log_rho)
             obs, log_rho = self._obs(next_raw), self._log_rho(next_raw)
-        # Krytyk nie dostaje log ρ (decyzja z docstringu `Critic`), więc bootstrap
-        # wartości za końcem segmentu jest tu niezmieniony.
+        # The critic never gets log_rho, so the bootstrap value is unchanged.
         buffer.compute_returns(self.ppo.value_of(obs, self.edge_index), self.ppo.config)
         return buffer, self.env.metrics()
 
     @torch.no_grad()
     def evaluate(self, episode: int | None = None) -> dict[str, float]:
-        """Epizod testowy: argmax, TYLKO ACTOR, ruch CZYSTY.
+        """Test episode: argmax, actor only, clean traffic.
 
-        Krytyk nie jest wołany — to jest ta „inferencja = tylko actor" z planu,
-        i tak samo będzie wyglądać wdrożenie na Pi w Fazie 5.
-
-        CZYSTY, mimo że trening może iść z awariami: `att_last10` z tej krzywej
-        trafia do tabeli obok rdzenia z Fazy 1, a kolumna mieszająca scenariusze
-        nie znaczyłaby nic. Odporność mierzy `tsc degrade` na zamrożonym
-        checkpoincie, tym samym planem co wszystkie inne sterowniki.
-
-        Mechanizm ZOSTAJE włączony, bo jest częścią polityki, a nie warunków —
-        i dzięki temu czysty wynik ewaluatora T2 (`UWPolicyController`) ma prawo
-        zgadzać się z ostatnim testem treningu.
+        The critic is not called, as in deployment. Clean even when training runs
+        with failures, so `att_last10` stays comparable across runs; robustness is
+        measured by `tsc degrade` on the frozen checkpoint. The mechanism stays on,
+        because it is part of the policy, not of the conditions.
         """
         raw = self.env.reset(episode, failure=FailureSpec())
         if self.uncertainty is not None:
@@ -486,41 +402,35 @@ class CoreTrainer:
             raw, _, _ = self.env.step(self._actions(logits.argmax(-1)))
         return self.env.metrics()
 
-    # ------------------------------------------------------ granica numpy ↔ torch
+    # ------------------------------------------------------ numpy <-> torch boundary
 
     def _obs(self, array: np.ndarray) -> torch.Tensor:
-        """Symulator mówi wyłącznie numpy, czyli CPU. To jedno z dwóch miejsc,
-        w których dane przekraczają granicę urządzenia — trzymamy je razem, żeby
-        nie trzeba było ich szukać po pętli."""
+        """The simulator speaks numpy (CPU); one of the two device crossings."""
         return torch.from_numpy(array).to(self.device)
 
     def _actions(self, actions: torch.Tensor) -> np.ndarray:
-        """Druga strona granicy. `.cpu()` MUSI tu być: `Tensor.numpy()` na
-        tensorze CUDA rzuca wyjątkiem, a na CPU jest no-opem — więc ta wersja
-        działa identycznie w obu trybach."""
+        """The other crossing; `.cpu()` is required for CUDA and a no-op on CPU."""
         return actions.cpu().numpy()
 
-    # ----------------------------------------------------------------- trening
+    # ----------------------------------------------------------------- training
 
     def train(self, episodes: int | None = None) -> dict[str, float]:
-        """Pełny bieg. -> skalary raportowe (te same nazwy co `experiment.ingest`)."""
+        """Full run. -> report scalars (same names as `experiment.ingest`)."""
         n_episodes = episodes if episodes is not None else self.config.episodes
         test_att: list[float] = []
 
         for e in range(n_episodes):
             buffer, train_metrics = self.collect(e)
             stats = self.ppo.update(buffer)
-            # ZBIERAMY PRZED `evaluate`: epizod testowy przestawia `env.features`
-            # na czysty builder i zeruje bufor `UWStream`, więc odczytane później
-            # `uw_spread` opisywałoby test, nie trening. Cicho i myląco.
+            # Read BEFORE `evaluate`, which switches `env.features` to the clean
+            # builder and resets `UWStream`; afterwards the stats would describe the test.
             mech = self._mechanism_metrics()
             self._log(e, "train", {**train_metrics, **stats, **mech})
 
             test_metrics = None
             if self.config.test_when_train:
                 test_metrics = self.evaluate(e)
-                # log ρ na CZYSTYM w tej samej kolumnie co ATT testu — to jest A3a
-                # mierzone w treningu: mechanizm ma na czystym prawie milczeć.
+                # mechanism statistics on clean traffic, next to the test ATT
                 self._log(e, "test", {**test_metrics, **self._mechanism_metrics(test=True)})
                 test_att.append(test_metrics["att"])
                 self.history.append(test_metrics)
@@ -532,12 +442,10 @@ class CoreTrainer:
         return self._report(test_att)
 
     def _mechanism_metrics(self, *, test: bool = False) -> dict[str, float]:
-        """Diagnostyka epizodu: co mechanizm w ogóle zobaczył i jaka była awaria.
+        """Episode diagnostics: the active failure and what the mechanism saw.
 
-        Bez niej pusty wynik ramienia 3 jest nieodróżnialny od biegu, w którym
-        modulacja przez cały trening milczała — a to jest właśnie ta przyczyna
-        zera, przed którą ostrzega §3 notatki (`uw_active` ≈ 3% na czystym).
-        Wołać ZAWSZE zanim `evaluate` podmieni `env.features`.
+        Without them a null result cannot be told apart from a run in which the
+        modulation never fired. Call before `evaluate` replaces `env.features`.
         """
         out: dict[str, float] = {}
         if self.env.failures is not None and not test:
@@ -550,7 +458,7 @@ class CoreTrainer:
         return out
 
     def _failure_slug(self) -> str:
-        from tsc_marl.robustness.degrade import slug  # noqa: PLC0415 - cykl importu
+        from tsc_marl.robustness.degrade import slug  # lazy: robustness imports core
 
         return slug(self.env.features.failure)
 
@@ -559,8 +467,8 @@ class CoreTrainer:
             self.run.log(step=episode, split=split, **values)
 
     def _say(self, episode, train: dict, stats: dict, test: dict | None, mech: dict) -> None:
-        """Jedna linia na epizod. `kl` i `clip` są tu obok ATT nieprzypadkowo —
-        to one pokazują, że lr jest za duży, zanim krzywa ATT zdąży to pokazać."""
+        """One line per episode; `kl` and `clip` reveal a too large learning rate
+        before the ATT curve does."""
         if self.logger is None:
             return
         line = (
@@ -569,7 +477,7 @@ class CoreTrainer:
             f"entropy {stats['entropy']:.3f}"
         )
         if "failure_active" in mech:
-            line += f" | awaria {self._episode_failure} ({int(mech['n_broken'])} pasów)"
+            line += f" | failure {self._episode_failure} ({int(mech['n_broken'])} lanes)"
         if "uw_spread" in mech:
             line += f" spread {mech['uw_spread']:.2f} active {mech['uw_active']:.1%}"
         if test is not None:
@@ -592,12 +500,11 @@ class CoreTrainer:
             self.run.result(**result)
         return result
 
-    # ------------------------------------------------------------- checkpointy
+    # ------------------------------------------------------------- checkpoints
 
     def save(self, path: Path | str) -> None:
-        """Zapisujemy TĘ SIEĆ, KTÓRA PODEJMUJE DECYZJE — bez `ValueNorm` wznowiony
-        trening liczyłby wartości w innej skali niż zapisany krytyk (ten sam błąd,
-        co checkpoint sieci target w `colight.py`, znaleziony w Fazie 0)."""
+        """Saves the networks that act, the optimisers and `ValueNorm`; without the
+        latter a resumed run would compute values on another scale."""
         payload = {
             "actor": self.ppo.ac.actor.state_dict(),
             "critic": self.ppo.ac.critic.state_dict(),

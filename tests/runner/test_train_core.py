@@ -1,14 +1,11 @@
-"""Testy wejścia CLI rdzenia.
+"""`tsc core` entry point.
 
-Wejście jest krótkie, ale kruche: sekwencja interfejsów Registry jest wrażliwa
-na kolejność i już raz kosztowała cichy błąd (`root_dir` ignorowany → `att_last10`
-przyjmowało wartość `att`, 27% różnicy na Advanced-CoLighcie). Dlatego test
-end-to-end przechodzi CAŁĄ sekwencję na prawdziwym CityFlow, tylko na epizodzie
-skróconym do 10 decyzji.
-
-Reszta to testy configu — najważniejszy sprawdza, że KAŻDY hiperparametr PPO
-siedzi w YAML-u. Parametr żyjący tylko w Pythonie nie wchodzi do odcisku configu,
-więc `skip-if-done` uznałby bieg z innym `clip_range` za „już policzony".
+Short but fragile: the Registry interface sequence is order-sensitive and has
+already caused a silent bug once (an ignored `root_dir`). So the end-to-end test
+runs the WHOLE sequence on a real CityFlow, with an episode cut to 10 decisions.
+The config tests check above all that every PPO hyperparameter is in YAML: a
+value living only in Python is outside the params fingerprint, so skip-if-done
+would treat a run with another `clip_range` as already done.
 """
 
 from __future__ import annotations
@@ -25,9 +22,8 @@ from tsc_marl.runner.train_core import parse_args
 NETWORK = "cityflow_jinan3x4_4ph"
 
 
-def test_domyslny_agent_to_rdzen():
-    """Bez `-a` bierzemy `gatppo`; jawny wybór dalej wygrywa, bo obie ścieżki
-    zapisują biegi do jednego `runlog` i muszą się dać uruchomić tak samo."""
+def test_default_agent_is_the_core():
+    """Without `-a` the agent is `gatppo`; an explicit choice still wins."""
     assert parse_args([]).agent == "gatppo"
     assert parse_args(["-a", "colight"]).agent == "colight"
     assert parse_args(["--agent", "advancedcolight"]).agent == "advancedcolight"
@@ -39,11 +35,11 @@ def core_config():
     return experiment.resolve_config(parse_args(["-n", NETWORK]))
 
 
-def test_rdzen_widzi_ten_sam_protokol_i_stan_co_baseline(core_config):
-    """GATE Fazy 1 porównuje rdzeń z Advanced-CoLightem, więc różnicą ma być
-    WYŁĄCZNIE algorytm uczenia. Protokół (Δt, yellow, długość epizodu),
-    reprezentacja stanu (ATS, okno 167, bez zawsze-zielonych) i architektura GAT
-    muszą przyjść z tych samych plików."""
+def test_core_sees_the_baseline_protocol_and_state(core_config):
+    """The core is compared with Advanced-CoLight, so the ONLY difference is the
+    learning algorithm: protocol (interval, yellow, episode length), state (ATS,
+    167 m window, no always-green links) and GAT architecture come from the same
+    files."""
     model, trainer = core_config["model"], core_config["trainer"]
     assert (trainer["action_interval"], trainer["yellow_length"], trainer["steps"]) == (15, 5, 3600)
     assert (model["state"], model["reward"]) == ("ats", "queue")
@@ -51,30 +47,24 @@ def test_rdzen_widzi_ten_sam_protokol_i_stan_co_baseline(core_config):
     assert model["NUM_HEADS"] == [5, 5] and model["NODE_EMB_DIM"] == [128, 128]
 
 
-def test_kazdy_hiperparametr_ppo_jest_w_configu(core_config):
-    """Odcisk biegu liczy się z sekcji `model` + `trainer` (`experiment.build_params`).
-    Hiperparametr trzymany tylko w `PPOConfig` w kodzie nie zmieniałby odcisku, więc
-    bieg z innym `clip_range` zostałby po cichu pominięty jako już policzony."""
-    brakujace = [f.name for f in fields(PPOConfig) if f.name not in core_config["model"]]
-    assert brakujace == [], f"hiperparametry PPO poza configiem: {brakujace}"
+def test_every_ppo_hyperparameter_is_in_the_config(core_config):
+    """The run fingerprint covers `model` and `trainer`; a hyperparameter only in
+    `PPOConfig` would not change it."""
+    missing = [f.name for f in fields(PPOConfig) if f.name not in core_config["model"]]
+    assert missing == [], f"PPO hyperparameters outside the config: {missing}"
 
 
-def test_steps_nadpisuje_oba_epizody():
-    """`--steps` skraca trening I test naraz — krótki trening z pełnym testem
-    dawałby liczby, których nie da się z niczym zestawić."""
+def test_steps_overrides_both_episodes():
+    """`--steps` shortens training AND test episodes together."""
     libsignal.bootstrap()
     config = experiment.resolve_config(parse_args(["-n", NETWORK, "--steps", "150"]))
     assert config["trainer"]["steps"] == config["trainer"]["test_steps"] == 150
 
 
 @pytest.mark.slow
-def test_bieg_end_to_end_zapisuje_wyniki(tmp_path, monkeypatch):
-    """Cała ścieżka: interfejsy Registry → świat → `CoreTrainer` → `runlog`.
-    Jeden epizod po 10 decyzji, bo sprawdzamy hydraulikę, nie jakość polityki.
-
-    `runs/` przekierowane do `tmp_path`, żeby smoke-test nie zaśmiecał katalogu
-    z prawdziwymi wynikami.
-    """
+def test_end_to_end_run_stores_results(tmp_path, monkeypatch):
+    """Registry interfaces -> world -> `CoreTrainer` -> `runlog`, one episode of
+    10 decisions; `runs/` is redirected to `tmp_path`."""
     from runlog import Experiment
     from tsc_marl.runner import train_core
 
@@ -83,14 +73,14 @@ def test_bieg_end_to_end_zapisuje_wyniki(tmp_path, monkeypatch):
     )
     train_core.main(["-n", NETWORK, "--episodes", "1", "--steps", "150", "--run-id", "smoke"])
 
-    bieg = tmp_path / experiment.EXPERIMENT / "smoke"
+    run_dir = tmp_path / experiment.EXPERIMENT / "smoke"
     from runlog import RunView
 
-    widok = RunView(bieg)
-    assert widok.status == "ok"
-    assert widok.result["att"] > 0 and widok.result["episodes_logged"] == 1
-    assert (bieg / "engine" / "core.pt").is_file(), "checkpoint rdzenia nie powstał"
+    view = RunView(run_dir)
+    assert view.status == "ok"
+    assert view.result["att"] > 0 and view.result["episodes_logged"] == 1
+    assert (run_dir / "engine" / "core.pt").is_file(), "core checkpoint was not written"
 
-    metryki = (bieg / "metrics.csv").read_text()
-    assert "train" in metryki and "test" in metryki
-    assert "approx_kl" in metryki, "diagnostyka PPO musi trafiać do metryk biegu"
+    metrics = (run_dir / "metrics.csv").read_text()
+    assert "train" in metrics and "test" in metrics
+    assert "approx_kl" in metrics, "PPO diagnostics must reach the run metrics"
