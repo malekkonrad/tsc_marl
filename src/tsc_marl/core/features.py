@@ -1,37 +1,20 @@
-"""Stan i nagroda dla rdzenia Fazy 1 — jedno źródło prawdy dla wszystkich wariantów.
+"""Observation and reward of the whole network.
 
-Ekstrakcję stanu wyjęto z `libsignal/agents/advanced_colight.py`, bo rdzeń (GAT actor +
-centralny krytyk) nie jest agentem LibSignala i nie może dziedziczyć po
-`CoLightAgent`. Dwie kopie tej samej matematyki to dokładnie ta klasa błędu,
-której najbardziej się tu boimy: ATS policzony odrobinę inaczej nie wywala się,
-tylko daje wynik gorszy o kilka procent — nie do odróżnienia od "no i tyle
-wychodzi". Advanced-CoLight woła więc ten sam kod (patrz `advanced_colight.py`).
+Shared by the core, Advanced-CoLight and the max-pressure controllers; do not
+duplicate this logic elsewhere.
 
-WARIANTY STANU (ablacja 1.6) — to jest progresja z literatury, od lewej do prawej:
+State variants, simplest first (per movement):
 
-    queue     q(l,m)                     średnia kolejka pasów wjazdowych ruchu
-    pressure  Σ_in q − Σ_out q           klasyczny MaxPressure (Varaiya)
-    ep        (1/M)Σ_in q − (1/N)Σ_out q efficient pressure, Def. 4 ([[wu-2021-efficient-pressure]])
-    ats       {e(l,m); r(l,m)}           + effective running, Def. 11 ([[zhang-2022-advanced-mp]])
+    queue     mean queue of the movement's in lanes
+    pressure  sum q(in) - sum q(out)          (Varaiya, 2013)
+    ep        mean q(in) - mean q(out)        (Wu et al., 2021)
+    ats       {ep, effective running}         (Zhang et al., 2022)
 
-Każdy wariant kończy się one-hotem bieżącej fazy. Bloki są dopychane zerami
-OSOBNO, nie na końcu wiersza: przy sieci z różnymi skrzyżowaniami (NY) padding
-na końcu przesunąłby one-hot na inne kolumny na różnych skrzyżowaniach, a CoLight
-dzieli JEDEN model między wszystkie — cecha nr k musi znaczyć wszędzie to samo.
+Every variant ends with a one-hot of the current phase. Blocks are zero-padded
+separately, so feature k means the same on every intersection.
 
-WARIANTY NAGRODY (ablacja 1.6 + odporność w Fazie 3):
-
-    queue     −Σ q po pasach wjazdowych skrzyżowania   (Advanced-CoLight, domyślny)
-    pressure  −|Σ_(l,m) (Σ_in q − Σ_out q)|            (PressLight)
-
-Nagroda kolejkowa jest domyślna, bo to ona stoi za wynikami Advanced-CoLighta:
-efficient pressure siedzi w STANIE, nie w nagrodzie. Uzasadnienie teoretyczne —
-minimalizacja kolejki ⟺ minimalizacja ATT ([[cai-2025-xlight]]).
-
-Zgodność z CoLightem: upstream liczy nagrodę jako `LaneVehicleGenerator(...,
-average="all", negative=True)` razy stała 12 w `agent/colight.py:243`. Ta stała
-to liczba pasów wjazdowych na skrzyżowaniach JiNan/HangZhou (4 drogi × 3 pasy),
-więc `średnia × 12` to po prostu SUMA — i tak to tutaj liczymy, wprost.
+Reward variants: `queue` (minus the sum of queues on the incoming roads, as in
+Advanced-CoLight; default) and `pressure` (PressLight).
 """
 
 from __future__ import annotations
@@ -44,29 +27,29 @@ import numpy as np
 from tsc_marl.domain import ats
 from tsc_marl.domain.sensors import FailureSpec, SensorModel, failure_units
 
-if TYPE_CHECKING:  # tylko dla typów — inaczej moduł nie zaimportuje się bez
-    from world.world_cityflow import Intersection, World  # bootstrapu ścieżki do submodułu
+if TYPE_CHECKING:  # type-only: the submodule is importable only after `libsignal.bootstrap()`
+    from world.world_cityflow import Intersection, World
 
-DEFAULT_MAX_SPEED = 11.11  # fallback jak w world_cityflow, gdy pas nie ma maxSpeed
+DEFAULT_MAX_SPEED = 11.11  # m/s, world_cityflow's fallback for lanes without maxSpeed
 
 STATE_VARIANTS = ("queue", "pressure", "ep", "ats")
 REWARD_VARIANTS = ("queue", "pressure")
 
 
 def engine_api(world: World) -> Any:
-    """Silnik z API CityFlow: `world.eng` w CityFlow, widok `cityflow_api` w SUMO
-    (`libsignal/sumo_world.py`). Jedno miejsce tej decyzji — rdzeń i Advanced-MP
-    czytają kolejki i pozycje pojazdów tą samą drogą na obu silnikach."""
+    """Engine with the CityFlow API: `world.eng` on CityFlow, the `cityflow_api`
+    view on SUMO (`libsignal/sumo_world.py`), so queues and vehicle positions are
+    read the same way on both engines."""
     return getattr(world, "cityflow_api", None) or world.eng
 
 
 def phase_mask(phase_counts: Sequence[int], n_phases: int) -> np.ndarray | None:
-    """[N, n_phases] bool — które akcje istnieją na danym skrzyżowaniu.
+    """[N, n_phases] bool: which actions exist at each intersection.
 
-    None, gdy wszystkie mają po `n_phases` faz (JiNan/HangZhou): maska z samych
-    jedynek niczego nie zmienia, a ścieżka bez niej zostaje bit w bit tą, na której
-    policzono GATE Fazy 1. Na sieci niejednorodnej (Kraków: 2–7 faz) bez maski
-    polityka wybrałaby fazę, której skrzyżowanie nie ma.
+    None when all intersections have `n_phases` phases (JiNan, HangZhou): an
+    all-true mask changes nothing, and skipping it keeps the computation
+    bit-identical. On a heterogeneous network (Krakow, 2 to 7 phases) the policy
+    could otherwise pick a phase the intersection does not have.
     """
     counts = np.asarray(phase_counts)
     if (counts >= n_phases).all():
@@ -75,24 +58,21 @@ def phase_mask(phase_counts: Sequence[int], n_phases: int) -> np.ndarray | None:
 
 
 class Structs(NamedTuple):
-    """Statyka jednego skrzyżowania — nie zmienia się w trakcie symulacji, więc
-    liczona raz przy budowie."""
+    """Static data of one intersection, computed once at construction."""
 
     movements: list[ats.Movement]
-    in_lanes: list[str]  # pasy wjazdowe ruchów STEROWANYCH — dziedzina demand
-    all_lanes: list[str]  # wjazdowe + wyjazdowe ruchów sterowanych — dziedzina pressure
-    reward_lanes: list[str]  # WSZYSTKIE pasy dróg wjazdowych — dziedzina nagrody (jak CoLight)
-    effective_range: dict[str, float]  # pas → L = V_max·Δt (Def. 8)
+    in_lanes: list[str]  # in lanes of the controlled movements: demand domain
+    all_lanes: list[str]  # in and out lanes of the controlled movements: pressure domain
+    reward_lanes: list[str]  # all lanes of the incoming roads: reward domain (as CoLight)
+    effective_range: dict[str, float]  # lane -> L = V_max * action interval (Def 8)
 
 
 class StateBuilder:
-    """Buduje obserwacje [N, F] i nagrody [N] dla ustalonej kolejności skrzyżowań.
+    """Builds observations [N, F] and rewards [N] for a given intersection order.
 
-    Kolejność jest WEJŚCIEM, nie założeniem: rdzeń Fazy 1 poda
-    `graph.order_intersections(world)`, a Advanced-CoLight `world.intersections`
-    (tę, w której rodzic zbudował generatory). Patrz KONTRAKT KOLEJNOŚCI
-    w `graph.py` — na roadnetach CityFlow te dwie kolejności są dziś takie same,
-    ale nie wolno na tym polegać.
+    The order is an input: the core passes `graph.order_intersections(world)`,
+    Advanced-CoLight passes `world.intersections` (the order its parent class
+    uses). See the order contract in `core/graph.py`.
     """
 
     def __init__(
@@ -109,16 +89,15 @@ class StateBuilder:
         failure: FailureSpec | None = None,
     ) -> None:
         if state not in STATE_VARIANTS:
-            raise ValueError(f"state={state!r}, dozwolone: {STATE_VARIANTS}")
+            raise ValueError(f"state={state!r}, allowed: {STATE_VARIANTS}")
         if reward not in REWARD_VARIANTS:
-            raise ValueError(f"reward={reward!r}, dozwolone: {REWARD_VARIANTS}")
+            raise ValueError(f"reward={reward!r}, allowed: {REWARD_VARIANTS}")
 
         self.world = world
-        # `get_info` czyta cache odświeżany w `World._update_infos`, a ten liczy
-        # TYLKO zasubskrybowane funkcje. LibSignalowe agenty subskrybują to przy
-        # okazji, budując `LaneVehicleGenerator` — my generatorów nie mamy, więc
-        # bez tej linii `rewards()` leci `KeyError: 'lane_waiting_count'` przy
-        # pierwszym kroku rdzenia. Subskrypcja jest idempotentna.
+        # `get_info` reads a cache refreshed only for subscribed functions.
+        # LibSignal agents subscribe implicitly through `LaneVehicleGenerator`;
+        # without this line `rewards()` raises KeyError on the first step.
+        # Subscribing is idempotent.
         world.subscribe("lane_waiting_count")
         self.intersections = list(intersections)
         self.state = state
@@ -132,9 +111,8 @@ class StateBuilder:
         self.n_mov = max(len(s.movements) for s in self.structs)
         self.n_phases = n_phases or max(len(inter.phases) for inter in self.intersections)
 
-        # Warstwa awarii sensora (Faza 2/3). JEDNA instancja na wszystkie
-        # skrzyżowania — ten sam fizyczny detektor bywa czytany przez dwa
-        # sąsiadujące skrzyżowania i musi im pokazać tę samą wartość.
+        # One sensor model for the whole network: the same physical detector is
+        # read by two neighbouring intersections and must show both the same value.
         self.failure = failure or FailureSpec()
         self.sensors: SensorModel | None = None
         if self.failure.active:
@@ -147,8 +125,8 @@ class StateBuilder:
     def from_registry(
         cls, world: World, intersections: Sequence[Intersection], **overrides: Any
     ) -> StateBuilder:
-        """Wariant konfigurowany tak jak reszta repo — przez YAML-e LibSignala."""
-        from common.registry import Registry  # noqa: PLC0415 - dopiero po bootstrapie
+        """Configured like the rest of the repo, through LibSignal's YAML configs."""
+        from common.registry import Registry
 
         param = Registry.mapping["model_mapping"]["setting"].param
         kwargs: dict[str, Any] = {
@@ -176,9 +154,8 @@ class StateBuilder:
             movements=movements,
             in_lanes=lanes_in,
             all_lanes=sorted(ats.all_lanes(movements)),
-            # Nagroda liczy WSZYSTKIE pasy dróg wjazdowych, także skręty w prawo
-            # wypadające z ruchów sterowanych — tak robi `LaneVehicleGenerator`
-            # z `in_only=True`, więc nagroda zostaje porównywalna z CoLightem.
+            # The reward counts all lanes of the incoming roads, right turns
+            # included, as `LaneVehicleGenerator(in_only=True)` does for CoLight.
             reward_lanes=ats.in_road_lanes(inter),
             effective_range={
                 lane: (
@@ -190,49 +167,39 @@ class StateBuilder:
             },
         )
 
-    # ------------------------------------------------------------------ wymiary
-
     @property
     def n_nodes(self) -> int:
         return len(self.intersections)
 
     @property
     def ob_length(self) -> int:
-        """Szerokość wiersza — JEDYNE miejsce, w którym wymiar obserwacji wchodzi
-        do architektury (pierwszy `nn.Linear` encodera)."""
+        """Row width; the only place where the observation size enters the
+        architecture (the encoder's first `nn.Linear`)."""
         blocks = 2 if self.state == "ats" else 1
         return blocks * self.n_mov + self.n_phases
 
     def phase_mask(self) -> np.ndarray | None:
-        """[N, n_phases] bool w kolejności skrzyżowań tego buildera — patrz `phase_mask`
-        na poziomie modułu. None na sieciach jednorodnych."""
+        """[N, n_phases] bool in this builder's order (see module-level `phase_mask`)."""
         return phase_mask([len(inter.phases) for inter in self.intersections], self.n_phases)
 
     def movement_mask(self) -> np.ndarray | None:
-        """[N, n_mov] bool — które kolumny bloku cech to PRAWDZIWE ruchy skrzyżowania,
-        a które dopchane zerami do `n_mov` (maksimum po sieci). None na sieciach
-        jednorodnych — ta sama konwencja co `phase_mask`.
+        """[N, n_mov] bool: which feature columns are real movements and which are
+        zero padding up to `n_mov`. None on homogeneous networks, as `phase_mask`.
 
-        Potrzebne licznikowi zamrożonych odczytów (`RuleGate`, `RuleUncertainty`):
-        dopchane zero NIGDY się nie zmienia, więc bez maski węzeł z jednym wlotem
-        (Kraków: 1–7 wlotów) wyglądałby na w większości martwy także na czystym ruchu,
-        a próg kalibrowany kwantylem na czystym wyszedłby ~1,0 — bramka nigdy by nie
-        strzeliła."""
+        Needed by the frozen-reading rule (`RuleGate`, `RuleUncertainty`): a
+        padded zero never changes, so without the mask a small intersection would
+        look mostly broken even on clean traffic."""
         return phase_mask([len(st.movements) for st in self.structs], self.n_mov)
 
-    # ------------------------------------------------------------------ odczyt
-
     def _snapshot(self) -> tuple[dict, dict, dict]:
-        """JEDNO pobranie na wywołanie: te trzy zwracają stan CAŁEJ sieci, nie
-        skrzyżowania, więc wołanie ich w pętli kopiuje ten sam słownik N razy.
-        Subskrypcja przez `world.get_info` nie pomoże — cache odświeża się co KROK
-        symulacji (1 s), a decyzja zapada raz na Δt."""
+        """One fetch per call: these return the state of the whole network, so
+        calling them per intersection would copy the same dicts N times."""
         eng = engine_api(self.world)
         return eng.get_lane_vehicles(), eng.get_vehicle_distance(), eng.get_vehicle_speed()
 
     def _queue(self, struct: Structs, snapshot, full_queue) -> Mapping[str, float]:
-        """Kolejka w oknie `obs_length` od stop-linii (tak liczy ją referencyjna
-        implementacja autorów) albo pełnopasmowa, gdy okna nie ustawiono."""
+        """Queue within `obs_length` of the stop line (as in the authors' code),
+        or over the whole lane when no window is set."""
         if self.obs_length is None:
             return full_queue
         lane_vehicles, distances, speeds = snapshot
@@ -246,13 +213,11 @@ class StateBuilder:
         )
 
     def observe(self, *, corrupt: bool = True) -> np.ndarray:
-        """[skrzyżowania, ob_length], float32, w kolejności podanej przy budowie.
+        """[N, ob_length] float32 in the order given at construction.
 
-        `corrupt=False` omija warstwę awarii NIE RUSZAJĄC jej stanu (żadnego
-        losowania, żadnej aktualizacji `hold`). Dzięki temu dwa wywołania w tym
-        samym momencie symulacji dają parę (czysta, popsuta) z DOKŁADNIE tego
-        samego stanu silnika — to jest zbiór uczący prototypu 2.0 i miara,
-        względem której liczy się dotkliwość awarii.
+        `corrupt=False` bypasses the failure layer without touching its state (no
+        sampling, no `hold` update), so two calls at the same simulation moment
+        give a (clean, corrupted) pair from exactly the same engine state.
         """
         sensors = self.sensors if corrupt else None
         if sensors is not None:
@@ -273,7 +238,7 @@ class StateBuilder:
                 head = [sum(q[lane] for lane in ins) / len(ins) for ins, _ in s.movements]
             elif self.state == "pressure":
                 head = ats.movement_pressure(s.movements, q, normalize=False)
-            else:  # "ep" oraz pierwszy blok "ats"
+            else:  # "ep" and the first block of "ats"
                 head = ats.movement_pressure(s.movements, q)
             rows[idx, : len(head)] = head
 
@@ -291,19 +256,18 @@ class StateBuilder:
                 demand = ats.movement_running(s.movements, running)
                 rows[idx, self.n_mov : self.n_mov + len(demand)] = demand
 
-            # Bieżąca faza: indeks w `inter.phases`, czyli w przestrzeni AKCJI (bez
-            # żółtej). W trakcie przejścia trzyma fazę DOCELOWĄ — i o to chodzi,
-            # bo obserwacja opisuje decyzję, nie stan lampy.
+            # Current phase as an action index (yellow excluded). During a
+            # transition it holds the target phase: the observation describes
+            # the decision, not the lamp.
             rows[idx, self.ob_length - self.n_phases + inter.current_phase] = 1.0
         return rows
 
     def phase_incidence(self) -> np.ndarray:
-        """[N, n_faz, n_mov] bool — które ruchy (kolumny bloku cech) obsługuje która faza.
+        """[N, n_phases, n_mov] bool: which movements (feature columns) each phase serves.
 
-        Most między stanem opisanym per RUCH a decyzją podejmowaną per FAZĘ: p(s) =
-        Σ e(l,m) po ruchach fazy (Def. 5). Z tą macierzą decyzję MaxPressure da się
-        policzyć z SAMEGO wektora stanu — czyli także z popsutego, co jest całą
-        potrzebą ewaluacji pod awarią (`robustness/controllers.py`).
+        With it a max-pressure decision is computed from the observation alone,
+        including a corrupted one, so max-pressure controllers face the same
+        sensor failure as the policy (`robustness/controllers.py`).
         """
         out = np.zeros((self.n_nodes, self.n_phases, self.n_mov), dtype=bool)
         for i, inter in enumerate(self.intersections):
@@ -312,25 +276,24 @@ class StateBuilder:
         return out
 
     def reset_sensors(self, episode: int) -> None:
-        """Przelosuj TRWAŁY stan detektorów na nowy epizod. Bez tego ten sam
-        zbiór pasów byłby zepsuty przez cały trening, a `hold` przeciekałby
-        wartości sprzed `world.reset()`."""
+        """Redraw the persistent detector state for a new episode. Otherwise the
+        same lanes would stay broken for the whole training and `hold` would leak
+        values from before `world.reset()`."""
         if self.sensors is not None:
             self.sensors.reset(episode)
 
     def rewards(self) -> np.ndarray:
-        """[skrzyżowania], float32. Zawsze z PEŁNEJ kolejki pasa, nigdy z okna
-        `obs_length` — okno jest własnością obserwacji (tak liczy je referencyjna
-        implementacja), a nagroda ma zostać porównywalna z CoLightem.
+        """[N] float32, always from the whole-lane queue, never the `obs_length`
+        window, so the reward stays comparable with CoLight.
 
-        Warstwa awarii jej NIE DOTYKA i nie jest to kwestia flagi: `get_info`
-        czyta cache świata, nie ścieżkę obserwacji. To jest scope CORE Fazy 3 —
-        trening i nagroda na czystym, awaria tylko na wejściu polityki."""
+        The failure layer never touches it, and not by a flag: `get_info` reads
+        the world's cache, not the observation path. Failures affect only the
+        policy input."""
         queue = self.world.get_info("lane_waiting_count")
         out = np.zeros(self.n_nodes, dtype=np.float32)
         for idx, s in enumerate(self.structs):
             if self.reward == "queue":
                 out[idx] = -sum(queue[lane] for lane in s.reward_lanes)
-            else:  # "pressure" — PressLight: karzemy NIEZRÓWNOWAŻENIE, stąd moduł
+            else:  # "pressure" (PressLight): penalise imbalance, hence abs
                 out[idx] = -abs(sum(ats.movement_pressure(s.movements, queue, normalize=False)))
         return out

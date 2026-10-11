@@ -140,7 +140,7 @@ def build_inputs(
 def _intersections(roadnet: Path):
     """Obiekty `Intersection` LibSignala z samego pliku, bez silnika — ten sam trik
     co `tests/conftest.py`: parsowanie ruchów idzie kodem, który biegnie w symulacji."""
-    from tsc_marl import libsignal  # noqa: PLC0415
+    from tsc_marl import libsignal
 
     libsignal.bootstrap()
     from world.world_cityflow import Intersection  # noqa: PLC0415
@@ -170,7 +170,7 @@ def movement_sources(network: str, n_mov: int, drop_always_green: bool = True) -
     To jest mapowanie ruch → krawędź z planu: droga wjazdowa ruchu zaczyna się
     w sąsiedzie j, więc ruch należy do krawędzi j→i. Kolejność ruchów taka jak
     w `StateBuilder` (`ats.controlled_movements`), kolejność węzłów — grafu."""
-    from tsc_marl import libsignal  # noqa: PLC0415
+    from tsc_marl import libsignal
     from tsc_marl.core.graph import RoadNetGraph  # noqa: PLC0415
     from tsc_marl.domain import ats  # noqa: PLC0415
 
