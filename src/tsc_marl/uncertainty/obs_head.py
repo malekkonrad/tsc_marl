@@ -170,9 +170,11 @@ def movement_sources(network: str, n_mov: int, drop_always_green: bool = True) -
     To jest mapowanie ruch → krawędź z planu: droga wjazdowa ruchu zaczyna się
     w sąsiedzie j, więc ruch należy do krawędzi j→i. Kolejność ruchów taka jak
     w `StateBuilder` (`ats.controlled_movements`), kolejność węzłów — grafu."""
+    from tsc_marl import libsignal  # noqa: PLC0415
     from tsc_marl.core.graph import RoadNetGraph  # noqa: PLC0415
     from tsc_marl.domain import ats  # noqa: PLC0415
 
+    libsignal.bootstrap()
     path = roadnet_of(network)
     graph = RoadNetGraph.from_roadnet(path)
     raw, inters = _intersections(path)
