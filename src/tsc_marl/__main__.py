@@ -1,5 +1,5 @@
-"""`python -m tsc_marl` = `tsc`. Istnieje, żeby CLI działało również zanim
-console script trafi do .venv/bin (czyli przed `uv pip install -e .`)."""
+"""`python -m tsc_marl` is equivalent to `tsc`; works before the console script
+is installed into .venv/bin."""
 
 from tsc_marl.runner.cli import app
 

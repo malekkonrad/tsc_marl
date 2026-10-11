@@ -1,5 +1,5 @@
-"""Wyniki — czyta zapisane biegi, nie uruchamia symulacji.
+"""Results — reads stored runs, never runs the simulator.
 
-`plot` i `report` biorą wszystko z `runs/` i `results/` przez `runlog`, więc
-działają na maszynie bez CityFlow (i dla biegu, który wciąż trwa).
+Everything comes from `runs/` and `results/` through `runlog`, so this works on a
+machine without CityFlow and for runs that are still in progress.
 """

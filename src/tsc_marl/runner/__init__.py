@@ -1,7 +1,7 @@
-"""Uruchamianie — wejścia procesu i orkiestracja biegów.
+"""Process entry points and run orchestration.
 
-Warstwa najwyższa: wolno jej importować wszystko poniżej, nikt nie importuje jej.
-`cli.py` jest cienki z założenia (rozdziela ruch), a logika siedzi w `train.py`,
-`train_core.py`, `evaluate.py` i `suite.py` — dzięki temu testy i podprocesy
-`suite` wołają te same funkcje, a nie CLI.
+Top layer: may import everything below, nothing imports it. `cli.py` only
+dispatches; the logic lives in `train.py`, `train_core.py`, `evaluate.py`,
+`suite.py` and `degrade.py`, so tests and `suite` subprocesses call the same
+functions rather than the CLI.
 """

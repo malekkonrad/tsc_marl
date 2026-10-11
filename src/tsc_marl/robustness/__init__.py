@@ -1,6 +1,8 @@
-"""Faza 3 — zachowanie sterowników pod awarią sensorów.
+"""Controller behaviour under sensor failure.
 
-`controllers` — kontrolery, które czytają TĘ SAMĄ warstwę detektorów (polityka,
-MaxPressure, FixedTime); `degrade` — pętla ewaluacji zamrożonego sterownika na
-liście scenariuszy awarii. Wejście procesu: `runner/degrade.py` (`tsc degrade`).
+`controllers` — controllers and wrappers that all read the same detector layer
+(policy, MaxPressure, FixedTime, gate/mask/UW wrappers); `degrade` — evaluation plans
+and the loop running a frozen controller over failure scenarios; `training` —
+failure randomization and uncertainty signals used during training. Entry point:
+`runner/degrade.py` (`tsc degrade`).
 """

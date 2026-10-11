@@ -1,15 +1,15 @@
-"""Most do LibSignala (submoduł `external/LibSignal`) — cała styczność z cudzym kodem.
+"""Bridge to LibSignal (`external/LibSignal` submodule) - all contact with third-party code.
 
-Trzy warstwy, od najniższej:
+Layers, lowest first:
 
-* `bridge`     — `sys.path`, `SUMO_HOME`, CWD, środowisko podprocesów,
-* `session`    — postawiony proces LibSignala pod zarejestrowanym biegiem `runlog`,
-* `experiment` — adapter LibSignal ↔ `runlog` (id biegu, parsowanie ich logów),
-* `agents/`    — nasze wtyczki rejestrowane w ICH `Registry`.
+* `bridge`     — `sys.path`, `SUMO_HOME`, CWD, subprocess environment,
+* `session`    — a LibSignal process set up under a registered `runlog` run,
+* `experiment` — LibSignal ↔ `runlog` adapter (run ids, log parsing),
+* `sumo_world` — SUMO world with the CityFlow contract (replaces upstream `world_sumo`),
+* `agents/`    — our agents registered in LibSignal's `Registry`.
 
-Funkcje `bridge` są re-eksportowane tutaj, bo wołający chce po prostu
-`libsignal.bootstrap()`, a nie pamiętać, w którym pliku most trzyma implementację.
-Ścieżek repo tu NIE MA — te mieszkają w `tsc_marl.paths` i nie wymagają mostu.
+`bridge` functions are re-exported so callers can write `libsignal.bootstrap()`.
+Repository paths live in `tsc_marl.paths` and do not need the bridge.
 """
 
 from tsc_marl.libsignal.bridge import (  # noqa: F401

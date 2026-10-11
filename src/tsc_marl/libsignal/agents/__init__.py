@@ -1,21 +1,16 @@
-"""Agenci zaimplementowani na potrzeby pracy.
+"""Agents implemented for this thesis, registered in LibSignal's Registry.
 
-Registry LibSignala to zwykły słownik zapełniany dekoratorami przy imporcie
-(`common/registry.py`), więc wystarczy zaimportować ten pakiet PO `import agent`,
-żeby nasze metody były widoczne pod swoimi nazwami w `-a {nazwa}`. Dzięki temu nasz
-kod zostaje w naszym repo zamiast wsiąkać w drzewo submodułu.
+The Registry is a plain dict filled by decorators at import time
+(`common/registry.py`), so importing this package after `import agent` makes our
+methods available as `-a <name>` while the code stays in this repository.
 
-Zaimplementowane:
-  efficientmp  — Efficient-MP (Wu i in. 2021); odtwarza literaturę z dokładnością 0,9%
-  advancedmp   — Advanced-MP (Zhang i in. 2022)
-  advancedcolight — Advanced-CoLight (Zhang i in. 2022), linia SOTA
-
-TODO (baseline'y z planu, jeszcze nie zaimplementowane):
-  bgat            — kontrybucja pracy (Faza 2)
+  efficientmp     — Efficient-MP (Wu et al., 2021)
+  advancedmp      — Advanced-MP (Zhang et al., 2022)
+  advancedcolight — Advanced-CoLight (Zhang et al., 2022)
 """
 
 from tsc_marl.libsignal.agents.advanced_colight import AdvancedCoLight  # noqa: F401
-from tsc_marl.libsignal.agents.advanced_mp import (  # noqa: F401 - import dla efektu rejestracji
+from tsc_marl.libsignal.agents.advanced_mp import (  # noqa: F401 - imported for registration
     AdvancedMaxPressureAgent,
     EfficientMaxPressureAgent,
 )

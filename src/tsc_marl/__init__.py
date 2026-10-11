@@ -1,14 +1,16 @@
-"""Sterowanie sygnalizacją świetlną — MARL nad grafem sieci drogowej.
+"""Multi-agent traffic signal control over the road-network graph.
 
-Pakiet dzieli się na warstwy, a zależności idą TYLKO w dół tej listy:
+The package is layered; dependencies point only DOWN this list:
 
-* `paths`, `seeding` — fundament, bez zależności wewnętrznych,
-* `domain/`          — wzory z papierów (ATS), bez frameworków,
-* `core/`            — rdzeń Fazy 1: GAT + PPO + CTDE, nasza implementacja,
-* `libsignal/`       — most do submodułu `external/LibSignal` i wtyczki do ich Registry,
-* `runner/`          — wejścia procesu (`tsc ...`) i orkiestracja biegów,
-* `analysis/`        — tabele i wykresy z zapisanych biegów.
+* `paths`, `seeding` — foundation, no internal dependencies,
+* `domain/`          — traffic formulas from the literature (ATS), framework-free,
+* `core/`            — the controller: GAT + PPO + CTDE,
+* `libsignal/`       — bridge to the `external/LibSignal` submodule and its Registry plugins,
+* `robustness/`      — controllers and wrappers evaluated under sensor failure,
+* `uncertainty/`     — observation-uncertainty head and its calibration,
+* `runner/`          — process entry points (`tsc ...`) and run orchestration,
+* `analysis/`        — tables and figures from stored runs.
 
-Kluczowa granica: `core/` NIE importuje `libsignal/`. Świat symulacji wstrzykuje
-mu `runner/train_core.py`, dzięki czemu rdzeń testuje się bez silnika.
+Key boundary: `core/` does not import `libsignal/`. The simulator is injected by
+`runner/train_core.py`, so the core is testable without an engine.
 """

@@ -1,37 +1,34 @@
 [project]
 name = "tsc-marl"
 version = "0.1.0"
-description = "Uncertainty-aware multi-agent GNN traffic signal control (praca inżynierska)"
+description = "Multi-agent GNN traffic signal control (engineering thesis)"
 requires-python = ">=3.10,<3.11"
 
-# Wersje odtwarzają środowisko, w którym powstały wyniki Fazy 0 — nie są "najnowsze",
-# tylko "te, które przeszły GATE". Pułapki, które kosztowały czas, są opisane niżej.
+# Pinned to the environment that produced the thesis results, not to the latest releases.
 dependencies = [
-    # --- symulatory ---
-    "eclipse-sumo==1.27.1",   # SUMO z pipa, NIE z apt: apt na Ubuntu noble daje 1.18,
-    "libsumo==1.27.1",        # a libsumo z pipa jest 1.27 i wersje muszą się zgadzać
+    # --- simulators ---
+    "eclipse-sumo==1.27.1",   # SUMO from pip, not apt: Ubuntu noble ships 1.18, while
+    "libsumo==1.27.1",        # pip's libsumo is 1.27 and the versions must match
     "traci==1.27.1",
     "sumolib==1.27.1",
-    # CityFlow nie jest na PyPI — buduje się ze źródeł (wymaga cmake + g++):
+    # CityFlow is not on PyPI — built from source (needs cmake + g++):
     "cityflow @ git+https://github.com/cityflow-project/CityFlow.git@81ee0f4",
 
-    # --- uczenie ---
+    # --- learning ---
     "torch==2.4.1",
     "torch-geometric==2.8.0.post1",
-    "numpy==1.26.4",          # <2.0: ABI skompilowanych kół (PyG, torch-scatter)
+    "numpy==1.26.4",          # <2.0: ABI of the compiled wheels (PyG, torch-scatter)
 
-    # --- czego LibSignal wymaga, a czego NIE MA w jego requirements.txt ---
-    "gym==0.26.2",            # ich pin 0.21 ma zepsute metadane i nie instaluje się
+    # --- required by LibSignal but missing from its requirements.txt ---
+    "gym==0.26.2",            # their 0.21 pin has broken metadata and does not install
     "pfrl==0.4.0",
     "packaging",
-    "lmdb",                   # importowane w dataset/onfly_dataset.py, czyli przy KAŻDYM runie
+    "lmdb",                   # imported by dataset/onfly_dataset.py on every run
 
     # --- CLI ---
-    # Jedno wejście `tsc` z podkomendami. Pure-python (typer + click), nie dotyka
-    # numeryki, więc nie zmienia odtwarzalności wyników.
     "typer",
 
-    # --- analiza wyników ---
+    # --- analysis ---
     "pandas",
     "scipy",
     "matplotlib",
@@ -41,16 +38,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# torch-scatter to koło budowane pod konkretną parę (torch, CUDA), więc żyje osobno.
-# CPU:  make setup       (torch+cpu  z download.pytorch.org/whl/cpu)
-# CUDA: make setup-gpu   (torch+cu121 z download.pytorch.org/whl/cu121)
+# torch-scatter wheels are built per (torch, CUDA) pair, so they live in extras.
+# CPU:  make setup       (torch+cpu   from download.pytorch.org/whl/cpu)
+# CUDA: make setup-gpu   (torch+cu121 from download.pytorch.org/whl/cu121)
 cpu = ["torch-scatter==2.1.2"]
 gpu = ["torch-scatter==2.1.2"]
 dev = ["ruff", "pytest"]
 
 [project.scripts]
-# `tsc` ląduje w .venv/bin po `uv pip install -e .`. Do tego czasu działa
-# równoważne `python -m tsc_marl`.
+# Installed into .venv/bin by `uv pip install -e .`; `python -m tsc_marl` is equivalent.
 tsc = "tsc_marl.runner.cli:app"
 
 [build-system]
@@ -58,13 +54,12 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.metadata]
-# CityFlow nie jest na PyPI, więc wisi jako referencja do gita (`cityflow @ git+...`).
-# Bez tej flagi hatchling odmawia zbudowania metadanych pakietu.
+# CityFlow is a direct git reference (`cityflow @ git+...`); hatchling refuses it without this.
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
-# runlog jest osobnym pakietem, nie podpakietem tsc_marl — nie importuje z niego
-# niczego i ma dać się wyjąć do własnego repo jednym `git mv`.
+# runlog is a separate top-level package: it imports nothing from tsc_marl and can be
+# moved to its own repository unchanged.
 packages = ["src/tsc_marl", "src/runlog"]
 
 [tool.ruff]
@@ -73,65 +68,45 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B"]
-# LibSignal wymaga importów po ustawieniu sys.path (patrz tsc_marl/libsignal/bridge.py),
-# więc importy nie-na-górze-pliku są tu zamierzone.
+# LibSignal modules can only be imported after sys.path is set (tsc_marl/libsignal/bridge.py),
+# so imports below the top of a file are intentional.
 ignore = ["E402"]
 
 [tool.ruff.lint.per-file-ignores]
-# Nazewnictwo z papierów: W1/L/M/N oraz `l`,`m` na ruch (l,m) w definicjach pressure.
-# Zmiana na czytelniejsze nazwy rozjechałaby kod z wzorami, które implementuje.
-# Dotyczy dziedziny (wzory ATS) i wtyczek do LibSignala, które te wzory wołają.
-"src/tsc_marl/domain/*" = ["N803", "N806", "E741"]
-"src/tsc_marl/libsignal/agents/*" = ["N803", "N806", "E741"]
-# Testy nazywamy po polsku i asercje piszemy wprost — bez wymogów dla kodu produkcyjnego.
-"tests/*" = ["N802"]
-# runlog to narzędzie ogólnego przeznaczenia — bez wyjątków nazewniczych z papierów.
+# Variable names follow the papers: `l`, `m` for a movement (l, m) in pressure formulas.
+"src/tsc_marl/domain/*" = ["E741"]
+"src/tsc_marl/libsignal/agents/*" = ["E741"]
 
 [tool.pytest.ini_options]
-# Testy nie potrzebują silnika (patrz tests/conftest.py), ale conftest ustawia
-# sys.path na submoduł — dlatego jeden wspólny rootdir i żadnych testów w external/.
+# Tests do not need the engine, but conftest puts the submodule on sys.path —
+# hence one rootdir and no test collection in external/.
 testpaths = ["tests"]
-# `-m "not slow"` w addopts = domyślnie lecą TYLKO szybkie. Argument z linii poleceń
-# nadpisuje tę wartość (pytest bierze ostatnie `-m`), więc `pytest -m slow` uruchamia
-# same wolne, a `pytest -m ""` — wszystkie. Bez rejestracji markera w `markers`
-# pytest sypie ostrzeżeniem przy każdym uruchomieniu.
+# Fast tests only by default; a later `-m` on the command line wins, so
+# `pytest -m slow` runs the slow ones and `pytest -m ""` runs everything.
 addopts = "-q -m 'not slow'"
 markers = [
-  "slow: wymaga postawionego symulatora CityFlow (~15 s na sesję zamiast ~2 s)",
+  "slow: needs a running CityFlow simulator (~15 s per session instead of ~2 s)",
 ]
 
 [tool.pyright]
-# Bez tego LSP w edytorze nie widzi ANI zależności z venva, ANI modułów LibSignala.
-# Powód dla LibSignala jest strukturalny: `external/LibSignal` trafia na sys.path
-# dopiero w runtime, w tsc_marl.libsignal.bootstrap() — analiza statyczna nie ma
-# jak się tego domyślić, więc trzeba jej to powiedzieć wprost.
+# Lets the editor's LSP see the venv and LibSignal, which only reaches sys.path at
+# runtime (tsc_marl.libsignal.bootstrap()).
 venvPath = "."
 venv = ".venv"
 pythonVersion = "3.10"
 extraPaths = ["src", "external/LibSignal"]
 
-# Podpowiedzi auto-importu w edytorze. `autoImportCompletions` jest domyślnie włączone,
-# ale `indexing` NIE (domyślnie false) — a bez indeksu pyright podpowiada tylko symbole
-# z plików, które już sparsował, i z top-levelu pakietów. Z indeksem widzi podmoduły,
-# czyli np. `torch.nn.functional` czy warstwy z `torch_geometric.nn`, bez wcześniejszego
-# zaimportowania ich w pliku. Kosztuje kilka sekund i trochę RAM-u przy starcie LSP.
-# `indexing` nie jest opisane w README pyrighta, ale parser configu je obsługuje.
+# Index submodules (e.g. torch.nn.functional) for auto-import completions.
 indexing = true
 autoImportCompletions = true
 useLibraryCodeForTypes = true
 
-# Cudzy kod analizujemy tylko na tyle, żeby rozwiązywać importy — nie chcemy jego
-# błędów w naszym oknie diagnostyki.
+# Third-party code is analysed only to resolve imports.
 exclude = ["external", ".venv", "runs", "data", "deploy"]
 
 [tool.uv]
-# Środowisko budujemy `make setup` (uv venv + uv pip install z indeksem torcha
-# CPU albo CUDA), a NIE `uv sync`. Bez tej flagi `uv run` domyślnie synchronizuje
-# .venv z samego pyproject.toml — czyli podmienia `torch 2.4.1+cpu` na build CUDA
-# (~2,5 GB wheeli nvidia-*), KASUJE `torch-scatter` (żyje w extra `cpu`/`gpu`)
-# i wyrzuca ruff/pytest. Jeden `uv run` niszczyłby wtedy środowisko, w którym
-# powstały wyniki. `managed = false` wyłącza tę synchronizację: `uv run` po prostu
-# używa .venv, a `uv sync` odmawia z czytelnym komunikatem.
-#
-# `uv venv` i `uv pip` działają bez zmian — one nie chodzą przez tryb projektowy.
+# The environment is built by `make setup` (CPU or CUDA torch index), not `uv sync`.
+# Without this flag `uv run` would sync .venv from pyproject.toml alone: replace
+# torch+cpu with the CUDA build, remove torch-scatter (an extra) and drop ruff/pytest.
+# With it, `uv run` just uses .venv and `uv sync` refuses.
 managed = false

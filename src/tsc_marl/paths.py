@@ -1,13 +1,11 @@
-"""Layout tego repo — jedyne miejsce, które wie, gdzie co leży.
+"""Repository layout — the only place that knows where things live.
 
-Wydzielone z mostu do LibSignala, bo `analysis/` i `runner/suite.py` potrzebują
-samych ścieżek (`RUNS`, `RESULTS`, `CONFIGS`), a nie całego mostu. Ten moduł nie
-importuje niczego z projektu i nie ma efektów ubocznych — można go zaimportować
-zanim LibSignal w ogóle znajdzie się na `sys.path`.
+Separate from the LibSignal bridge because `analysis/` and `runner/suite.py` need
+only the paths, not the bridge. Imports nothing from the project and has no side
+effects, so it is importable before LibSignal is on `sys.path`.
 
-Kotwicą jest położenie TEGO pliku (`src/tsc_marl/paths.py` → dwa poziomy w górę),
-a nie CWD — LibSignal rozwiązuje ścieżki względem CWD i to on musi się dostroić
-do nas (patrz `libsignal/bridge.py`), nie odwrotnie.
+Anchored at this file's location, not at the CWD: LibSignal resolves paths against
+the CWD, so it is LibSignal that gets adjusted to us (`libsignal/bridge.py`).
 """
 
 from __future__ import annotations
