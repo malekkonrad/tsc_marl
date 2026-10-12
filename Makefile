@@ -1,6 +1,6 @@
 # Shortcuts for common tasks. `make help` lists the targets.
 .DEFAULT_GOAL := help
-.PHONY: help setup setup-gpu check test test-slow test-all bench bench-paper gate table runs plot lint hpc-build
+.PHONY: help setup setup-gpu check test test-slow test-all bench bench-paper gate table runs plot lint
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -31,30 +31,30 @@ check: ## Quick environment health check (~15 s, Efficient-MP on JiNan)
 	.venv/bin/tsc doctor
 	.venv/bin/tsc train -a efficientmp -n cityflow_jinan3x4_4ph --seed 0 --replace
 
-test: ## Unit tests (no engine, ~2 s)
+test: ## Fast tests (no simulator, ~15 s)
 	.venv/bin/python -m pytest
 
-test-slow: ## Only tests that need CityFlow (~30 s)
+test-slow: ## Only tests that start a simulator, CityFlow or SUMO (~30 s)
 	.venv/bin/python -m pytest -m slow
 
 test-all: ## All tests
 	.venv/bin/python -m pytest -m ''
 
-bench: ## T1 suite, realistic mode (yellow=5) — untrained baselines
+bench: ## T1 suite, realistic mode (yellow=5): baselines without training
 	.venv/bin/tsc suite run t1_baselines
 	.venv/bin/tsc table
 
-bench-paper: ## T1 suite, benchmark mode (yellow=0) — as in the papers
+bench-paper: ## T1 suite, benchmark mode (yellow=0), as in the papers
 	.venv/bin/tsc suite run t1_paper
 	.venv/bin/tsc table
 
 table: ## Rebuild tables from stored runs (no simulation)
 	.venv/bin/tsc table
 
-runs: ## List stored runs (runs/t1) — status, parameters, ATT
+runs: ## List stored runs (runs/t1): status, parameters, ATT
 	.venv/bin/tsc runs
 
-plot: ## Learning curves from runs/ → runs/plots/ (also for runs in progress)
+plot: ## Learning curves from runs/ -> runs/plots/ (also for runs in progress)
 	.venv/bin/tsc plot
 	.venv/bin/tsc plot --split train
 
@@ -65,6 +65,3 @@ gate: ## Core vs Advanced-CoLight on the same networks and seeds
 
 lint: ## ruff
 	.venv/bin/ruff check src/ tests/ && .venv/bin/ruff format --check src/ tests/
-
-hpc-build: ## Apptainer image for Cyfronet (fallback path — see deploy/hpc/)
-	SIF=tsc-marl.sif IMAGE=tsc-marl:latest ./deploy/hpc/build_sif.sh

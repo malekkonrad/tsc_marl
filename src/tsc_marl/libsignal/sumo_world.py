@@ -1,49 +1,22 @@
-"""SUMO z kontraktem, który rdzeń zna z CityFlow — parytet backendu (Faza 5, case study Krakowa).
+"""SUMO with the contract the core knows from CityFlow (backend parity, Krakow case study).
 
-Rejestrowany w Registry pod nazwą `sumo`, czyli ZASTĘPUJE upstreamowy
-`world_sumo.World` w każdym biegu `-w sumo` — rdzenia i baseline'ów LibSignala.
-Gdyby adapter dostawał tylko rdzeń, ta sama sieć miałaby dwie definicje ATT,
-nagrody i przejść między fazami, a tabela porównywałaby metody liczone różnie.
+Registered as `sumo`, so it REPLACES upstream `world_sumo.World` in every `-w sumo` run,
+the core's and LibSignal's baselines alike: otherwise one network would have two
+definitions of ATT, reward and phase transitions. Nine differences from upstream:
 
-DZIEWIĘĆ RÓŻNIC WOBEC UPSTREAMU — każda naprawia coś, co rdzeń albo metryka zakłada:
+1. `lane_length`, `all_lanes_speed`: lane -> m, m/s dicts as in `world_cityflow`, from
+   `sumolib` (upstream closes the SUMO connection at the end of `__init__`).
+2. `cityflow_api`: the three CityFlow engine methods the core calls directly.
+3. Intersection IDENTITY ACROSS RESET: upstream builds NEW `Intersection` objects in
+   `reset()`; here old objects take the fresh state, so references stay valid.
+4. Permissive green `g` in `phase_available_lanelinks` (upstream takes only `G`, `s`).
+5. `lane_waiting_count` = vehicles halted NOW (< 0.1 m/s, whole lane), as in CityFlow.
+6. ATT as in CityFlow: finished plus still running vehicles, counted from entry.
+7. Yellow from the protocol (`trainer.yellow_length`) instead of the program's shortest phase.
+8. Phase TRANSITIONS as `world_cityflow.Intersection.step` (`cityflow_transition`).
+9. The neighbour GRAPH (`build_graph`), hooked in `session.build_interfaces`.
 
-1. `lane_length`, `all_lanes_speed` — słowniki pas → m, m/s, jak w `world_cityflow`
-   (okno L = V_max·Δt i ruch efektywny ATS). Z `sumolib`, bo upstream zamyka
-   połączenie z SUMO na końcu `__init__` i do pierwszego `reset()` nie ma kogo pytać.
-2. `cityflow_api` — widok silnika z trzema metodami CityFlow, których rdzeń używa
-   wprost (`get_lane_vehicles`, `get_vehicle_distance`, `get_vehicle_speed`);
-   wybiera go `core.features.engine_api`.
-3. TOŻSAMOŚĆ SKRZYŻOWAŃ PRZEZ RESET. Upstream buduje w `reset()` NOWE obiekty
-   `Intersection`, więc każdy, kto trzymał referencję (StateBuilder, `inter_obj`
-   agentów LibSignala), czytał potem fazę sprzed resetu. Obserwacja z zamrożonym
-   one-hotem nie wywala się — sieć uczy się szumu. Tutaj stare obiekty dostają stan
-   świeżych (`__dict__`), więc referencje zostają ważne, tak jak w CityFlow.
-4. ZIELONE WARUNKOWE `g` w `phase_available_lanelinks`. Upstream bierze tylko `G`
-   i `s`, więc skręt w lewo z ustąpieniem nie należy do żadnej fazy — ATS
-   i MaxPressure go nie widzą (13 z 25 sygnalizacji Krakowa, 32 lanelinki).
-5. `lane_waiting_count` = pojazdy stojące TERAZ (< 0,1 m/s, cały pas), jak CityFlow.
-   Upstream liczy pojazd jako czekający od pierwszego zatrzymania, dopóki skrzyżowanie
-   go widzi (`Intersection.waiting_times` nie są czyszczone), i tylko 200 m przed
-   sygnalizacją. Na Krakowie efekt jest mały (mid, cykl stałoczasowy: 17 z 1770 próbek
-   pas × chwila zawyżonych), ale to NAGRODA rdzenia — definicja ma być ta z CityFlow.
-6. ATT jak CityFlow (`Engine::getAverageTravelTime`): dojechane + wciąż jadące,
-   liczone od wjazdu. Upstream liczy tylko dojechane, więc pojazdy zablokowane
-   w sieci nie wchodzą do średniej — metoda, która blokuje ruch, nie płaci za tych,
-   których zablokowała. Różnica idzie w obie strony (Kraków mid, cykl stałoczasowy
-   900 s: 294 s upstream vs 255 s wg CityFlow), więc liczby nie są porównywalne.
-7. Żółte z protokołu (`trainer.yellow_length`, 5 s = 3 + 2 all-red) zamiast najkrótszej
-   fazy programu z pliku sieci — inaczej `_y5` w id biegu byłoby fikcją.
-8. PRZEJŚCIA FAZ jak `world_cityflow.Intersection.step` (`cityflow_transition`).
-   Upstreamowy `pseudo_step` zeruje licznik fazy tylko w gałęzi, do której po
-   pierwszych sekundach epizodu nie da się już wejść: każda późniejsza zmiana fazy
-   jest natychmiastowa, bez przejścia, a `t_min` baseline'ów przestaje działać
-   (Kraków mid, 900 s: 0 kroków w fazie przejściowej po 30. sekundzie).
-9. GRAF SĄSIEDZTWA (`build_graph`, podpinany w `session.build_interfaces`). Graf
-   LibSignala łączy sygnalizacje tylko przez jedną krawędź węzeł–węzeł o id równym
-   id sygnalizacji; na sieci z OSM daje 1 krawędź na 25 węzłów — GAT bez sąsiadów.
-
-Punkty 4–9 zmieniają liczby także baseline'om LibSignala na SUMO. Wyniki `-w sumo`
-sprzed tego modułu nie są porównywalne z późniejszymi.
+Points 4-9 change the numbers of LibSignal's baselines on SUMO too.
 """
 
 from __future__ import annotations
@@ -59,22 +32,21 @@ from world import world_sumo
 
 from tsc_marl.core.graph import RoadNetGraph
 
-#: Stany sygnału, przy których ruch może jechać: G — zielone z pierwszeństwem,
-#: g — zielone z ustąpieniem, s — zielona strzałka (skręt po zatrzymaniu).
+#: Signal states that let traffic go: G = green with priority, g = green yielding,
+#: s = green arrow (turn after stopping).
 SERVING = frozenset("Ggs")
 
-#: Zasięg sąsiedztwa w grafie SUMO [m]. 600 m daje na Krakowie stopień wejściowy 0–4
-#: (mediana 3) — tyle, ile |N_i| − 1 na siatkach JiNan/HangZhou (2–4). Bez limitu
-#: ścieżki bocznymi ulicami dochodzą do 18–20 sygnalizacji. Slot ablacyjny.
+#: Neighbourhood reach of the SUMO graph [m]; 600 m gives Krakow an in-degree of 0-4,
+#: like |N_i| - 1 on the JiNan/HangZhou grids.
 GRAPH_REACH_M = 600.0
 
 
 class CityFlowAPI:
-    """Trzy metody silnika CityFlow, które rdzeń i Advanced-MP wołają wprost.
+    """The three CityFlow engine methods the core and Advanced-MP call directly.
 
-    Semantyka jak w CityFlow: pozycja pojazdu to odległość od POCZĄTKU pasa, pasy
-    tylko zwykłe (bez wewnętrznych `:węzeł_…` SUMO) — tak jak klucze `lane_length`.
-    Silnik czytamy przy każdym wywołaniu, bo `world.eng` podmienia się w `reset()`.
+    CityFlow semantics: a vehicle's position is the distance from the lane START,
+    ordinary lanes only (no SUMO internal lanes), like the `lane_length` keys. The
+    engine is read on every call, since `world.eng` is replaced in `reset()`.
     """
 
     def __init__(self, world: World) -> None:
@@ -94,16 +66,13 @@ class CityFlowAPI:
 
 
 def serving_lanelinks(inter: Any) -> tuple[list[list[list[str]]], list[list[str]]]:
-    """(lanelinki, pasy startowe) każdej fazy zielonej — jak upstream, ale z `g`.
-
-    Czyta `inter.lanelinks` (wynik `getControlledLinks` z konstrukcji), a nie silnik,
-    żeby działało także przed pierwszym `reset()`, gdy połączenie jest zamknięte.
-    """
+    """(lanelinks, start lanes) of every green phase, as upstream but with `g`. Reads
+    `inter.lanelinks` rather than the engine, so it works before the first `reset()`."""
     lanelinks, startlanes = [], []
     for phase in inter.green_phases:
         links, starts = [], []
-        # strict=False celowo: stan fazy bywa dłuższy niż lista linków, a upstream
-        # w tym miejscu robi `break` — ucinamy tak samo
+        # strict=False on purpose: a phase state can be longer than the link list, and
+        # upstream breaks there too
         for signal, controlled in zip(phase.state, inter.lanelinks, strict=False):
             if signal not in SERVING or not controlled:
                 continue
@@ -117,23 +86,22 @@ def serving_lanelinks(inter: Any) -> tuple[list[list[list[str]]], list[list[str]
 
 
 def cityflow_transition(inter: Any, action: int) -> None:
-    """`Intersection.pseudo_step` o semantyce `world_cityflow.Intersection.step` (Δ = 1 s).
+    """`Intersection.pseudo_step` with the semantics of `world_cityflow.Intersection.step`.
 
-    - Zmiana fazy = najpierw `yellow_phase_time` s fazy przejściowej (LibSignal nie
-      zapala w niej `y`, tylko gasi kolidujące sygnały na `r` — jak faza 0 w CityFlow).
-      Akcje w tym czasie są ignorowane, a `current_phase` to wciąż STARA faza; potem
-      faza docelowa, a licznik liczy dalej (tryb 'add' w CityFlow).
-    - Utrzymanie fazy = licznik +1.
-    - Bez przejścia, gdy nic nie gaśnie (`create_yellows` nie zna tej pary faz, np.
-      faza docelowa tylko dokłada zielone) albo `yellow_phase_time == 0` (tryb benchmark).
+    - A phase change first runs `yellow_phase_time` s of a transition phase; actions
+      meanwhile are ignored and `current_phase` is still the OLD phase, then the target
+      phase follows and the counter keeps counting (CityFlow's 'add' mode).
+    - Holding the phase = counter + 1.
+    - No transition when nothing turns red (no yellow for this phase pair) or when
+      `yellow_phase_time == 0` (benchmark mode).
 
-    Każdy krok podtrzymuje fazę w SUMO: fazy programu RL trwają 1 s i bez tego
-    SUMO przełączyłoby je samo.
+    Every step re-sets the phase in SUMO: RL program phases last 1 s, and SUMO would
+    switch them on its own otherwise.
     """
     tl = inter.eng.trafficlight
     action = int(action)
-    inter.virtual_phase = action  # pole upstreamu: ostatnia żądana akcja
-    if inter.transition is not None:  # trwa przejście: (indeks w programie, faza docelowa)
+    inter.virtual_phase = action  # upstream field: the last requested action
+    if inter.transition is not None:  # in transition: (program index, target phase)
         yellow, target = inter.transition
         if inter.current_phase_time == inter.yellow_phase_time:
             inter.transition = None
@@ -158,14 +126,14 @@ def cityflow_transition(inter: Any, action: int) -> None:
 
 
 def travel_time(finished: dict[str, float], entered: dict[str, float], now: float) -> float:
-    """ATT jak CityFlow: (Σ czasów dojechanych + Σ (teraz − wjazd) jadących) / ich liczba."""
+    """ATT as in CityFlow: (sum of finished times + sum of (now - entry) running) / count."""
     running = [now - t for v, t in entered.items() if v not in finished]
     n = len(finished) + len(running)
     return (sum(finished.values()) + sum(running)) / n if n else 0.0
 
 
 def protocol_yellow() -> int | None:
-    """`trainer.yellow_length` z Registry; None poza biegiem (testy, ręczne użycie)."""
+    """`trainer.yellow_length` from the Registry; None outside a run (tests, manual use)."""
     try:
         return int(Registry.mapping["trainer_mapping"]["setting"].param["yellow_length"])
     except (KeyError, AttributeError):
@@ -173,8 +141,8 @@ def protocol_yellow() -> int | None:
 
 
 def _downstream(light: Any, owner: dict[str, str], reach_m: float) -> set[str]:
-    """Sygnalizacje, do których ruch z wylotów `light` dojeżdża przez węzły bez
-    sygnalizacji, na odcinku ≤ `reach_m` (Dijkstra po długościach krawędzi)."""
+    """Signals that traffic from `light`'s exits reaches through unsignalised nodes
+    within `reach_m` (Dijkstra over edge lengths)."""
     me = light.getID()
     exits = {out.getEdge() for _, out, _ in light.getConnections()}
     heap = [(edge.getLength(), edge.getID(), edge) for edge in exits]
@@ -187,7 +155,7 @@ def _downstream(light: Any, owner: dict[str, str], reach_m: float) -> set[str]:
             continue
         seen.add(edge_id)
         other = owner.get(edge.getToNode().getID())
-        if other is not None:  # ścieżka kończy się na PIERWSZEJ sygnalizacji — także własnej
+        if other is not None:  # a path ends at the FIRST signal, its own included
             if other != me:
                 found.add(other)
             continue
@@ -197,25 +165,18 @@ def _downstream(light: Any, owner: dict[str, str], reach_m: float) -> set[str]:
 
 
 def build_graph(net_file: str, reach_m: float = GRAPH_REACH_M) -> dict[str, Any]:
-    """Graf sygnalizacji sieci SUMO w formacie `common/utils.build_index_intersection_map_*`.
+    """Signal graph of a SUMO network in the `common/utils.build_index_intersection_map_*`
+    format, replacing `build_index_intersection_map_sumo`.
 
-    Zastępuje `build_index_intersection_map_sumo`, który łączy dwie sygnalizacje tylko
-    wtedy, gdy JEDNA krawędź prowadzi wprost z węzła do węzła, a id węzła równa się id
-    sygnalizacji. Na sieci z OSM oba warunki zwykle zawodzą: między sygnalizacjami są
-    węzły pośrednie (zjazdy, przejścia), a sygnalizacja złączona (`joinedS_…`) steruje
-    kilkoma węzłami o innych id (Kraków: 8 z 25). Wynik: 1 krawędź na 25 węzłów.
-
-    Tu krawędź t→u (ruch z t dojeżdża do u, więc u agreguje od t) istnieje, gdy od
-    któregoś wylotu t da się dojechać do węzła sterowanego przez u przez węzły bez
-    sygnalizacji, na odcinku ≤ `reach_m`. Id i kolejność węzłów jak w LibSignalu —
-    sieć czytana tym samym `readNet(net_file)` (z `withPrograms` sumolib tworzy
-    sygnalizacje w innej kolejności) i `RoadNetGraph.bare_id`. Krawędzie bez duplikatów
-    i pętli własnych (kontrakt `RoadNetGraph`); `node_degrees`/`node_list`/`edge_list`
-    liczone po krawędziach wjazdowych, jak upstream.
+    Edge t->u (traffic from t reaches u, so u aggregates from t) exists when some exit
+    of t reaches a node controlled by u through unsignalised nodes within `reach_m`.
+    Node ids and order as in LibSignal (the same `readNet(net_file)`, without
+    `withPrograms`, which reorders signals). No duplicate edges or self loops (the
+    `RoadNetGraph` contract); degree lists over incoming edges, as upstream.
     """
     net = sumolib.net.readNet(net_file)
     lights = net.getTrafficLights()
-    # węzeł → sygnalizacja: węzeł, do którego wjeżdżają pasy przez nią sterowane
+    # node -> signal: the node its controlled lanes lead into
     owner = {
         in_lane.getEdge().getToNode().getID(): light.getID()
         for light in lights
@@ -254,10 +215,10 @@ class World(world_sumo.World):
         self.cityflow_api = CityFlowAPI(self)
         self.yellow = protocol_yellow()
         for inter in self.intersections:
-            self._patch(inter, install=False)  # połączenie zamknięte — program wgra reset()
+            self._patch(inter, install=False)  # connection closed; reset() installs the program
 
     def _patch(self, inter: Any, *, install: bool) -> None:
-        """Punkty 4, 7 i 8 z docstringu modułu na jednym skrzyżowaniu."""
+        """Points 4, 7 and 8 of the module docstring on one intersection."""
         lanelinks, startlanes = serving_lanelinks(inter)
         inter.phase_available_lanelinks = lanelinks
         inter.phase_available_startlanes = startlanes
@@ -270,7 +231,7 @@ class World(world_sumo.World):
         inter.full_phases, inter.yellow_dict = inter.create_yellows(
             inter.green_phases, self.yellow, inter.interface_flag
         )
-        if install:  # te same trzy wywołania co na końcu `Intersection.__init__`
+        if install:  # the same three calls as at the end of `Intersection.__init__`
             program = inter.id + "_rl"
             logic = self.eng.trafficlight.Logic(program, 0, 0, inter.full_phases)
             self.eng.trafficlight.setProgramLogic(inter.id, logic)
@@ -278,7 +239,7 @@ class World(world_sumo.World):
 
     def reset(self) -> None:
         kept = self.id2intersection
-        super().reset()  # restart SUMO; upstream buduje tu NOWE obiekty Intersection
+        super().reset()  # restarts SUMO; upstream builds NEW Intersection objects here
         for tl_id, fresh in self.id2intersection.items():
             kept[tl_id].__dict__.update(fresh.__dict__)
         self.id2intersection = {tl_id: kept[tl_id] for tl_id in self.id2intersection}
@@ -287,7 +248,7 @@ class World(world_sumo.World):
             self._patch(inter, install=True)
 
     def get_lane_waiting_vehicle_count(self) -> dict[str, int]:
-        """Punkt 5. Te same klucze co upstream (`inter.lanes`), inna definicja."""
+        """Point 5: the same keys as upstream (`inter.lanes`), another definition."""
         lane = self.eng.lane
         return {
             lid: lane.getLastStepHaltingNumber(lid)
@@ -296,5 +257,5 @@ class World(world_sumo.World):
         }
 
     def get_average_travel_time(self) -> float:
-        """Punkt 6."""
+        """Point 6."""
         return travel_time(self.vehicles, self.inside_vehicles, self.get_current_time())

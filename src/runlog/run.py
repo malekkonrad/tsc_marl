@@ -1,4 +1,4 @@
-"""Pojedynczy bieg: zapis metryk, wyniku i statusu."""
+"""A single run: metrics, result and status."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ from typing import Any
 
 from runlog import store
 
-# Cykl życia biegu. Rozróżnienie ok/failed to nie kosmetyka: bez niego wyszukiwanie
-# "co już policzone" uzna przerwany bieg za zrobiony i cicho pominie brakujący wynik.
+# Run life cycle. ok vs failed matters: without it "what is already computed" would
+# treat an interrupted run as done and silently skip the missing result.
 RUNNING = "running"
 OK = "ok"
 FAILED = "failed"
@@ -23,8 +23,8 @@ def _now() -> str:
 
 
 class Run:
-    """Uchwyt do katalogu biegu. Używaj jako context managera — wtedy status
-    domknie się sam, także gdy trening poleci wyjątkiem."""
+    """Handle to a run directory. Use it as a context manager, so the status is
+    closed even when training raises."""
 
     def __init__(self, path: Path, meta: dict[str, Any]):
         self.path = Path(path)
@@ -32,7 +32,7 @@ class Run:
         self._metrics_file = None
         self._metrics_writer = None
 
-    # ------------------------------------------------------------------ zapis
+    # ------------------------------------------------------------------ writing
 
     @property
     def id(self) -> str:
@@ -40,16 +40,16 @@ class Run:
 
     @property
     def engine_dir(self) -> Path:
-        """Katalog na artefakty obcych narzędzi (checkpointy, logi silnika).
-        Trzymane WEWNĄTRZ biegu, żeby „jeden bieg = jeden katalog" było prawdą."""
+        """Directory for artefacts of external tools (checkpoints, engine logs),
+        INSIDE the run, so "one run = one directory" holds."""
         d = self.path / store.ENGINE
         d.mkdir(parents=True, exist_ok=True)
         return d
 
     def log(self, step: int, split: str = "train", **metrics: float) -> None:
-        """Dopisuje metryki dla danego kroku. Format długi (`step,split,metric,value`),
-        bo różne metody logują różne metryki — DQN `q_loss`, PPO `entropy`/`kl` —
-        a szeroki CSV wymagałby znajomości kolumn z góry i psuł sklejanie biegów."""
+        """Append metrics for a step, in long format (`step,split,metric,value`):
+        methods log different metrics, and a wide CSV would need the columns up
+        front and break concatenating runs."""
         if self._metrics_writer is None:
             path = self.path / store.METRICS
             new = not path.exists()
@@ -61,19 +61,19 @@ class Run:
             if value is None:
                 continue
             self._metrics_writer.writerow([step, split, name, value])
-        # flush po każdym kroku: 7-godzinny trening ma być widoczny w trakcie,
-        # a crash nie może zjeść historii, która już się wydarzyła
+        # flush every step: a long run is visible while it runs, and a crash
+        # cannot eat history that already happened
         self._metrics_file.flush()
 
     def result(self, **values: Any) -> None:
-        """Skalary końcowe biegu — to one trafiają do tabel."""
+        """Final scalars of the run, the ones that go into tables."""
         payload = store.read_json(self.path / store.RESULT) or {}
         payload.update(values)
         store.write_json(self.path / store.RESULT, payload)
 
     def attach_config(self, config: Any) -> None:
-        """Snapshot ROZWIĄZANEGO wejścia — po scaleniu plików i nadpisaniach z CLI.
-        Zamyka dziurę „wiersz wyniku odsyła do pliku, który ktoś potem zmienił"."""
+        """Snapshot of the RESOLVED input, after merging files and CLI overrides, so
+        a result row never points at a file someone changed later."""
         store.write_yaml(self.path / store.CONFIG, config)
 
     def finish(self, status: str = OK, error: str | None = None) -> None:
@@ -105,11 +105,11 @@ class Run:
             self.finish(
                 FAILED, error="".join(traceback.format_exception(exc_type, exc, tb))[-4000:]
             )
-        return False  # nie połykamy wyjątku — status to zapis faktu, nie obsługa błędu
+        return False  # never swallow: the status records a fact, it does not handle errors
 
 
 class RunView:
-    """Bieg wczytany z dysku, tylko do odczytu."""
+    """A run read from disk, read-only."""
 
     def __init__(self, path: Path):
         self.path = Path(path)

@@ -1,9 +1,8 @@
-"""Układ katalogów na dysku i bezpieczne zapisy.
+"""On-disk layout and safe writes.
 
-System plików JEST bazą danych: jeden bieg = jeden katalog, brak centralnego
-indeksu. To nie jest uproszczenie, tylko wymóg — biegi bywają odpalane
-równolegle w osobnych procesach, a wspólny plik indeksu oznaczałby wyścig
-o zapis albo blokady.
+The file system IS the database: one run = one directory, no central index.
+Not a simplification but a requirement: runs execute in parallel processes, and
+a shared index file would mean write races or locks.
 """
 
 from __future__ import annotations
@@ -19,30 +18,29 @@ META = "meta.json"
 RESULT = "result.json"
 METRICS = "metrics.csv"
 CONFIG = "config.resolved.yml"
-ENGINE = "engine"  # artefakty obcych narzędzi (checkpointy, logi silnika)
+ENGINE = "engine"  # artefacts of external tools (checkpoints, engine logs)
 
 METRIC_FIELDS = ("step", "split", "metric", "value")
 
 
 class RunIdCollision(Exception):
-    """Ten sam run_id, inne parametry — nigdy nie nadpisujemy po cichu."""
+    """Same run_id, different parameters: never overwritten silently."""
 
 
 class RunExists(Exception):
-    """Bieg o tym run_id już się policzył (albo właśnie trwa)."""
+    """A run with this run_id is already done (or still running)."""
 
 
 def params_hash(params: dict[str, Any]) -> str:
-    """Stabilny odcisk parametrów. `default=str` żeby Path/enum/np.float nie
-    wywracały serializacji — odcisk ma być powtarzalny, nie ładny."""
+    """Stable parameter fingerprint; `default=str` so Path, enums and numpy floats
+    serialise (the hash must be repeatable, not pretty)."""
     blob = json.dumps(params, sort_keys=True, default=str, ensure_ascii=False)
     return hashlib.sha256(blob.encode()).hexdigest()[:12]
 
 
 def atomic_write(path: Path, text: str) -> None:
-    """Zapis przez plik tymczasowy + `os.replace` (atomowy na POSIX i Windows).
-    Bez tego proces zabity w trakcie zapisu zostawia obcięty JSON, a cały bieg
-    staje się nieczytelny — łącznie z metrykami, które przeżyły."""
+    """Write via a temporary file and `os.replace` (atomic on POSIX and Windows), so
+    a process killed mid-write never leaves a truncated JSON."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
@@ -61,9 +59,8 @@ def write_json(path: Path, payload: Any) -> None:
 
 
 def read_json(path: Path) -> Any | None:
-    """Zwraca None zamiast rzucać: katalog biegu może być w trakcie zapisu albo
-    uszkodzony przez coś spoza narzędzia, a skan po katalogach nie może się
-    wywalić przez jeden zepsuty wpis."""
+    """None instead of raising: a run directory may be mid-write or damaged, and a
+    scan must not fail because of one broken entry."""
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
@@ -71,13 +68,13 @@ def read_json(path: Path) -> Any | None:
 
 
 def write_yaml(path: Path, payload: Any) -> None:
-    import yaml  # noqa: PLC0415 - leniwie: ścieżka zapisu metryk nie ma płacić za import
+    import yaml  # lazy: the metrics write path should not pay for the import
 
     atomic_write(path, yaml.safe_dump(payload, sort_keys=False, allow_unicode=True))
 
 
 def run_dirs(root: Path, experiment: str) -> list[Path]:
-    """Katalogi biegów danego eksperymentu — te, które mają `meta.json`."""
+    """Run directories of an experiment: those with a `meta.json`."""
     base = root / experiment
     if not base.is_dir():
         return []

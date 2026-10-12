@@ -1,81 +1,81 @@
-# ACTION MASKING — ograniczenie wieku obsługi. Faza 4, pierwszy mechanizm celujący
-# w GŁODZENIE, a nie w czas przejazdu.
+# ACTION MASKING: a limit on service age. Phase 4, the first mechanism aimed at STARVATION
+# rather than travel time.
 #
-# PO CO. `results/t2_gate_thr.md` pokazał liczbę, której `att` nie widzi: pod maskami
-# rdzeń zostawia jedną fazę bez zielonego przez 2386–3160 s na JiNan i 2680–3060 s
-# na HangZhou — czyli PONAD 40 z 60 minut epizodu. Degradacja pod awarią detektorów
-# nie polega więc tylko na wydłużeniu przejazdów, ale na PORZUCENIU KIERUNKÓW
-# (`faza3-po-t2.md` §8.7). Ten plan mierzy mechanizm, który to ogranicza wprost.
+# WHY. `results/t2_gate_thr.md` showed a number `att` cannot see: under masks the core
+# leaves one phase without green for 2386-3160 s on JiNan and 2680-3060 s on HangZhou, i.e.
+# MORE THAN 40 of the episode's 60 minutes. Degradation under detector failure is thus not
+# only longer trips but ABANDONED DIRECTIONS (`faza3-po-t2.md` section 8.7). This plan
+# measures a mechanism that limits this directly.
 #
-# MECHANIZM. Per skrzyżowanie: jeśli legalna faza czeka ≥ `k_max` decyzji, akcja
-# polityki jest nadpisywana najstarszą przeterminowaną fazą. Maska NIE CZYTA ŻADNEGO
-# CZUJNIKA — liczy wyłącznie własne akcje — więc jest odporna na awarię detektorów
-# z konstrukcji. Spełnia trzy warunki opłacalności z §7.7 z definicji: nie jest
-# estymatorem niepewności, jest tania gdy się myli (jeden interwał na pustej fazie)
-# i jest DYSKRETNYM ograniczeniem zbioru akcji.
+# MECHANISM. Per intersection: if a legal phase has waited >= `k_max` decisions, the policy's
+# action is overridden with the oldest overdue phase. The mask READS NO SENSOR at all, it
+# only counts its own actions, so it is robust to detector failure by construction. It meets
+# the three profitability conditions of section 7.7 by definition: it is not an uncertainty
+# estimator, it is cheap when wrong (one interval on an empty phase), and it is a DISCRETE
+# restriction of the action set.
 #
-# ⚠ JAK TO CZYTAĆ — DWIE PUŁAPKI METRYKI, obie zapisane PRZED pomiarem:
+# WARNING: HOW TO READ IT, TWO METRIC TRAPS, both recorded BEFORE measurement:
 #
-#   1. NIE czytać samego `att`. Maska zapobiega rzadkim zdarzeniom złym, nie skraca
-#      przejazdu — na ATT spodziewam się ZERA albo lekkiej STRATY. Zero na ATT nie jest
-#      porażką mechanizmu, jest niezgodnością metryki z celem. Ten sam błąd popełniłbym,
-#      mierząc UW-attention liczbą naruszeń.
-#   2. NIE czytać samego `wait_max`. Jest monotoniczny w odsetku nadpisań, więc jego
-#      optimum to „wymuszaj zawsze" (k_max = 1), co jest round-robinem, czyli cyklem
-#      stałym — i kosztuje ~150 s ATT (zmierzone na bramce, §8.7). Metryka ogona sama
-#      w sobie jest celem ZDEGENEROWANYM.
+#   1. Do NOT read `att` alone. The mask prevents rare bad events, it does not shorten
+#      trips; on ATT I expect ZERO or a slight LOSS. A zero on ATT is not a failure of the
+#      mechanism but a mismatch between metric and goal. I would make the same mistake
+#      measuring UW-attention by a violation count.
+#   2. Do NOT read `wait_max` alone. It is monotone in the override rate, so its optimum is
+#      "always force" (k_max = 1), which is round-robin, i.e. a fixed cycle, and costs
+#      ~150 s of ATT (measured on the gate, section 8.7). The tail metric by itself is a
+#      DEGENERATE goal.
 #
-#   Właściwy odczyt to KRZYWA WYMIANY: `att` przeciw `wait_max_demand`, punkt po punkcie
-#   po `k_max`. Dlatego w planie są cztery ograniczenia, nie jedno — pojedyncza kolumna
-#   nie powiedziałaby nic, czego nie wiadomo z góry.
+#   The right reading is the TRADE-OFF CURVE: `att` against `wait_max_demand`, point by point
+#   over `k_max`. That is why the plan has four limits, not one: a single column would say
+#   nothing not known in advance.
 #
-# HIPOTEZY ZAPISANE PRZED POMIAREM:
+# HYPOTHESES RECORDED BEFORE MEASUREMENT:
 #
-#  H1 (gwarancja). `wait_max` kolumny z ograniczeniem `k_max` nie przekroczy
-#     (k_max + liczba_legalnych_faz − 1) × 15 s. To NIE jest twarde k_max: przy kilku
-#     fazach przeterminowanych naraz obsłużyć można jedną. Jeśli zostanie przekroczone,
-#     mechanizm ma błąd, nie „słaby wynik" — i to jest jedyna hipoteza tego planu,
-#     która jest testem POPRAWNOŚCI, nie wyniku.
+#  H1 (guarantee). `wait_max` of a column with limit `k_max` does not exceed
+#     (k_max + number_of_legal_phases - 1) x 15 s. This is NOT a hard k_max: with several
+#     overdue phases at once only one can be served. If exceeded, the mechanism has a bug,
+#     not a "weak result", and this is the only hypothesis of this plan that is a test of
+#     CORRECTNESS rather than of the result.
 #
-#  H2 (cena na czystym). Na `clean` maska prawie nie strzela, bo polityka i tak obraca
-#     fazami: `wait_max` rdzenia na czystym to 545 s (JiNan) ≈ 36 decyzji. Przy k_max=16
-#     spodziewam się więc nadpisań rzędu jednostek procent i Δ att w granicach szumu;
-#     przy k_max=4 maska zacznie nadpisywać na czystym i ATT wzrośnie ISTOTNIE.
-#     Punkt przegięcia jest pytaniem planu, nie tłem.
+#  H2 (price on clean). On `clean` the mask hardly fires, since the policy rotates phases
+#     anyway: the core's `wait_max` on clean is 545 s (JiNan) ~ 36 decisions. At k_max=16 I
+#     therefore expect overrides of a few percent and delta att within noise; at k_max=4 the
+#     mask starts overriding on clean and ATT rises SIGNIFICANTLY.
+#     The knee is the plan's question, not background.
 #
-#  H3 (zysk pod awarią). Największy zysk w `wait_max_demand` przy `mask0p5` i
-#     `mask0p5_intersection` — tam rdzeń głodzi najdłużej (3160 s), a maska nie zależy
-#     od czujników, więc działa dokładnie tak samo jak na czystym. To jest jedyny
-#     mechanizm w tej pracy, którego skuteczność NIE degraduje się z awarią.
+#  H3 (gain under failure). The largest gain in `wait_max_demand` at `mask0p5` and
+#     `mask0p5_intersection`, where the core starves longest (3160 s), and the mask does not
+#     depend on sensors, so it works exactly as on clean. This is the only mechanism in the
+#     thesis whose effectiveness does NOT degrade with failure.
 #
-#  H4 (wobec bramki). Bramka też obniża `wait_max` — ale jako efekt UBOCZNY oddania
-#     sterowania cyklowi stałemu, i tylko na węzłach, które uznała za oślepione. Maska
-#     działa na WSZYSTKICH węzłach i bez detekcji. Spodziewam się, że przy `gauss2`
-#     (gdzie bramka nie strzela ANI RAZU, §8.3) maska będzie jedynym mechanizmem
-#     obniżającym głodzenie. To rozdziela oba mechanizmy czyściej niż ATT.
+#  H4 (vs the gate). The gate also lowers `wait_max`, but as a SIDE effect of handing control
+#     to a fixed cycle, and only at nodes it judged blinded. The mask acts at ALL nodes and
+#     without detection. I expect that under `gauss2` (where the gate does not fire ONCE,
+#     section 8.3) the mask will be the only mechanism reducing starvation. That separates
+#     the two mechanisms more cleanly than ATT.
 #
-# ZAKRES: dwie sieci, 3 seedy, ramię POST HOC (maska na gotowej polityce).
-# HangZhou dopisane 2026-09-20 PO wyniku z JiNan i PO tym, jak `t2_gate_dr` pokazał,
-# że HangZhou potrafi ODWRÓCIĆ wnioski (§8.8: tam sam DR bije bramkę, na JiNan odwrotnie).
-# Maska jest jedynym mechanizmem tej pracy z TWARDĄ GWARANCJĄ, więc zostawienie jej na
-# jednej sieci byłoby najsłabszym punktem najmocniejszego twierdzenia.
+# SCOPE: two networks, 3 seeds, a POST HOC arm (the mask on a finished policy).
+# HangZhou added 2026-09-20 AFTER the JiNan result and AFTER `t2_gate_dr` showed that
+# HangZhou can REVERSE conclusions (section 8.8: there DR alone beats the gate, on JiNan the
+# opposite). The mask is the only mechanism of the thesis with a HARD GUARANTEE, so leaving
+# it on one network would be the weakest point of the strongest claim.
 #
-# CZEGO SIĘ SPODZIEWAĆ, zapisane przed pomiarem: gwarancja (H1) jest niezależna od sieci
-# z KONSTRUKCJI — maska liczy własne akcje, nie odczyty — więc `wait_max` MUSI trzymać
-# się granicy także na HangZhou. Jeśli nie, jest to błąd implementacji, nie wynik.
-# Niepewny jest natomiast KOSZT: HangZhou ma 16 węzłów o innym rozkładzie faz, a rdzeń
-# ma tam na czystym `wait_max` 1000 s wobec 545 s na JiNan (§8.7), czyli polityka
-# obraca fazami WOLNIEJ. Przy tym samym `k_max` maska będzie więc na HangZhou
-# nadpisywać CZĘŚCIEJ, a punkt przegięcia może wypaść przy większym `k_max` niż 16. Ramię trenowane
-# Z MASKĄ wymaga zmiany w pętli treningu i jest osobną pozycją (glider) — a wynik
-# [[bodagala-2026-ucatsc]] („maska doklejona post hoc kasuje naruszenia, ale nie
-# odtwarza zintegrowanego zachowania") oraz §1 tej pracy każą się spodziewać, że
-# post hoc wytnie głodzenie i NIE poprawi przejazdu. Jeśli tak wyjdzie, jest to wynik,
-# nie porażka — i dopiero ramię trenowane rozstrzyga, czy dało się lepiej.
+# WHAT TO EXPECT, recorded before measurement: the guarantee (H1) is network-independent by
+# CONSTRUCTION (the mask counts its own actions, not readings), so `wait_max` MUST stay within
+# the bound on HangZhou too. If not, it is an implementation bug, not a result. The COST,
+# however, is uncertain: HangZhou has 16 nodes with another phase distribution, and the core
+# there has a clean `wait_max` of 1000 s against 545 s on JiNan (section 8.7), i.e. the
+# policy rotates phases MORE SLOWLY. At the same `k_max` the mask will thus override MORE
+# OFTEN on HangZhou, and the knee may fall at a larger `k_max` than 16. An arm trained WITH
+# THE MASK needs a change in the training loop and is a separate item (GPU machine), and the
+# result of [[bodagala-2026-ucatsc]] ("a mask bolted on post hoc removes violations but does
+# not reproduce integrated behaviour") and section 1 of this thesis suggest that post hoc it
+# will cut starvation and NOT improve travel. If so, that is a result, not a failure, and
+# only the trained arm decides whether better was possible.
 #
-# k_max w DECYZJACH (Δt = 15 s): 4 = 1 min, 8 = 2 min, 16 = 4 min, 24 = 6 min.
-# 16 to punkt odniesienia praktyki — maksymalny czerwony w miejskich wytycznych bywa
-# rzędu 2–4 min; wartość NIE jest strojona pod wynik i tak trzeba to opisać.
+# k_max in DECISIONS (dt = 15 s): 4 = 1 min, 8 = 2 min, 16 = 4 min, 24 = 6 min.
+# 16 is the practice reference point: the maximum red in urban guidelines tends to be
+# 2-4 min; the value is NOT tuned to the result and must be described that way.
 name: t2_mask
 mode: realistic
 draws: 5

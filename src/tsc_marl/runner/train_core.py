@@ -24,7 +24,7 @@ DEFAULT_AGENT = "gatppo"
 def parse_args(argv: list[str] | None = None):
     """`train.py`'s parser with another default agent, so flags mean the same in
     both entries (both write runs to the same `runlog`)."""
-    from tsc_marl.runner.train import parse_args as base_parse_args
+    from tsc_marl.libsignal.experiment import parse_args as base_parse_args
 
     argv = list(sys.argv[1:] if argv is None else argv)
     if not any(a in ("-a", "--agent") for a in argv):
@@ -42,6 +42,7 @@ def main(argv: list[str] | None = None) -> None:
 
         from tsc_marl.core.loop import CoreTrainer
         from tsc_marl.core.ppo import PPOConfig
+        from tsc_marl.domain.sensors import FailureMix
         from tsc_marl.robustness import training
         from tsc_marl.robustness.degrade import base_network
 
@@ -51,7 +52,7 @@ def main(argv: list[str] | None = None) -> None:
         # Training with failures and/or UW-attention. Both switches live in the
         # `model` section (part of the fingerprint), not CLI flags, so a different
         # setting invalidates skip-if-done. Without them this is the plain core.
-        failures = training.FailureMix.from_registry()
+        failures = FailureMix.from_registry()
         uw = training.uw_config_from_registry()
 
         # The world comes from Registry, as in `BaseTrainer`, so `-w sumo` takes

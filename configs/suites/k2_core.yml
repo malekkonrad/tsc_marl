@@ -1,20 +1,20 @@
-# Kraków: rdzeń na czystym — POWTÓRKA `k1_core` z zapisem NAJLEPSZEGO checkpointu (`model.save_best`).
+# Krakow: the core on clean traffic, a REPEAT of `k1_core` that saves the BEST checkpoint (`model.save_best`).
 #
-# Po co: w `t2_krakow` polityka przegrała z Websterem już na czystym `mid`, ale jej
-# epizody testowe pod koniec treningu skakały w zakresie ~340–430 s, a `att_best`
-# (320–338 s) leżał PONIŻEJ Webstera (347,6). Pytanie: czy przegrana to wybór końcowego
-# checkpointu, czy możliwości polityki. Odpowiada `t2_krakow_best` na ruchu ODŁOŻONYM
-# (`sumo_krakow3w_mid_s1`) — na `mid` czysty wynik najlepszego checkpointu to z definicji
-# `att_best`, bo epizod testowy treningu = czysty `mid` w `tsc degrade`.
+# Why: in `t2_krakow` the policy lost to Webster already on clean `mid`, but its test
+# episodes late in training jumped within ~340-430 s, and `att_best` (320-338 s) lay
+# BELOW Webster (347.6). Question: is the loss due to the choice of the final checkpoint
+# or to the policy's capability. `t2_krakow_best` answers on HELD-OUT traffic
+# (`sumo_krakow3w_mid_s1`); on `mid` the clean result of the best checkpoint is by
+# definition `att_best`, since a training test episode = clean `mid` in `tsc degrade`.
 #
-# Konfiguracja identyczna z `k1_core` poza `save_best` (test w `test_training.py`); klucz
-# siedzi w `model`, więc zmienia `config_hash` i daje sufiks — biegi `k1_core` zostają.
-# Sufiks run_id: `gatppo__sumo_krakow3w_mid__s<seed>_y5__k2_core`.
+# Configuration identical to `k1_core` except `save_best` (tested in `test_training.py`); the
+# key sits in `model`, so it changes `config_hash` and gives a suffix; the `k1_core` runs stay.
+# run_id suffix: `gatppo__sumo_krakow3w_mid__s<seed>_y5__k2_core`.
 #
 entry: core
 mode: realistic
 timeout: 86400
-ngpu: "-1"           # CPU: wąskim gardłem jest SUMO, a GPU glidera bywa zajęte przez innych
+ngpu: "-1"           # CPU: SUMO is the bottleneck, and the GPU machine's card is often taken
 
 defaults:
   world: sumo

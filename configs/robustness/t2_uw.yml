@@ -1,25 +1,25 @@
-# T2 dla UW-attention — czy ważenie sąsiadów wiarygodnością odczytu pomaga pod awarią.
+# T2 for UW-attention: does weighting neighbours by reading reliability help under failure.
 #
-# Trzy kolumny: rdzeń, rdzeń + UW-attention, FixedTime. Pierwsze dwie liczą się
-# Z TEGO SAMEGO CHECKPOINTU (`parent` ten sam, modulacja jest bezparametrowa), więc
-# różnica między nimi to wyłącznie mechanizm — nie inny trening, nie inny seed.
+# Three columns: the core, the core + UW-attention, FixedTime. The first two are computed
+# FROM THE SAME CHECKPOINT (the same `parent`, the modulation has no parameters), so the
+# difference between them is the mechanism alone, not another training or seed.
 #
-# HIPOTEZA ZAPISANA PRZED POMIAREM (Załącznik A3b): UW-attention pomaga przy szumie
-# i przy CZĘŚCIOWYCH maskach (jeden sąsiad zepsuty, reszta zdrowa), a NIE pomaga przy
-# martwym całym skrzyżowaniu — tam wszystkie krawędzie wchodzące są równie niepewne,
-# a softmax jest na wspólną stałą niezmienniczy (`test_niezmiennicosc_na_wspolna_stala`).
-# Dlatego scenariusze `unit: intersection` zostają w planie: mają wyjść na zero.
+# HYPOTHESIS RECORDED BEFORE MEASUREMENT (Appendix A3b): UW-attention helps under noise
+# and under PARTIAL masks (one neighbour broken, the rest healthy), and does NOT help
+# for a whole dead intersection: there all inbound edges are equally uncertain and
+# softmax is invariant to a shared constant (`test_invariance_to_a_common_constant`).
+# That is why the `unit: intersection` scenarios stay in the plan: they should come out zero.
 #
-# Czego się NIE spodziewać: głowa obserwacyjna nie wykrywa dryfu (AUROC 0,536,
-# results/gate_2_2.md), więc na `drift` modulacja rusza wagami w dużej mierze
-# przypadkowo. To też ma być widać w tabeli.
+# What NOT to expect: the observation head does not detect drift (AUROC 0.536,
+# results/gate_2_2.md), so under `drift` the modulation moves weights largely at
+# random. That should also show in the table.
 #
-# Diagnostyka w wierszach: `uw_spread` (rozstęp log ρ w grupie softmaxu — jedyna
-# część sygnału, którą attention widzi) i `uw_active`. Bez nich pusty wynik jest
-# nieodróżnialny od mechanizmu, który przez cały epizod milczał.
+# Diagnostics in the rows: `uw_spread` (the log rho spread within a softmax group, the
+# only part of the signal attention sees) and `uw_active`. Without them an empty result
+# is indistinguishable from a mechanism that stayed silent the whole episode.
 #
-# WYMAGA artefaktów głowy dla KAŻDEJ sieci planu:
-#   tsc obshead -n <sieć> --save --window 12 --persistence
+# REQUIRES head artefacts for EVERY network of the plan:
+#   tsc obshead -n <network> --save --window 12 --persistence
 name: t2_uw
 mode: realistic
 draws: 5

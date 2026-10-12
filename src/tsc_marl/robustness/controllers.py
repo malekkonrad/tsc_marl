@@ -1,21 +1,18 @@
-"""Sterowniki do ewaluacji pod awarią — WSZYSTKIE czytają tę samą warstwę detektorów.
+"""Controllers evaluated under sensor failure; all read the same detector layer.
 
-DLACZEGO NIE AGENCI LIBSIGNALA. `efficientmp` i `advancedmp` z `libsignal/agents/`
-czytają silnik WPROST (`eng.get_lane_vehicles()`, `world.get_info(...)`), a warstwa
-awarii siedzi wyłącznie w `StateBuilder`. Pod awarią sensora te baseline'y widziałyby
-PRAWDĘ, a polityka śmieci — krzywe degradacji porównywałyby dwie różne rzeczy. Tutaj
-MaxPressure liczy decyzję z WEKTORA STANU zbudowanego przez `StateBuilder` (więc
-z tych samych, popsutych odczytów) przez macierz incydencji faz. Na czystym wejściu
-ta rekonstrukcja zgadza się z agentem co do decyzji na próbkach rozstrzygalnych
-(`uncertainty/dataset.expert_check`: 1,0000); różnice zostają tylko w remisach, gdzie
-o wyniku decyduje ostatni bit sumowania.
+Why not the LibSignal agents: `efficientmp` and `advancedmp` read the engine
+directly, while the failure layer lives only in `StateBuilder`, so under failure
+they would see the truth and the policy the corrupted data. Here max-pressure
+decides from the OBSERVATION built by `StateBuilder`, through the phase-movement
+incidence. On clean input it reproduces the agent's decisions on every decidable
+sample (`uncertainty/dataset.expert_check`); differences remain only in ties.
 
-Kontrakt: `act(obs)` dostaje obserwację [N, ob_length] w kolejności WĘZŁÓW GRAFU
-i zwraca akcje [N] w tej samej kolejności — przenumerowanie na kolejność świata robi
-`TrafficEnv.step`, jedno miejsce dla wszystkich sterowników.
+Contract: `act(obs)` takes [N, ob_length] in GRAPH order and returns actions [N]
+in the same order; `TrafficEnv.step` permutes them for the engine, once for all
+controllers. Wrappers are controllers too, so they compose.
 
-`state_independent` = sterownik nie czyta obserwacji (FixedTime). Ewaluator liczy go
-wtedy tylko na czystym scenariuszu — pod awarią ma z definicji ten sam wynik.
+`state_independent` = the controller does not read observations (FixedTime); the
+evaluator then runs it on the clean scenario only.
 """
 
 from __future__ import annotations
@@ -35,22 +32,15 @@ class Controller(Protocol):
 
 
 class Gate(Protocol):
-    """Sygnał bramki fallbacku: [N] bool, True = ten węzeł oddaje sterowanie regule.
+    """Fallback gate: [N] bool, True = this node hands control to the rule.
 
-    Trzy implementacje różnią się WYŁĄCZNIE sposobem liczenia maski — wyrocznia
-    (prawda z warstwy awarii, górne ograniczenie), reguła (utknięte/zerowe odczyty
-    z okna) i UQ (głowa obserwacyjna). Powłoka `GatedController` jest jedna, więc
-    histereza, diagnostyka i test no-op piszą się raz dla wszystkich trzech.
+    The three implementations (oracle, rule, UQ) differ only in how the mask is
+    computed, so hysteresis, diagnostics and the no-op test live in one wrapper,
+    `GatedController`. `obs` may be unused (the oracle reads the failure layer).
 
-    `obs` w sygnaturze `mask` bywa nieużywane (wyrocznia czyta warstwę awarii, nie
-    obserwację) i tak ma zostać: powłoka woła każdą bramkę tak samo.
-
-    `last_score` [N] float — SUROWY wynik z ostatniego `mask()`, przed progiem
-    i przed histerezą. Wszystkie trzy bramki liczą go i tak (ułamek martwych wlotów /
-    zamrożonych ruchów / ruchów ponad `u_ref`), więc wystawienie go nic nie kosztuje,
-    a jest jedyną wielkością, z której da się odpowiedzieć na pytanie „DLACZEGO ten
-    węzeł oddał sterowanie" — sama maska mówi tylko, że oddał. Przed pierwszym
-    `mask()` i w oknie rozgrzewki jest wektorem zer.
+    `last_score` [N] float is the RAW score of the last `mask()`, before the
+    threshold and hysteresis: the only quantity that answers WHY a node switched.
+    Zeros before the first call and during warm-up.
     """
 
     last_score: np.ndarray
@@ -61,13 +51,12 @@ class Gate(Protocol):
 
 
 class PressureController:
-    """Efficient-MP (`w1=None`) albo Advanced-MP (Alg. 1) liczony z wektora stanu.
+    """Efficient-MP (`w1=None`) or Advanced-MP (Alg 1) computed from the observation.
 
-    p(s) = Σ_{(l,m)∈s} e(l,m) — blok EP (pierwsze `n_mov` kolumn);
-    d(s) = Σ_{(l,m)∈s} r(l,m) — blok demand (kolejne `n_mov`, tylko stan `ats`).
-    Zatrzask minimalnego zielonego (`current_phase_time < t_min`) jak w agencie:
-    tej informacji nie ma w stanie, ale nie jest odczytem detektora, tylko stanem
-    sterownika, więc awaria sensora jej nie dotyczy.
+    p(s) = sum over the phase's movements of the EP block (first `n_mov` columns);
+    d(s) = the same over the demand block (next `n_mov`, `ats` state only).
+    The minimum-green latch (`current_phase_time < t_min`) is controller state,
+    not a detector reading, so sensor failure does not affect it.
     """
 
     state_independent = False
@@ -83,7 +72,7 @@ class PressureController:
         name: str | None = None,
     ) -> None:
         if incidence.shape[0] != len(intersections) or incidence.shape[2] != n_mov:
-            raise ValueError(f"incydencja {incidence.shape} nie pasuje do N={len(intersections)}")
+            raise ValueError(f"incidence {incidence.shape} does not match N={len(intersections)}")
         self.incidence = incidence.astype(np.float64)
         self.intersections = list(intersections)
         self.n_mov = n_mov
@@ -94,7 +83,7 @@ class PressureController:
     def act(self, obs: np.ndarray) -> np.ndarray:
         x = np.asarray(obs, dtype=np.float64)
         if self.w1 is not None and x.shape[1] < 2 * self.n_mov:
-            raise ValueError("Advanced-MP potrzebuje bloku demand — stan musi być `ats`")
+            raise ValueError("Advanced-MP needs the demand block; the state must be `ats`")
         pressure = np.einsum("npm,nm->np", self.incidence, x[:, : self.n_mov])
         choice = pressure.argmax(-1)
         cur = np.array([inter.current_phase for inter in self.intersections], dtype=np.int64)
@@ -109,21 +98,14 @@ class PressureController:
 
 
 class FixedTimeController:
-    """Jak `agent/fixedtime.py`: trzymaj fazę `t_fixed` sekund, potem następna.
-    Jedyny sterownik niezależny od odczytów — dolna warstwa fallbacku z planu.
+    """As `agent/fixedtime.py`: hold a phase `t_fixed` seconds, then the next one.
+    The only controller independent of readings (the fallback rule).
 
-    `greens` (opcjonalnie): {id skrzyżowania: {stan sygnałów fazy: zielone [s]}} —
-    program WEBSTERA (Kraków, `data/raw_data/krakow_3w/build.py webster`). Dopasowanie
-    po STANIE fazy (`inter.green_phases[k].state`), nie po indeksie: adapter SUMO odkrywa
-    fazy symulacją, więc indeks akcji nie musi być indeksem fazy w programie. Bez
-    `greens` każda faza trzyma `t_fixed` (JiNan/HangZhou — liczby się nie zmieniają).
-
-    PRÓG Z WEBSTEREM = żółte + zielone. Licznik `current_phase_time` nowej fazy rusza
-    razem z fazą przejściową (`sumo_world`: zmiana fazy zeruje licznik, a po żółtym
-    tylko podmienia `current_phase`), więc sam czas zielonego jako próg obcinałby
-    każdą fazę o długość żółtego. Przy `t_fixed` tej korekty nie ma, bo LibSignalowe
-    `t_fixed` i tak było liczone tym samym licznikiem — zostaje bez zmian, żeby
-    kolumna `fixedtime` z T1/T2 była tą samą liczbą.
+    `greens` (optional): {intersection id: {phase signal state: green [s]}}, a
+    Webster programme (Krakow, `data/raw_data/krakow_3w/build.py webster`).
+    Matched by the phase STATE, not the index, since the SUMO adapter discovers
+    phases by simulation. With `greens` the limit is yellow + green, because the
+    phase timer starts with the transition; without it every phase holds `t_fixed`.
     """
 
     state_independent = True
@@ -142,21 +124,21 @@ class FixedTimeController:
         self.name = name
         self.limits: list[list[float]] | None = None
         if greens is not None:
-            brak = [i.id for i in self.intersections if i.id not in greens]
-            if brak:
-                raise ValueError(f"program stałoczasowy bez skrzyżowań: {brak[:5]}")
+            missing = [i.id for i in self.intersections if i.id not in greens]
+            if missing:
+                raise ValueError(f"fixed-time programme without intersections: {missing[:5]}")
             self.limits = []
             for inter in self.intersections:
-                program = greens[inter.id]
-                stany = [ph.state for ph in inter.green_phases]
-                brak = [st for st in stany if st not in program]
-                if brak or len(stany) != len(program):
+                programme = greens[inter.id]
+                states = [ph.state for ph in inter.green_phases]
+                unmatched = [st for st in states if st not in programme]
+                if unmatched or len(states) != len(programme):
                     raise ValueError(
-                        f"{inter.id}: program ma {len(program)} faz zielonych, skrzyżowanie "
-                        f"{len(stany)} (bez dopasowania: {brak[:2]}) — struktura faz "
-                        "rozjechała się z siecią"
+                        f"{inter.id}: programme has {len(programme)} green phases, the "
+                        f"intersection {len(states)} (unmatched: {unmatched[:2]}); the phase "
+                        "structure no longer matches the network"
                     )
-                self.limits.append([yellow + program[st] for st in stany])
+                self.limits.append([yellow + programme[st] for st in states])
 
     def act(self, obs: np.ndarray) -> np.ndarray:
         return np.array(
@@ -176,8 +158,7 @@ class FixedTimeController:
 
 
 class PolicyController:
-    """Actor rdzenia (GAT+PPO+CTDE): argmax po logitach, TYLKO actor — jak w
-    `CoreTrainer.evaluate` i jak na docelowym urządzeniu brzegowym."""
+    """The core's actor: argmax over logits, actor only (as in `CoreTrainer.evaluate`)."""
 
     state_independent = False
 
@@ -193,22 +174,13 @@ class PolicyController:
 
 
 class UWPolicyController:
-    """Actor rdzenia + modulacja wiarygodnością krawędzi (Faza 3, UW-attention).
+    """The core's actor with attention modulated by edge reliability (UW-attention).
 
-    TE SAME WAGI co `PolicyController` i to jest sedno kolumny w T2: modulacja jest
-    BEZPARAMETROWA (log ρ przychodzi z zewnątrz, `state_dict` się nie zmienia), więc
-    „rdzeń" i „rdzeń + UW-attention" liczą się z jednego checkpointu z `runs/t1`.
-    Różnica między kolumnami to wyłącznie mechanizm, nie inny trening, nie inny seed.
-
-    Co się dzieje w `act`: odczyt ląduje w oknie głowy obserwacyjnej -> σ na cechę
-    -> u na ruch -> u na krawędź (średnia — kryterium (f) bramki 2.2) -> log ρ =
-    −relu(u − u_ref)/τ -> attention waży sąsiadów tą liczbą. Wszystko z TEGO SAMEGO
-    popsutego wektora stanu, który dostaje polityka: głowa nie ma dostępu do prawdy
-    ani do warstwy awarii, tak jak nie miałaby go na skrzyżowaniu.
-
-    `reset_stats` czyści bufor okna — `robustness/degrade.py` woła go na starcie
-    każdego epizodu. Bez tego pierwsze kroki epizodu liczyłyby u z odczytów sprzed
-    `world.reset()`, czyli z zupełnie innego stanu ruchu.
+    The SAME weights as `PolicyController`: the modulation has no parameters
+    (log_rho comes from outside), so "core" and "core + UW" are computed from one
+    checkpoint and differ only in the mechanism. log_rho is derived from the same
+    corrupted observation the policy gets; the source has no access to the truth.
+    `reset_stats` clears the source's window at the start of every episode.
     """
 
     state_independent = False
@@ -233,7 +205,7 @@ class UWPolicyController:
 
     @torch.no_grad()
     def act(self, obs: np.ndarray) -> np.ndarray:
-        from tsc_marl.uncertainty.obs_head import group_spread  # noqa: PLC0415
+        from tsc_marl.uncertainty.obs_head import group_spread
 
         x = torch.from_numpy(np.asarray(obs, dtype=np.float32))
         log_rho = self.uncertainty.log_rho(obs)
@@ -242,12 +214,9 @@ class UWPolicyController:
         return self.actor(x, self.edge_index, log_rho=log_rho).argmax(-1).numpy().astype(np.int64)
 
     def episode_stats(self) -> dict[str, float]:
-        """Diagnostyka „czy mechanizm w ogóle zadziałał" — bez niej pusty wynik T2
-        jest nieodróżnialny od mechanizmu, który przez cały epizod milczał.
-
-        `uw_spread` to rozstęp log ρ w grupie softmaxu, czyli JEDYNA część sygnału,
-        którą attention widzi (na stałą wspólną dla grupy jest niezmienniczy).
-        """
+        """Did the mechanism act at all; otherwise a null result cannot be told
+        apart from a mechanism that stayed silent. `uw_spread` is the spread of
+        log_rho within a softmax group, the only part attention can see."""
         if not self._spread:
             return {}
         return {
@@ -258,27 +227,16 @@ class UWPolicyController:
 
 
 class GatedController:
-    """Polityka + reguła pod jedną bramką: akcja KAŻDEGO węzła z jednego albo drugiego.
+    """Policy and rule under one gate: each node's action comes from one of them.
 
-    DOMYŚLNIE OWIJA ZWYKŁĄ POLITYKĘ, a nie `UWPolicyController`: kolumna w T2 ma się
-    różnić od kolumny rdzenia DOKŁADNIE jedną rzeczą. Owinięcie sterownika z
-    modulacją attention mierzy bramkę I modulację naraz — i to jest dozwolone
-    wyłącznie jako ZŁOŻENIE z jawnym `baseline:` wskazującym kolumnę z samą bramką
-    (plan `t2_uw_rule`). Wtedy para różni się znowu jedną rzeczą: modulacją u sąsiadów
-    węzła, który bramka już przełączyła. Bramka naprawia WŁASNĄ decyzję martwego
-    węzła, UW — decyzje jego zdrowych sąsiadów, które czytają jego wiadomość.
+    Wraps the PLAIN policy by default, so the column differs from the core's by
+    exactly one thing; wrapping a UW policy is allowed only as a composition with
+    an explicit `baseline:` in the plan. Per node, not global: when a part of the
+    network fails, a global gate would have to choose between breaking the
+    healthy nodes and leaving the blind ones.
 
-    DLACZEGO PER WĘZEŁ, a nie globalnie: `mask0p25_intersection` to 25% skrzyżowań
-    martwych i 75% zdrowych, a globalnie rdzeń (510,0 s) i FixedTime (507,0 s) idą
-    łeb w łeb — średnia ukrywa katastrofę na jednej czwartej sieci. Bramka globalna
-    musiałaby wybrać między zepsuciem zdrowych a zostawieniem martwych. Akcje i tak
-    są per węzeł, więc to nic nie kosztuje.
-
-    OBA STEROWNIKI WOŁANE W KAŻDEJ DECYZJI, dla wszystkich węzłów; maska tylko
-    wybiera. Przy `FixedTimeController` jest to obojętne (czyta stan świata, nie
-    obserwację), ale przy bramkowaniu sterownika z PAMIĘCIĄ — `UWPolicyController`
-    trzyma okno ostatnich odczytów — pominięcie wywołania zrobiłoby dziurę w oknie.
-    Kontrakt „wołamy oba zawsze" zostaje więc częścią powłoki, nie szczegółem.
+    BOTH controllers are called every decision for every node and the mask only
+    selects; a controller with memory (a reading window) would otherwise get holes.
     """
 
     state_independent = False
@@ -298,46 +256,24 @@ class GatedController:
         self.policy = policy
         self.rule = rule
         self.gate = gate
-        # ŚLAD PER (DECYZJA, WĘZEŁ) — wyłączony domyślnie. Wyjaśnia pojedyncze
-        # przełączenie („dlaczego TO skrzyżowanie oddało sterowanie w 47. decyzji"),
-        # czego żadna metryka epizodu nie umie: `gate_share` mówi ILE, nie KTÓRE
-        # i KIEDY. Włącza go `tsc degrade run --trace`, a NIE klucz w planie —
-        # celowo, bo `gate` wchodzi do odcisku biegu (`MECHANISM_KEYS`) i dopisanie
-        # tam flagi logowania unieważniłoby wszystkie policzone punkty, choć nie
-        # zmienia ani jednej decyzji.
+        # Per (decision, node) trace, off by default. Enabled by `tsc degrade run
+        # --trace`, not by a plan key: plan keys enter the run fingerprint
+        # (`MECHANISM_KEYS`), and logging changes no decision.
         self.trace = trace
-        # HISTEREZA: wejście po `k_on` kolejnych decyzjach powyżej progu, wyjście po
-        # `k_off` poniżej. Asymetria (k_off > k_on) celowa — wchodź ostrożnie, wychodź
-        # jeszcze ostrożniej. Bez niej bramka o szumiącym sygnale migocze co decyzję,
-        # a każde przełączenie resetuje fazę i psuje ruch bardziej niż jeden zły wybór.
-        #
-        # DOMYŚLNIE WYŁĄCZONA (1, 1) z dwóch powodów. Wyrocznia z `t2_gate` była
-        # zmierzona bez niej i włączenie jej domyślnie po cichu zmieniłoby te liczby.
-        # A poza tym to parametr MECHANIZMU: należy do planu, a stamtąd do odcisku
-        # biegu (`MECHANISM_KEYS`), żeby jego zmiana unieważniała wynik zamiast go
-        # dziedziczyć. Sygnał wyroczni jest stały w epizodzie, więc jej histereza i
-        # tak nic nie zmienia — potrzebują jej bramki realne.
+        # Hysteresis: switch on after `k_on` consecutive decisions above the
+        # threshold, off after `k_off` below. Off by default (1, 1); a mechanism
+        # parameter that belongs in the plan and so in the fingerprint.
         self.k_on, self.k_off = k_on, k_off
-        # WYŁĄCZNIE DIAGNOSTYKA. Wyrocznia czyta prawdę z warstwy awarii, więc nie
-        # ma prawa dotknąć decyzji — służy do policzenia precyzji i czułości bramki
-        # realnej, czyli do rozdzielenia „detektor jest słaby" od „przełączanie mało
-        # daje". Te dwie rzeczy samo ATT skleja.
-        #
-        # Jej próg definiuje, co UZNAJEMY za węzeł oślepiony, i jest NIEZALEŻNY od
-        # progu, na którym pracuje kolumna-wyrocznia. Zbyt ostry (0,75) daje przy
-        # maskach pasowych zbiór pusty i obie metryki stają się nieokreślone —
-        # zmierzone: przy `mask0p5` wyrocznia@0,75 nie wskazała ani jednego węzła.
+        # DIAGNOSTICS ONLY: the oracle reads the truth and never touches decisions.
+        # It gives the real gate's precision and recall, separating "the detector
+        # is weak" from "switching helps little", which ATT alone mixes up.
         self.oracle = oracle
         self.name = name
         self.reset_stats()
 
     def reset_stats(self) -> None:
-        """Woła też `gate.reset()` — i to jest tu najważniejsze. Wyrocznia jest
-        bezstanowa, ale bramka UQ trzyma okno odczytów, a `robustness/degrade.py`
-        odpala `reset_stats` na starcie każdego epizodu. Bez tej delegacji okno
-        wchodziłoby w nowy epizod z odczytami sprzed `world.reset()`, czyli z
-        zupełnie innego stanu ruchu. To samo dotyczy polityki z pamięcią
-        (`UWPolicyController` w złożeniu) — stąd delegacja także do niej."""
+        """Also resets the gate (and the oracle and a policy with memory): their
+        windows must not carry readings from before `world.reset()`."""
         self.gate.reset()
         if self.oracle is not None:
             self.oracle.reset()
@@ -346,119 +282,95 @@ class GatedController:
         self._share: list[float] = []
         self._switches = 0
         self._previous: np.ndarray | None = None
-        self._licznik: np.ndarray | None = None  # kolejne decyzje po tej samej stronie progu
-        self._trafienia = np.zeros(3)  # [wspólne, tylko bramka, tylko wyrocznia]
+        self._streak: np.ndarray | None = None  # consecutive decisions on the same side
+        self._hits = np.zeros(3)  # [both, gate only, oracle only]
         self._trace: list[tuple[int, int, float, bool, bool]] = []
 
     def act(self, obs: np.ndarray) -> np.ndarray:
-        surowa = self.gate.mask(obs)
-        maska = self._hysteresis(surowa)
+        raw = self.gate.mask(obs)
+        mask = self._hysteresis(raw)
         if self.oracle is not None:
-            prawda = self.oracle.mask(obs)
-            self._trafienia += [
-                float((maska & prawda).sum()),
-                float((maska & ~prawda).sum()),
-                float((~maska & prawda).sum()),
+            truth = self.oracle.mask(obs)
+            self._hits += [
+                float((mask & truth).sum()),
+                float((mask & ~truth).sum()),
+                float((~mask & truth).sum()),
             ]
-        self._share.append(float(np.mean(maska)))
+        self._share.append(float(np.mean(mask)))
         if self._previous is not None:
-            self._switches += int((maska != self._previous).sum())
+            self._switches += int((mask != self._previous).sum())
         if self.trace:
-            # Zapisujemy SUROWY wynik i obie maski: bez surowego nie widać, czy węzeł
-            # był tuż pod progiem, a bez rozdzielenia surowa/po histerezie nie da się
-            # odróżnić „detektor nie zadziałał" od „histereza jeszcze nie przepuściła".
-            wynik = getattr(self.gate, "last_score", None)
-            decyzja = len(self._share) - 1
-            for node in range(len(maska)):
+            # The raw score and both masks: without the raw score one cannot see a
+            # node just below the threshold, without both masks "the detector did
+            # not fire" looks like "hysteresis has not let it through yet".
+            score = getattr(self.gate, "last_score", None)
+            decision = len(self._share) - 1
+            for node in range(len(mask)):
                 self._trace.append(
                     (
-                        decyzja,
+                        decision,
                         node,
-                        float(wynik[node]) if wynik is not None else float("nan"),
-                        bool(surowa[node]),
-                        bool(maska[node]),
+                        float(score[node]) if score is not None else float("nan"),
+                        bool(raw[node]),
+                        bool(mask[node]),
                     )
                 )
-        self._previous = maska
-        return np.where(maska, self.rule.act(obs), self.policy.act(obs))
+        self._previous = mask
+        return np.where(mask, self.rule.act(obs), self.policy.act(obs))
 
-    def _hysteresis(self, surowa: np.ndarray) -> np.ndarray:
-        """Surowa maska -> maska po histerezie, per węzeł."""
-        if self._previous is None:  # pierwsza decyzja: nie ma czego wygładzać
-            self._licznik = np.zeros(len(surowa), dtype=int)
-            return surowa
-        zgodne = surowa != self._previous
-        self._licznik = np.where(zgodne, self._licznik + 1, 0)
-        prog = np.where(self._previous, self.k_off, self.k_on)
-        zmiana = zgodne & (self._licznik >= prog)
-        self._licznik = np.where(zmiana, 0, self._licznik)
-        return np.where(zmiana, surowa, self._previous)
+    def _hysteresis(self, raw: np.ndarray) -> np.ndarray:
+        """Raw mask -> mask after hysteresis, per node."""
+        if self._previous is None:  # first decision: nothing to smooth
+            self._streak = np.zeros(len(raw), dtype=int)
+            return raw
+        differs = raw != self._previous
+        self._streak = np.where(differs, self._streak + 1, 0)
+        needed = np.where(self._previous, self.k_off, self.k_on)
+        switch = differs & (self._streak >= needed)
+        self._streak = np.where(switch, 0, self._streak)
+        return np.where(switch, raw, self._previous)
 
     def episode_trace(self) -> list[tuple[int, int, float, bool, bool]]:
-        """Ślad epizodu: [(decyzja, węzeł, wynik surowy, maska surowa, tryb reguły)].
-
-        Pusty, gdy `trace=False`. Czyści go `reset_stats`, czyli start epizodu —
-        ta sama granica, na której zerują się `gate_share` i histereza."""
+        """[(decision, node, raw score, raw mask, rule mode)]; empty without `trace`,
+        cleared at the start of each episode."""
         return self._trace
 
     def episode_stats(self) -> dict[str, float]:
-        """Diagnostyka „czy bramka w ogóle strzeliła" — bez niej pusty wynik jest
-        nieodróżnialny od bramki, która przez cały epizod milczała (ta sama lekcja
-        co `uw_spread` przy UW-attention). `gate_switches` liczy zmiany trybu na
-        węzłach, bo to one, a nie sam odsetek, psują ruch przez reset fazy."""
+        """Did the gate fire at all. `gate_switches` counts mode changes, which
+        (rather than the share itself) disturb traffic by resetting phases."""
         if not self._share:
             return {}
         out = {
             "gate_share": float(np.mean(self._share)),
             "gate_switches": float(self._switches),
         }
-        # Precyzja i czułość TYLKO gdy mianownik istnieje. Przy scenariuszu bez awarii
-        # (albo gdy odniesienie nie wskazało ani jednego węzła) „0,00" czytałoby się
-        # jak zła detekcja, a znaczy „nie było czego wykrywać".
-        wspolne, falszywe, przeoczone = self._trafienia
-        if wspolne + falszywe > 0:
-            out["gate_precision"] = float(wspolne / (wspolne + falszywe))
-        if wspolne + przeoczone > 0:
-            out["gate_recall"] = float(wspolne / (wspolne + przeoczone))
-        # złożenie z UW: `uw_spread` polityki obok diagnostyki bramki, inaczej
-        # nie da się odróżnić „modulacja milczała" od „modulacja nie pomogła"
+        # Precision and recall only with a non-zero denominator: without failures
+        # "0.00" would read as bad detection, while it means nothing to detect.
+        both, false_alarm, missed = self._hits
+        if both + false_alarm > 0:
+            out["gate_precision"] = float(both / (both + false_alarm))
+        if both + missed > 0:
+            out["gate_recall"] = float(both / (both + missed))
+        # in a composition with UW, the policy's `uw_spread` next to the gate stats
         if hasattr(self.policy, "episode_stats"):
             out |= self.policy.episode_stats()
         return out
 
 
 class MaskedController:
-    """ACTION MASKING: twarde ograniczenie WIEKU OBSŁUGI. Żadna legalna faza nie może
-    czekać dłużej niż `k_max` decyzji — gdy czeka, maska nadpisuje wybór polityki
-    najstarszą przeterminowaną fazą.
+    """Action masking: a hard limit on SERVICE AGE. No existing phase may wait more
+    than `k_max` decisions; when one does, the oldest overdue phase overrides the
+    policy's choice.
 
-    DLACZEGO BEZ SYGNAŁU O POPYCIE, choć „wymuś tylko tam, gdzie ktoś stoi" brzmi
-    mądrzej. Dwa powody, oba rozstrzygające:
+    No demand signal, on purpose: per-movement demand is not readable from the
+    observation without an arbitrary threshold (EP can be negative), and reading
+    the engine would be an oracle. The mask reads NO sensor, only its own actions,
+    so it is robust to sensor failure by construction.
 
-    1. **Deployowalność.** Popyt per RUCH dałoby się czytać z wektora obserwacji, ale
-       pierwszy blok cech to przy stanie `ats` znormalizowane ciśnienie ruchu, które
-       bywa UJEMNE — „popyt > 0" nie jest z niego odczytywalny bez arbitralnego progu.
-       Czytanie prawdy z silnika byłoby wyrocznią, nie sterownikiem.
-    2. **Odporność z KONSTRUKCJI.** Ta maska nie czyta ŻADNEGO czujnika — liczy
-       wyłącznie własne akcje. Jest więc niewrażliwa na awarię detektorów, a to jest
-       dokładnie reżim, w którym rdzeń porzuca kierunki: pod maskami `wait_max` rdzenia
-       to 2386–3160 s przy epizodzie 3600 s (`faza3-po-t2.md` §8.7). Mechanizm, który
-       tego nie widzi przez czujnik, bo go nie potrzebuje, jest w tym reżimie mocniejszy
-       niż jakikolwiek oparty na odczytach.
-
-    Spełnia trzy warunki opłacalności z §7.7 Z DEFINICJI: (1) nie jest estymatorem
-    niepewności, tylko licznikiem własnych decyzji; (2) jest tani, gdy się myli —
-    wymuszenie pustej fazy kosztuje jeden interwał; (3) jest DYSKRETNYM ograniczeniem
-    zbioru akcji, nie ciągłym przeważeniem, na które polityka nie była trenowana.
-
-    OGRANICZENIE GWARANCJI, do nazwania w tekście. Przy jednej przeterminowanej fazie
-    na węzeł wiek nie przekroczy `k_max + 1` decyzji. Gdy przeterminowanych jest kilka
-    naraz, obsłużyć można jedną, więc w najgorszym razie wiek dobija do
-    `k_max + liczba_legalnych_faz − 1`. To NIE jest twarde `k_max` i tak trzeba to podać.
-
-    CZEGO TA MASKA NIE ROBI: nie dotyka strefy dylematu (wymaga prędkości i odległości
-    pojazdu, czego stan nie niesie — u [[bodagala-2026-ucatsc]] to osobny filtr na SUMO)
-    ani minimalnego zielonego (`t_min` pilnuje zatrzask w silniku).
+    Guarantee, stated exactly: with one overdue phase per node the age stays
+    <= `k_max + 1` decisions; with several overdue at once only one can be served,
+    so the worst case is `k_max + n_legal_phases - 1`. It is not a hard `k_max`.
+    It does not handle the dilemma zone or minimum green (the engine's `t_min`).
     """
 
     def __init__(
@@ -470,113 +382,85 @@ class MaskedController:
         name: str = "masked",
     ) -> None:
         if k_max < 1:
-            raise ValueError(f"k_max musi być ≥ 1, jest {k_max}")
+            raise ValueError(f"k_max must be >= 1, got {k_max}")
         self.policy = policy
-        self.legal = np.asarray(legal, dtype=bool)  # [N, n_faz]
+        self.legal = np.asarray(legal, dtype=bool)  # [N, n_phases]
         self.k_max = int(k_max)
         self.name = name
         self.reset_stats()
 
     def reset_stats(self) -> None:
-        """Zeruje wiek na starcie epizodu — tak jak `GatedController` zeruje okno
-        i histerezę. Bez tego pierwsze decyzje nowego epizodu wymuszałyby fazy na
-        podstawie zaległości z poprzedniego."""
+        """Zero the ages at episode start, or a new episode would force phases
+        from the previous one's backlog."""
         self._since = np.zeros(self.legal.shape, dtype=np.int64)
-        self._nadpisane = 0
-        self._decyzje = 0
+        self._overridden = 0
+        self._decisions = 0
 
     def act(self, obs: np.ndarray) -> np.ndarray:
-        akcje = np.asarray(self.policy.act(obs), dtype=np.int64).copy()
-        # Przeterminowane = legalne ORAZ czekające co najmniej `k_max` decyzji.
-        spozniona = self.legal & (self._since >= self.k_max)
-        wymus = spozniona.any(-1)
-        if wymus.any():
-            # NAJSTARSZA przeterminowana, nie pierwsza z indeksu: przy kilku naraz
-            # kolejność po wieku daje round-robin, a po indeksie zagłodziłaby ostatnią.
-            wiek = np.where(spozniona, self._since, -1)
-            wybor = wiek.argmax(-1)
-            self._nadpisane += int((wymus & (akcje != wybor)).sum())
-            akcje = np.where(wymus, wybor, akcje)
+        actions = np.asarray(self.policy.act(obs), dtype=np.int64).copy()
+        # overdue = legal AND waiting at least `k_max` decisions
+        overdue = self.legal & (self._since >= self.k_max)
+        force = overdue.any(-1)
+        if force.any():
+            # the OLDEST overdue phase, not the first by index: round-robin when
+            # several are overdue, where index order would starve the last one
+            age = np.where(overdue, self._since, -1)
+            choice = age.argmax(-1)
+            self._overridden += int((force & (actions != choice)).sum())
+            actions = np.where(force, choice, actions)
         self._since += 1
-        self._since[np.arange(len(akcje)), akcje] = 0
-        self._decyzje += 1
-        return akcje
+        self._since[np.arange(len(actions)), actions] = 0
+        self._decisions += 1
+        return actions
 
     def episode_stats(self) -> dict[str, float]:
-        """`mask_share` = odsetek par (decyzja, węzeł), w których maska ZMIENIŁA akcję
-        polityki — nie tych, w których była aktywna i zgodziła się z polityką. Ta sama
-        zasada co przy `gate_share` i z tego samego powodu: mechanizm, który nic nie
-        nadpisał, jest wobec wyniku no-opem i musi to być widoczne."""
-        if not self._decyzje:
+        """`mask_share` = share of (decision, node) pairs where the mask CHANGED the
+        policy's action; a mask that never overrode anything is a no-op."""
+        if not self._decisions:
             return {}
         return {
-            "mask_share": float(self._nadpisane / (self._decyzje * len(self.legal))),
-            "mask_forced": float(self._nadpisane),
+            "mask_share": float(self._overridden / (self._decisions * len(self.legal))),
+            "mask_forced": float(self._overridden),
         }
 
 
 class OracleGate:
-    """Bramka-WYROCZNIA: czyta prawdę z warstwy awarii, nie z obserwacji.
+    """Oracle gate: reads the truth from the failure layer, not the observation.
 
-    Nie jest sterownikiem do wdrożenia — jest GÓRNYM OGRANICZENIEM dla bramek
-    realnych (reguła, UQ). Jeśli przy idealnej detekcji przełączanie nic nie daje,
-    żaden detektor nie da więcej i nie ma po co go budować. Dlatego powstaje
-    PIERWSZA, przed kalibracją jakiegokolwiek progu.
+    Not a deployable controller but an UPPER BOUND for the real gates: if
+    switching does not help with perfect detection, no detector will.
 
-    CZYM JEST „OŚLEPIONY WĘZEŁ": ułamek jego PASÓW WJAZDOWYCH w `sensors.broken`,
-    porównany z `threshold`. `in_lanes`, nie `all_lanes`, bo `failure_units`
-    przypisuje pas do skrzyżowania, DO KTÓREGO pas dojeżdża — „bo tam stoi kamera".
-    Pasy wyjazdowe węzła należą więc do jego sąsiadów w dół strumienia. Zmierzone na
-    JiNan: każde sterowane skrzyżowanie ma 8 pasów wjazdowych i 20 wszystkich, czyli
-    przy `all_lanes` całkowicie martwa kamera dawałaby ułamek 8/20 = 0,40 — i przy
-    progu 0,5 bramka NIE strzeliłaby w scenariuszach `mask*_intersection`, czyli
-    dokładnie tam, gdzie powstała.
-
-    ZNANY LIMIT TEJ DEFINICJI: węzeł ze zdrowymi własnymi kamerami może dostawać
-    skażone `pressure`, bo ono patrzy też na wyjazdy, czyli na detektory sąsiada.
-    Wyrocznia tego nie łapie — sąsiad przełączy się sam, ale ciśnienie tego węzła
-    zostaje częściowo zatrute. Świadomy wybór, nie przeoczenie.
-
-    PRÓG: porównanie nieostre (`>=`), czyli „co najmniej połowa detektorów martwa”.
-    Przy `unit: intersection` ułamek jest 0 albo 1 i rozstrzygnięcie remisu nie ma
-    znaczenia; przy `unit: lane` ma, bo `mask` bierze DOKŁADNY ułamek jednostek, więc
-    przy `mask0p5` i ośmiu pasach wjazdowych co czwarty węzeł siada na dokładnie 4/8.
-    Wybór w stronę przełączenia, bo tam polityka wyraźnie przegrywa (743 s wobec
-    507 s FixedTime). Rozstrzyga to jednak sweep `threshold`, nie ta konwencja —
-    stąd parametr konstruktora, a nie stała.
+    A node is blind when the fraction of its IN lanes in `sensors.broken` is >=
+    `threshold` (in lanes, because a lane's detector belongs to the intersection
+    the lane leads into). Known limit: a node with healthy own sensors still gets
+    pressure partly from its downstream neighbours' detectors.
     """
 
     def __init__(self, env: Any, *, threshold: float = 0.5) -> None:
-        # `env`, NIE `env.features`: `robustness/degrade.py:212` podmienia
-        # `env.features` przy każdym scenariuszu, a sterownik powstaje raz.
-        # Zapamiętany snapshot to na zawsze `clean` (pierwszy scenariusz planu),
-        # czyli bramka, która nigdy nie strzela — i fałszywy wniosek „nie ma o co grać".
+        # `env`, not `env.features`: the evaluator replaces `env.features` for every
+        # scenario while the controller is built once; a stored snapshot would stay
+        # on the first (clean) scenario and never fire.
         self.env = env
         self.threshold = threshold
         self._in_lanes: list[list[str]] | None = None
         self._built_for: Any = None
 
     def reset(self) -> None:
-        """Wyrocznia jest bezstanowa; metoda istnieje dla jednolitego interfejsu
-        z bramkami, które stan mają (UQ trzyma okno odczytów)."""
+        """Stateless; present for the common gate interface."""
 
     def mask(self, obs: np.ndarray) -> np.ndarray:
         features = self.env.features
         sensors = features.sensors
-        # `sensors is None` na czystym scenariuszu (`StateBuilder` tworzy warstwę
-        # tylko dla aktywnej awarii), a `live` odsiewa scenariusze z `onset`:
-        # `broken` jest niepuste od startu epizodu, ale przed onsetem `_measure`
-        # zwraca czyste wartości, więc bramka nie ma czego gasić.
+        # no failure layer on a clean scenario; `live` skips decisions before onset
         if sensors is None or not sensors.live:
             self.last_score = np.zeros(features.n_nodes, dtype=np.float64)
             return np.zeros(features.n_nodes, dtype=bool)
-        if features is not self._built_for:  # cache przeżywa epizod,
+        if features is not self._built_for:  # the cache survives an episode,
             self._in_lanes = [list(s.in_lanes) for s in features.structs]
-            self._built_for = features  # ale nie podmianę scenariusza
+            self._built_for = features  # but not a scenario switch
 
         broken = sensors.broken
-        # `max(…, 1)`: Kraków ma sygnalizacje bez pasów wjazdowych w `in_lanes` (np. same
-        # przejścia dla pieszych) — węzeł bez detektorów nie może być oślepiony, udział 0
+        # max(..., 1): on Krakow some signals have no in lanes; such a node cannot be blind
         part = [
             sum(lane in broken for lane in lanes) / max(len(lanes), 1) for lanes in self._in_lanes
         ]
@@ -585,40 +469,27 @@ class OracleGate:
 
 
 class OracleUncertainty:
-    """WYROCZNIA MODULACJI: log ρ dla UW-attention z PRAWDY warstwy awarii, nie z głowy.
+    """Modulation oracle: log_rho for UW-attention from the failure layer's truth.
 
-    Ta sama rola co `OracleGate` dla bramek: GÓRNE OGRANICZENIE, nie sterownik do
-    wdrożenia. Odpowiada na jedno pytanie, którego `t2_uw`/`t2_uw_src` nie rozstrzygają:
-    czy ważenie sąsiadów wiarygodnością może pomóc PRZY IDEALNYM SYGNALE. Jeśli nie —
-    mechanizm jest martwy niezależnie od głowy i C5 zamyka się bez zastrzeżeń. Jeśli
-    tak — wąskim gardłem była głowa (trafienie 0,54 na zrzucie BC), nie idea.
+    The same role as `OracleGate`: an upper bound on whether weighting neighbours
+    by reliability can help with a perfect signal. u of a node = the fraction of
+    its broken in lanes (`OracleGate.last_score`, one definition of a blind node),
+    applied on the SOURCE side: edge j->i gets u(j), self-loop i->i gets u(i).
 
-    u węzła = ułamek jego pasów WJAZDOWYCH w `sensors.broken`, czyli DOKŁADNIE
-    `OracleGate.last_score` — liczone przez nią, żeby „oślepiony węzeł" miał w pracy
-    jedną definicję (i jej znany limit: `pressure` patrzy też na wyjazdy, czyli na
-    detektory sąsiadów w dół strumienia). Tylko STRONA ŹRÓDŁA: krawędź j→i dostaje u(j),
-    bo niesie `hidden_embedding(x_j)`, a pętla własna i→i — u(i). Wariant po stronie
-    celu nie ma tu sensu jako sufit: mierzyłby idealnie coś, co nie jest wiarygodnością
-    wiadomości (`obs_head.EDGE_SIDES`).
+        log_rho = -u / tau,  u in [0, 1]
 
-        log ρ = −u / τ,  u ∈ [0, 1]
-
-    BEZ `u_ref`: prawda na zdrowej sieci to dokładnie 0 (`sensors is None` albo przed
-    `onset`), więc no-op na czystym (A3a) jest tu tożsamością, nie kalibracją. Przy
-    τ = 0,25 całkowicie martwy węzeł dostaje −4 naty, czyli ~55× mniejszą wagę.
-
-    Interfejs jak `OnlineUncertainty` (`reset`, `log_rho`), więc wpina się w
-    `UWPolicyController` bez zmian i dostaje tę samą diagnostykę `uw_spread`.
+    No `u_ref`: the truth is exactly 0 on a healthy network, so the no-op on clean
+    traffic is an identity, not a calibration. Same interface as
+    `OnlineUncertainty` (`reset`, `log_rho`).
     """
 
     def __init__(
         self, env: Any, edge_index: torch.Tensor, *, tau: float, channels: str = "all"
     ) -> None:
         if tau <= 0:
-            raise ValueError(f"τ musi być dodatnie, jest {tau}")
+            raise ValueError(f"tau must be positive, got {tau}")
         _check_channels(channels)
-        # `env`, nie `env.features` — powód w `OracleGate.__init__`
-        self._gate = OracleGate(env)
+        self._gate = OracleGate(env)  # `env`, see `OracleGate.__init__`
         self.src = edge_index[0].numpy()
         self.tau = float(tau)
         self.channels = channels
@@ -628,67 +499,51 @@ class OracleUncertainty:
 
     def log_rho(self, obs: np.ndarray) -> torch.Tensor:
         self._gate.mask(obs)
-        # [N], zera na czystym i przed onsetem
+        # [N], zeros on clean traffic and before onset
         return source_log_rho(self._gate.last_score, self.src, self.tau, self.channels)
 
 
-# Kanały modulacji po stronie źródła (ablacja `t2_uw_channels`), `UW_CHANNELS`
-# w `robustness.training`. `self` = tylko pętle własne: oślepiony węzeł przestaje ufać
-# WŁASNEJ obserwacji i opiera się na sąsiadach. `edges` = tylko krawędzie między
-# węzłami: sąsiedzi przestają ufać JEGO wiadomości. Oba wektory log ρ są rozłączne
-# i sumują się do `all`, więc ablacja rozkłada zysk dokładnie, a nie przez różnicę
-# par z innych planów (`results/t2_uw_rule.md`).
+# Source-side modulation channels (`UW_CHANNELS` in `robustness.training`):
+# `self` = self-loops only (a blind node stops trusting its OWN observation),
+# `edges` = edges between nodes only (neighbours stop trusting its message).
+# The two log_rho parts are disjoint and add up to `all`.
 
 
 def _check_channels(channels: str) -> None:
-    from tsc_marl.robustness.training import UW_CHANNELS  # noqa: PLC0415
+    from tsc_marl.robustness.training import UW_CHANNELS
 
     if channels not in UW_CHANNELS:
-        raise ValueError(f"channels={channels!r}, dozwolone: {UW_CHANNELS}")
+        raise ValueError(f"channels={channels!r}, allowed: {UW_CHANNELS}")
 
 
 def source_log_rho(
     u: np.ndarray, src: np.ndarray, tau: float, channels: str = "all"
 ) -> torch.Tensor:
-    """u węzła [N] -> log ρ = −u/τ po STRONIE ŹRÓDŁA: krawędź j→i dostaje u(j), pętla
-    własna i→i — u(i). Wspólne dla wyroczni i reguły, żeby obie kolumny różniła
-    wyłącznie definicja u, a nie sposób rozłożenia go na krawędzie.
+    """Node u [N] -> log_rho = -u/tau on the SOURCE side: edge j->i gets u(j),
+    self-loop i->i gets u(i). Shared by the oracle and the rule, so their columns
+    differ only in the definition of u.
 
-    `channels` wygasza jedną z dwóch części (patrz `UW_CHANNELS`) — zerem, czyli
-    „bez modulacji", a nie inną wartością, więc kanał wyłączony jest dokładnie tym,
-    co widzi rdzeń.
-
-    [E + N] w kolejności `edge_index`, potem pętle własne — kontrakt
-    `UncertaintyWeightedAttention` (tak dokleja je `add_self_loops`)."""
-    krawedzie = u[src] if channels != "self" else np.zeros(len(src))
-    petle = u if channels != "edges" else np.zeros(len(u))
-    out = -np.concatenate([krawedzie, petle]) / tau
+    `channels` zeroes one part (zero = "no modulation", exactly what the core
+    sees). Output [E + N]: edges in `edge_index` order, then self-loops, the
+    contract of `UncertaintyWeightedAttention`."""
+    edges = u[src] if channels != "self" else np.zeros(len(src))
+    loops = u if channels != "edges" else np.zeros(len(u))
+    out = -np.concatenate([edges, loops]) / tau
     return torch.from_numpy(out.astype(np.float32))
 
 
 class RuleUncertainty:
-    """MODULACJA Z REGUŁY: log ρ dla UW-attention z licznika zamrożonych detektorów.
+    """Modulation from the rule: log_rho for UW-attention from the frozen-detector count.
 
-    Wdrażalny odpowiednik `OracleUncertainty` (plan `t2_uw_rule`). Wyrocznia modulacji
-    dała przy maskach skrzyżowań −96…−167 s, a głowa obserwacyjna zero
-    (`results/t2_uw_src.md`) — więc wąskim gardłem jest sygnał u, nie mechanizm. Ta
-    klasa podaje mechanizmowi sygnał, który JUŻ działa jako bramka (`RuleGate`,
-    `results/t2_gate_real.md`): ten sam detektor, to samo okno, ten sam próg.
+    The deployable counterpart of `OracleUncertainty`, using the signal that
+    already works as a gate (`RuleGate`): same detector, same window, same
+    threshold. u of a node = its fraction of frozen movements, but only ABOVE the
+    gate threshold, zero below: otherwise the modulation would act on clean
+    traffic, where an empty low-traffic approach reports zero and looks frozen.
+    Above the threshold u stays graded, as in the oracle.
 
-    u węzła = ułamek jego ruchów zamrożonych przez całe okno (`RuleGate.last_score`),
-    ALE TYLKO powyżej progu bramki; poniżej — zero. Bez progu modulacja działałaby
-    na czystym: pusty wlot o małym ruchu raportuje zero i wygląda na zamrożony
-    (`obs_head.suspicious_movements`), a na HangZhou takich ruchów jest dużo (próg
-    skalibrował się tam na 0,875 wobec 0,25 na JiNan). Próg z `gate_ref` jest
-    kwantylem 99,5% na czystym oknie, więc no-op na czystym (A3a) trzyma się z tą
-    samą tolerancją fałszywych alarmów co bramka. Powyżej progu u zostaje
-    STOPNIOWANE, jak w wyroczni — martwy węzeł (1,0) dostaje pełne −1/τ.
-
-    Węzły ruchów = jego pasy wjazdowe, czyli ta sama jednostka co `OracleGate`
-    (właściciel pasa = skrzyżowanie, do którego pas dojeżdża). Różnice wobec wyroczni
-    są więc tylko dwie i obie są kosztem wdrożenia: rozgrzewka okna (pierwsze
-    `window` decyzji bez modulacji) i ślepota na martwy detektor, który akurat
-    raportuje zmieniające się wartości (tu: żaden ze scenariuszy planu).
+    Differences from the oracle are deployment costs: the window warm-up and
+    blindness to a dead detector that happens to report changing values.
     """
 
     def __init__(
@@ -703,7 +558,7 @@ class RuleUncertainty:
         real: np.ndarray | None = None,
     ) -> None:
         if tau <= 0:
-            raise ValueError(f"τ musi być dodatnie, jest {tau}")
+            raise ValueError(f"tau must be positive, got {tau}")
         _check_channels(channels)
         self._gate = RuleGate(window=window, threshold=threshold, n_mov=n_mov, real=real)
         self.src = edge_index[0].numpy()
@@ -714,29 +569,26 @@ class RuleUncertainty:
         self._gate.reset()
 
     def log_rho(self, obs: np.ndarray) -> torch.Tensor:
-        maska = self._gate.mask(obs)  # na rozgrzewce: same False
-        u = np.where(maska, self._gate.last_score, 0.0)
+        mask = self._gate.mask(obs)  # all False during warm-up
+        u = np.where(mask, self._gate.last_score, 0.0)
         return source_log_rho(u, self.src, self.tau, self.channels)
 
 
 class RuleGate:
-    """Bramka-REGUŁA: ułamek ruchów węzła, których odczyty STOJĄ W MIEJSCU przez całe
-    okno. Zero uczenia, zero artefaktów — licznik zamrożonych detektorów.
+    """Rule gate: the fraction of a node's movements whose readings STAY STILL for
+    the whole window. No learning, no artefacts: a frozen-detector counter.
 
-    Jedno kryterium łapie obie postacie martwego detektora: podstawienie `zero`
-    (zero też się nie zmienia) i `hold` (zamrożony ostatni odczyt, awaria bez śladu
-    w samej wartości). Szczegóły i wbudowana słabość — pusty wlot o małym ruchu
-    raportuje zero i jest ZDROWY — w `obs_head.suspicious_movements`.
-
-    To jest DOLNY punkt odniesienia dla bramki UQ: jeśli licznik zamrożeń bramkuje
-    równie dobrze jak głowa niepewności, głowa nie zarabia w tej pracy na siebie.
+    One criterion catches both forms of a dead detector, `zero` (zero does not
+    change either) and `hold` (a frozen last reading). Built-in weakness: an
+    empty low-traffic approach reports zero and is HEALTHY (see
+    `obs_head.suspicious_movements`). The lower reference for the UQ gate.
     """
 
     def __init__(
         self, *, window: int, threshold: float, n_mov: int, real: np.ndarray | None = None
     ) -> None:
         self.window, self.threshold, self.n_mov = window, threshold, n_mov
-        # [N, n_mov] — prawdziwe ruchy (`StateBuilder.movement_mask`); None = wszystkie
+        # [N, n_mov] real movements (`StateBuilder.movement_mask`); None = all
         self.real = real
         self._buf: list[np.ndarray] = []
 
@@ -744,49 +596,42 @@ class RuleGate:
         self._buf.clear()
 
     def mask(self, obs: np.ndarray) -> np.ndarray:
-        from tsc_marl.uncertainty.obs_head import suspicious_movements  # noqa: PLC0415
+        from tsc_marl.uncertainty.obs_head import suspicious_movements
 
         obs = np.asarray(obs, dtype=np.float32)
-        self._buf.insert(0, obs)  # najnowszy z przodu — jak `window_index`
+        self._buf.insert(0, obs)  # newest first, as in `window_index`
         del self._buf[self.window :]
-        # STRAŻNIK ROZGRZEWKI. Przy niepełnym buforze okno jest przycięte, więc
-        # KAŻDY ruch wygląda na zamrożony i bramka przełączyłaby całą sieć na
-        # starcie epizodu. Ta sama reguła co w kalibracji progu (`full_window`).
+        # Warm-up guard: with a short buffer EVERY movement looks frozen and the
+        # gate would switch the whole network at episode start (as `full_window`).
         if len(self._buf) < self.window:
             self.last_score = np.zeros(obs.shape[0], dtype=np.float64)
             return np.zeros(obs.shape[0], dtype=bool)
 
         hist = np.stack(self._buf)  # [k, N, F]
-        win = np.arange(self.window)[None, :]  # okno NAJNOWSZEGO kroku
-        podejrzane = suspicious_movements(hist, win, self.n_mov)[0]  # [N, n_mov]
-        self.last_score = frozen_fraction(podejrzane, self.real)
+        win = np.arange(self.window)[None, :]  # window of the NEWEST step
+        suspicious = suspicious_movements(hist, win, self.n_mov)[0]  # [N, n_mov]
+        self.last_score = frozen_fraction(suspicious, self.real)
         return self.last_score >= self.threshold
 
 
-def frozen_fraction(podejrzane: np.ndarray, real: np.ndarray | None) -> np.ndarray:
-    """Ułamek zamrożonych ruchów węzła liczony WYŁĄCZNIE po prawdziwych ruchach.
-
-    `real` None (sieć jednorodna) → zwykła średnia, czyli dokładnie to, co liczono
-    dla JiNan/HangZhou. Wspólne dla bramki, modulacji i kalibracji progu."""
+def frozen_fraction(suspicious: np.ndarray, real: np.ndarray | None) -> np.ndarray:
+    """A node's fraction of frozen movements, over REAL movements only; `real` None
+    (homogeneous network) is the plain mean. Shared by gate, modulation and
+    threshold calibration."""
     if real is None:
-        return podejrzane.mean(-1)
-    return (podejrzane & real).sum(-1) / np.maximum(real.sum(-1), 1)
+        return suspicious.mean(-1)
+    return (suspicious & real).sum(-1) / np.maximum(real.sum(-1), 1)
 
 
 class UQGate:
-    """Bramka-UQ: ułamek ruchów węzła, których u przekracza własną normę z czystego
-    okna (`GateReference.u_mov_ref`).
+    """UQ gate: the fraction of a node's movements whose u exceeds its own norm from
+    a clean window (`GateReference.u_mov_ref`).
 
-    TA SAMA POSTAĆ SYGNAŁU co w `RuleGate` — ułamek podejrzanych ruchów — żeby
-    ablacja porównywała kryterium podejrzliwości, a nie dwie różne statystyki.
-    Różnica: reguła pyta „czy ten detektor stoi", UQ pyta „czy ten odczyt jest
-    nietypowo niepewny".
-
-    PRZEWIDYWANA SŁABOŚĆ, zapisana przed pomiarem: σ rośnie także przy SZUMIE, gdzie
-    detektory żyją i polityka wciąż bije FixedTime (gauss2: 319 s vs 507 s). Na
-    zrzucie BC ten sygnał przekracza próg w 88% decyzji przy `gauss2` wobec 0% dla
-    reguły — czyli bramka UQ ma tam masowo przełączać i tracić. Miara niepewności
-    nie jest miarą BRAKU odczytu i ta kolumna ma to pokazać, a nie ukryć.
+    The same signal shape as `RuleGate` (a fraction of suspicious movements), so
+    the ablation compares the suspicion criterion, not two statistics. The rule
+    asks "is this detector stuck", UQ asks "is this reading unusually uncertain".
+    Expected weakness, written before measurement: sigma also grows under NOISE,
+    where detectors are alive; uncertainty is not a measure of a MISSING reading.
     """
 
     def __init__(self, uncertainty: Any, *, u_mov_ref: np.ndarray, threshold: float) -> None:
@@ -799,7 +644,7 @@ class UQGate:
 
     def mask(self, obs: np.ndarray) -> np.ndarray:
         u_mov = self.uncertainty.movements(obs)  # [N, n_mov]
-        if not self.uncertainty.ready:  # strażnik rozgrzewki — jak w regule
+        if not self.uncertainty.ready:  # warm-up guard, as in the rule
             self.last_score = np.zeros(u_mov.shape[0], dtype=np.float64)
             return np.zeros(u_mov.shape[0], dtype=bool)
         self.last_score = (u_mov >= self.u_mov_ref).mean(-1)
@@ -807,20 +652,19 @@ class UQGate:
 
 
 class ColightController:
-    """Advanced-CoLight z checkpointu: `get_action(test=True)` agenta LibSignala.
+    """Advanced-CoLight from a checkpoint: the LibSignal agent's `get_action(test=True)`.
 
-    Agent przyjmuje wiersze w kolejności `world.intersections`, a my podajemy je
-    w kolejności węzłów grafu. Na roadnetach CityFlow te kolejności są dziś
-    identyczne (kontrakt w `core/graph.py`) — i to jest WARUNEK tego sterownika,
-    sprawdzany przy budowie (`identity_order`), a nie zakładany."""
+    The agent expects rows in `world.intersections` order and gets graph order.
+    On CityFlow roadnets the two are identical, and that is a CONDITION of this
+    controller, checked at construction (`identity_order`), not assumed."""
 
     state_independent = False
 
     def __init__(self, agent: Any, *, identity_order: bool, name: str = "advancedcolight"):
         if not identity_order:
             raise ValueError(
-                "kolejność world.intersections != kolejność grafu — ColightController "
-                "podawałby obserwacje niewłaściwym skrzyżowaniom"
+                "world.intersections order != graph order; ColightController would feed "
+                "observations to the wrong intersections"
             )
         self.agent = agent
         self.name = name
@@ -830,21 +674,19 @@ class ColightController:
 
 
 class EnsembleController:
-    """Kilka actorów rdzenia (różne seedy): decyduje PIERWSZY, pozostali tylko głosują.
+    """Several core actors (different seeds): the FIRST decides, the others vote.
 
-    Rozbieżność ich rozkładów nad fazami to epistemic w samej polityce RL — bez
-    dodatkowego treningu i bez EDL. Ta sama dekompozycja co BALD i ensemble z 2.0:
-    MI = H(średniego rozkładu) − średnia H(rozkładów). Obok odsetek członków, którzy
-    wybraliby inną fazę niż decydujący — prostsza, łatwa do opisania miara.
-
-    Decyduje jeden seed, a nie większość: pytamy, czy rozbieżność WYKRYWA kłopoty
-    wdrożonej polityki, więc trajektoria ma być trajektorią tej polityki."""
+    Disagreement of their phase distributions is epistemic uncertainty of the RL
+    policy itself, without extra training: MI = H(mean distribution) - mean H.
+    Next to it, the share of members that would pick another phase. One member
+    decides, not the majority, so the trajectory is that of the deployed policy.
+    """
 
     state_independent = False
 
     def __init__(self, actors, edge_index: torch.Tensor, name: str = "gatppo_ens") -> None:
         if len(actors) < 2:
-            raise ValueError("ensemble potrzebuje co najmniej dwóch actorów")
+            raise ValueError("an ensemble needs at least two actors")
         self.actors = [a.eval() for a in actors]
         self.edge_index = edge_index
         self.name = name

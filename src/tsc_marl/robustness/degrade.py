@@ -1,19 +1,13 @@
-"""Ewaluacja ZAMROŻONEGO sterownika na liście scenariuszy awarii (T2 bez mechanizmu).
+"""Evaluation of a FROZEN controller over a list of failure scenarios.
 
-To jest oś X głównej figury pracy i test wykonalności fallbacku: zanim zbudujemy
-mechanizm niepewności, trzeba wiedzieć, JAK BARDZO polityka z Fazy 1 degraduje się
-sama z siebie. Fallback do FixedTime opłaca się tylko tam, gdzie polityka pod
-awarią spada poniżej FixedTime — a tego nikt w tym repo jeszcze nie zmierzył.
+A PLAN (`configs/robustness/<name>.yml`) lists networks, controllers (with seeds
+for learned ones), failure scenarios and the number of DRAWS per scenario. The
+replication unit under failure is a FAILURE DRAW (`episode` -> `SensorModel.reset`),
+not a simulator seed: traffic in flow.json is fixed.
 
-PLAN (`configs/robustness/<nazwa>.yml`) opisuje: sieci, sterowniki (z seedami dla
-uczonych), scenariusze awarii i liczbę LOSOWAŃ na scenariusz. Replikacją pod awarią
-jest N LOSOWAŃ AWARII (`episode` → `SensorModel.reset`), nie N seedów symulatora —
-ruch w flow.json jest ustalony (patrz `domain/sensors.py`).
-
-Jeden bieg `runlog` = jeden sterownik × sieć × seed, WSZYSTKIE scenariusze w środku
-(`metrics.csv`: split = scenariusz, step = losowanie). Jeden świat na proces,
-nowy `StateBuilder` na scenariusz — trajektoria różni się między scenariuszami
-wyłącznie tym, co zrobił sterownik.
+One `runlog` run = one controller x network x seed with ALL scenarios inside
+(`metrics.csv`: split = scenario, step = draw). One world per process, a new
+`StateBuilder` per scenario, so trajectories differ only by what the controller did.
 """
 
 from __future__ import annotations
@@ -31,7 +25,7 @@ PLANS = CONFIGS / "robustness"
 EXPERIMENT = "t2"
 YELLOW_BY_MODE = {"realistic": 5, "benchmark": 0}
 
-#: agent -> rodzaj sterownika. Uczone mają rodzica w `runs/t1` (checkpoint).
+#: agent -> controller kind; learned ones have a parent in `runs/t1` (checkpoint).
 KINDS = {
     "gatppo": "policy",
     "advancedcolight": "colight",
@@ -39,29 +33,20 @@ KINDS = {
     "advancedmp": "pressure",
     "fixedtime": "fixed",
 }
-#: `ensemble` = kilka actorów rdzenia naraz: decyduje pierwszy, reszta głosuje — rozbieżność
-#: ich rozkładów to epistemic W SAMEJ POLITYCE RL (test gałęzi epistemic, plan t2_ood).
-#: `policy_uw` = TEN SAM checkpoint co `policy`, tylko attention dostaje log ρ z głowy
-#: obserwacyjnej (Faza 3). Modulacja jest bezparametrowa, więc kolumny „rdzeń" i
-#: „rdzeń + UW-attention" różnią się wyłącznie mechanizmem — ten sam plik z wagami.
-#: `policy_gate` = TEN SAM checkpoint co `policy`, ale akcja każdego węzła idzie
-#: z polityki ALBO z reguły, zależnie od bramki (Faza 3, dolny poziom fallbacku).
-#: `policy_mask` = TEN SAM checkpoint co `policy`, ale akcja węzła jest nadpisywana,
-#: gdy legalna faza czeka dłużej niż `k_max` decyzji (Faza 4, action masking).
+#: `ensemble`: several core actors, the first decides, their disagreement is the
+#: policy's epistemic signal (plan t2_ood). `policy_uw`, `policy_gate` and
+#: `policy_mask` use THE SAME checkpoint as `policy` and differ only by the overlay
+#: (UW-attention, per-node gate, phase starvation mask).
 LEARNED = ("policy", "colight", "ensemble", "policy_uw", "policy_gate", "policy_mask")
-#: Rodzaje bramek. `oracle` czyta prawdę z warstwy awarii i jest GÓRNYM
-#: OGRANICZENIEM, nie sterownikiem do wdrożenia. `rule` (licznik zamrożonych
-#: detektorów) i `uq` (głowa obserwacyjna) są wdrażalne i mierzy się je WZGLĘDEM
-#: wyroczni — ta ablacja rozstrzyga, czy głowa niepewności zarabia na siebie.
+#: Gate kinds. `oracle` reads the truth from the failure layer and is an UPPER
+#: BOUND, not a deployable controller; `rule` and `uq` are deployable.
 GATE_KINDS = ("oracle", "rule", "uq")
-#: Klucze spec sterownika, które zmieniają MECHANIZM, a nie tylko etykietę kolumny:
-#: `uw` niesie τ modulacji, `gate` — rodzaj bramki, próg i długość cyklu reguły.
-#: MUSZĄ wejść do odcisku biegu (`unit_params`), inaczej sweep po τ albo po progu
-#: liczy pierwszą wartość, a każdą następną pomija jako „jest wynik" — ten sam błąd,
-#: przed którym ostrzega docstring `FailureSpec`.
+#: Controller spec keys that change the MECHANISM, not just a column label. They
+#: MUST enter the run fingerprint (`unit_params`), otherwise a sweep over tau or a
+#: threshold computes the first value and skips the rest as done.
 MECHANISM_KEYS = ("uw", "gate", "mask")
-#: Sufiks wariantu ruchu w nazwie sieci (`_d0p25`, `_d1p5`, `_r2000`, `_r5816`). `{base}`
-#: w szablonie rodzica = sieć bez sufiksu, czyli sieć, NA KTÓREJ polityka się uczyła.
+#: Traffic variant suffix in a network name (`_d0p25`, `_d1p5`, `_r2000`, `_r5816`);
+#: `{base}` in a parent template = the network the policy was trained ON.
 VARIANT_SUFFIX = re.compile(r"_(?:d\d+(?:p\d+)?|r\d+)$")
 
 
@@ -69,11 +54,8 @@ def base_network(network: str) -> str:
     return VARIANT_SUFFIX.sub("", network)
 
 
-#: Kolumny zapisywane do `metrics.csv` każdego biegu T2. `queue_max`/`queue_p90`/
-#: `wait_max` to OGON (Faza 4): średnia sieciowa nie widzi jednego skrzyżowania
-#: trzymanego w martwej fazie ani ćwiartki sieci zepsutej przy zdrowej reszcie.
-#: Dopisane PRZED biegami maskingu i Krakowa celowo — metryki liczą się w epizodzie,
-#: więc dodanie ich później oznacza przeliczenie wszystkiego od nowa.
+#: Columns written to `metrics.csv` of every run. `queue_max`/`queue_p90`/`wait_max`
+#: are the TAIL: a network mean cannot see one intersection held in a dead phase.
 METRICS = (
     "att",
     "throughput",
@@ -87,15 +69,11 @@ METRICS = (
 )
 
 
-def slug(spec: FailureSpec) -> str:
-    return spec.suffix() or "clean"
-
-
 @dataclass(frozen=True)
 class Unit:
-    """Jeden punkt planu = jeden podproces = jeden bieg `runlog`."""
+    """One plan point = one subprocess = one `runlog` run."""
 
-    controller: str  # etykieta z planu (klucz w `controllers`)
+    controller: str  # label from the plan (key in `controllers`)
     network: str
     seed: int
 
@@ -126,8 +104,8 @@ class Plan:
         spec = self.controllers[controller]
         if "ensemble" in spec:
             return "ensemble"
-        # bramka PRZED UW: spec z obydwoma to złożenie, w którym bramka owija politykę
-        # z modulacją (`GatedController` z `UWPolicyController` w środku, `t2_uw_rule`)
+        # gate BEFORE UW: a spec with both is a composition where the gate wraps the
+        # modulated policy (`GatedController` around `UWPolicyController`)
         if spec.get("gate"):
             return "policy_gate"
         if spec.get("uw"):
@@ -137,25 +115,20 @@ class Plan:
         return KINDS[self.agent(controller)]
 
     def baseline(self, controller: str) -> str | None:
-        """Kolumna, z którą raport ma SPAROWAĆ ten sterownik, gdy domyślny wybór
-        („pierwsza kolumna `policy` tego samego agenta") byłby zły.
-
-        Potrzebne od planu `t2_train_uw`: są tam DWA ramiona bez mechanizmu
-        (trening na czystym i trening z awariami), oba z agentem `gatppo`, więc
-        domyśl trafiłby w pierwsze i mierzył trening razem z mechanizmem zamiast
-        samego mechanizmu. Różnica jest cicha — tabela wychodzi, tylko odpowiada
-        na inne pytanie."""
+        """The column the report PAIRS this controller with, when the default (the
+        first `policy` column of the same agent) would be wrong, e.g. two arms
+        without a mechanism trained differently (`t2_train_uw`)."""
         return self.controllers[controller].get("baseline")
 
     def units(self) -> list[Unit]:
-        """Uczone sterowniki × ich seedy; reguły MP i FixedTime są deterministyczne,
-        więc liczone raz (seed 0) — N seedów dałoby N identycznych liczb."""
+        """Learned controllers x their seeds; rules and fixed time are deterministic,
+        so computed once (seed 0)."""
         out = []
         for net in self.networks:
             for label, spec in self.controllers.items():
                 kind = self.kind(label)
                 if kind == "ensemble":
-                    seeds = [spec["ensemble"][0]]  # jeden punkt: seed, który podejmuje decyzje
+                    seeds = [spec["ensemble"][0]]  # one point: the deciding seed
                 elif kind in LEARNED:
                     seeds = spec.get("seeds", [0])
                 else:
@@ -164,8 +137,8 @@ class Plan:
         return out
 
     def parent_ids(self, unit: Unit) -> list[str]:
-        """Biegi treningowe w `runs/t1`, z których bierzemy checkpointy — jeden dla
-        polityki, kilka dla ensemble (pierwszy = ten, który decyduje)."""
+        """Training runs in `runs/t1` that provide checkpoints: one for a policy,
+        several for an ensemble (the first one decides)."""
         kind = self.kind(unit.controller)
         if kind not in LEARNED:
             return []
@@ -191,28 +164,28 @@ class Plan:
         return f"{unit.controller}__{unit.network}__s{unit.seed}_y{self.yellow}__{self.name}"
 
     def scenarios_for(self, unit: Unit) -> tuple[FailureSpec, ...]:
-        """FixedTime nie czyta odczytów, więc pod awarią ma z definicji wynik czysty."""
+        """Fixed time reads no sensors, so under failure its result is the clean one."""
         if self.kind(unit.controller) == "fixed":
             return tuple(s for s in self.scenarios if not s.active)
         return self.scenarios
 
 
 def load_plan(path: str | Path) -> Plan:
-    """Nazwa (`t2_nomech`) albo ścieżka. Czysty scenariusz jest dokładany zawsze,
-    na początek — bez niego nie ma względem czego liczyć degradacji."""
-    import yaml  # noqa: PLC0415
+    """A name (`t2_nomech`) or a path. The clean scenario is always prepended:
+    degradation is measured against it."""
+    import yaml
 
     p = Path(path)
     if not p.suffix:
         p = PLANS / f"{p.name}.yml"
     if not p.is_file():
-        dostepne = ", ".join(sorted(x.stem for x in PLANS.glob("*.yml"))) or "brak"
-        raise SystemExit(f"nie ma planu '{path}' ({p}). Dostępne: {dostepne}")
+        available = ", ".join(sorted(x.stem for x in PLANS.glob("*.yml"))) or "none"
+        raise SystemExit(f"no plan '{path}' ({p}). Available: {available}")
     raw = yaml.safe_load(p.read_text()) or {}
     known = {"name", "networks", "controllers", "scenarios", "mode", "draws", "timeout"}
     unknown = set(raw) - known
     if unknown:
-        raise SystemExit(f"plan '{p.name}': nieznane pola {sorted(unknown)}")
+        raise SystemExit(f"plan '{p.name}': unknown fields {sorted(unknown)}")
     specs = [FailureSpec(**s) for s in raw.get("scenarios", [])]
     if not any(not s.active for s in specs):
         specs.insert(0, FailureSpec())
@@ -228,67 +201,62 @@ def load_plan(path: str | Path) -> Plan:
     )
     for label, spec in plan.controllers.items():
         if plan.agent(label) not in KINDS:
-            raise SystemExit(f"plan '{p.name}': nieznany sterownik '{plan.agent(label)}'")
+            raise SystemExit(f"plan '{p.name}': unknown controller '{plan.agent(label)}'")
         if "ensemble" in spec and KINDS[plan.agent(label)] != "policy":
-            raise SystemExit(f"plan '{p.name}': ensemble tylko z actorów rdzenia ('{label}')")
+            raise SystemExit(f"plan '{p.name}': ensemble of core actors only ('{label}')")
         if "ensemble" in spec and len(spec["ensemble"]) < 2:
-            raise SystemExit(f"plan '{p.name}': ensemble '{label}' potrzebuje ≥ 2 seedów")
+            raise SystemExit(f"plan '{p.name}': ensemble '{label}' needs >= 2 seeds")
         if spec.get("uw") and KINDS[plan.agent(label)] != "policy":
-            raise SystemExit(f"plan '{p.name}': UW-attention tylko z actorem rdzenia ('{label}')")
-        # Literówka w `side`, `u` albo `channels` nie może po cichu dać wariantu
-        # domyślnego — jeden walidator z treningiem (`training.check_uw`). Import tu,
-        # nie na górze: `obs_head` ciągnie torcha, a ładowanie planu ma zostać lekkie.
+            raise SystemExit(f"plan '{p.name}': UW-attention with the core actor only ('{label}')")
+        # a typo in `side`, `u` or `channels` must not silently give the default;
+        # imported here because `obs_head` pulls in torch
         if spec.get("uw"):
-            from tsc_marl.robustness.training import check_uw  # noqa: PLC0415
+            from tsc_marl.robustness.training import check_uw
 
-            blad = check_uw(spec["uw"])
-            if blad:
-                raise SystemExit(f"plan '{p.name}': UW '{label}': {blad}")
+            error = check_uw(spec["uw"])
+            if error:
+                raise SystemExit(f"plan '{p.name}': UW '{label}': {error}")
         if spec.get("gate"):
             if KINDS[plan.agent(label)] != "policy":
-                raise SystemExit(f"plan '{p.name}': bramka tylko z actorem rdzenia ('{label}')")
-            # Literówka w `kind` nie ma prawa po cichu zbudować wyroczni: to ona jest
-            # górnym ograniczeniem, więc pomylona z realną bramką zawyżyłaby wynik.
+                raise SystemExit(f"plan '{p.name}': gate with the core actor only ('{label}')")
+            # a typo in `kind` must not silently build the oracle, the upper bound
             if spec["gate"].get("kind") not in GATE_KINDS:
                 raise SystemExit(
-                    f"plan '{p.name}': bramka '{label}' ma kind="
-                    f"{spec['gate'].get('kind')!r}, dozwolone: {GATE_KINDS}"
+                    f"plan '{p.name}': gate '{label}' has kind="
+                    f"{spec['gate'].get('kind')!r}, allowed: {GATE_KINDS}"
                 )
         if spec.get("mask"):
             if KINDS[plan.agent(label)] != "policy":
-                raise SystemExit(f"plan '{p.name}': maska tylko z actorem rdzenia ('{label}')")
-            # `k_max` jest CAŁYM mechanizmem tej maski — literówka w nazwie klucza dałaby
-            # po cichu wartość domyślną i sweep po ograniczeniu liczyłby jedną kolumnę.
+                raise SystemExit(f"plan '{p.name}': mask with the core actor only ('{label}')")
+            # `k_max` is the WHOLE mechanism; a misspelt key would silently give a default
             if "k_max" not in spec["mask"]:
-                raise SystemExit(
-                    f"plan '{p.name}': maska '{label}' musi podać `k_max` (liczba decyzji)"
-                )
+                raise SystemExit(f"plan '{p.name}': mask '{label}' must give `k_max` (decisions)")
             if int(spec["mask"]["k_max"]) < 1:
-                raise SystemExit(f"plan '{p.name}': maska '{label}' ma k_max < 1")
+                raise SystemExit(f"plan '{p.name}': mask '{label}' has k_max < 1")
         if spec.get("checkpoint", "last") not in ("last", "best"):
             raise SystemExit(
-                f"plan '{p.name}': '{label}' ma checkpoint={spec['checkpoint']!r}, "
-                "dozwolone: last, best"
+                f"plan '{p.name}': '{label}' has checkpoint={spec['checkpoint']!r}, "
+                "allowed: last, best"
             )
         if "checkpoint" in spec and KINDS[plan.agent(label)] != "policy":
-            raise SystemExit(f"plan '{p.name}': checkpoint tylko dla rdzenia ('{label}')")
-        baza = spec.get("baseline")
-        if baza is not None and baza not in plan.controllers:
+            raise SystemExit(f"plan '{p.name}': checkpoint for the core only ('{label}')")
+        base = spec.get("baseline")
+        if base is not None and base not in plan.controllers:
             raise SystemExit(
-                f"plan '{p.name}': '{label}' wskazuje baseline '{baza}', którego nie ma "
-                f"w `controllers` ({sorted(plan.controllers)})"
+                f"plan '{p.name}': '{label}' points to baseline '{base}', which is not "
+                f"in `controllers` ({sorted(plan.controllers)})"
             )
-        if baza is not None and baza == label:
-            raise SystemExit(f"plan '{p.name}': '{label}' wskazuje sam siebie jako baseline")
-    slugs = [slug(s) for s in plan.scenarios]
+        if base is not None and base == label:
+            raise SystemExit(f"plan '{p.name}': '{label}' points to itself as baseline")
+    slugs = [s.slug() for s in plan.scenarios]
     if len(set(slugs)) != len(slugs):
-        raise SystemExit(f"plan '{p.name}': zdublowane scenariusze {slugs}")
+        raise SystemExit(f"plan '{p.name}': duplicate scenarios {slugs}")
     if plan.mode not in YELLOW_BY_MODE:
-        raise SystemExit(f"plan '{p.name}': mode musi być jednym z {sorted(YELLOW_BY_MODE)}")
+        raise SystemExit(f"plan '{p.name}': mode must be one of {sorted(YELLOW_BY_MODE)}")
     return plan
 
 
-# ------------------------------------------------------------------- pętla
+# ------------------------------------------------------------------- loop
 
 
 def evaluate(
@@ -301,11 +269,11 @@ def evaluate(
     on_row: Callable[[dict[str, Any]], None] | None = None,
     on_trace: Callable[[str, int, list[Any]], None] | None = None,
 ) -> list[dict[str, Any]]:
-    """Każdy scenariusz × losowanie = jeden pełny epizod testowy. -> wiersze metryk.
+    """Every scenario x draw = one full test episode -> metric rows.
 
-    Czysty scenariusz jest deterministyczny (argmax + deterministyczny CityFlow),
-    więc liczony RAZ; scenariusz z awarią `draws` razy, każde losowanie z innym
-    `episode` — to on wybiera, które detektory padły i jaki szum poleciał.
+    The clean scenario is deterministic, so computed ONCE; a failure scenario
+    `draws` times, each draw with another `episode`, which picks the broken
+    detectors and the noise.
     """
     rows: list[dict[str, Any]] = []
     for spec in specs:
@@ -317,7 +285,7 @@ def evaluate(
                 controller.reset_stats()
             for _ in range(decisions):
                 obs, _, _ = env.step(controller.act(obs))
-            row: dict[str, Any] = {"scenario": slug(spec), "draw": draw, **env.metrics()}
+            row: dict[str, Any] = {"scenario": spec.slug(), "draw": draw, **env.metrics()}
             if hasattr(controller, "episode_stats"):
                 row.update(controller.episode_stats())
             sensors = getattr(env.features, "sensors", None)
@@ -325,17 +293,17 @@ def evaluate(
             rows.append(row)
             if on_row is not None:
                 on_row(row)
-            # Ślad bramki (opcjonalny) wychodzi PO metrykach i przed `reset_stats`
-            # następnego epizodu — czyli w jedynym momencie, w którym jest kompletny.
+            # the optional gate trace leaves AFTER the metrics and before the next
+            # `reset_stats`, the only moment it is complete
             if on_trace is not None and hasattr(controller, "episode_trace"):
-                slad = controller.episode_trace()
-                if slad:
-                    on_trace(slug(spec), draw, slad)
+                trace = controller.episode_trace()
+                if trace:
+                    on_trace(spec.slug(), draw, trace)
     return rows
 
 
 def summarize(rows: list[dict[str, Any]]) -> dict[str, float]:
-    """Skalary do `result.json`: średnie po losowaniach, `att__<scenariusz>`."""
+    """Scalars for `result.json`: means over draws, `att__<scenario>`."""
     out: dict[str, float] = {}
     by: dict[str, list[dict[str, Any]]] = {}
     for r in rows:
@@ -345,15 +313,11 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, float]:
             "att", "throughput", "ens_mi", "ens_disagree", "uw_spread", "uw_active",
             "gate_share", "gate_switches", "gate_precision", "gate_recall",
         ):  # fmt: skip
-            # Średnia po losowaniach, w których metryka BYŁA OKREŚLONA — sprawdzanie
-            # samego `group[0]` zakładało, że wszystkie wiersze mają ten sam komplet
-            # kluczy. `gate_precision`/`gate_recall` tego nie spełniają: przy części
-            # losowań mianownik nie istnieje (nie było czego wykrywać), więc klucza
-            # nie ma. Skutkiem był `KeyError` po POLICZENIU całego punktu — wszystkie
-            # epizody przeliczone, wynik wyrzucony w ostatniej linii.
-            wartosci = [r[metric] for r in group if metric in r]
-            if wartosci:
-                out[f"{metric}__{name}"] = sum(wartosci) / len(wartosci)
+            # mean over draws where the metric IS DEFINED: `gate_precision`/`recall`
+            # are missing when a draw had nothing to detect
+            values = [r[metric] for r in group if metric in r]
+            if values:
+                out[f"{metric}__{name}"] = sum(values) / len(values)
     if "att__clean" in out:
         out["att"] = out["att__clean"]
     return out

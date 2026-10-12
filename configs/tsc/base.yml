@@ -50,7 +50,7 @@ model:
   phase: False
 
 logger:
-  root_dir: "runs/"   # wyniki poza data/ (tam trzymamy WEJŚCIOWE sieci, wersjonowane)
+  root_dir: "runs/"   # results outside data/ (which holds the versioned INPUT networks)
   log_dir: "logger/"
   replay_dir: "replay/"
   model_dir: "model/"

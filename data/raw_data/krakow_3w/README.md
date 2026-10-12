@@ -1,156 +1,158 @@
-# krakow_3w — korytarz al. Trzech Wieszczów (Kraków), SUMO
+# krakow_3w: the al. Trzech Wieszczow corridor (Krakow), SUMO
 
-Case study z gałęzi `cracow-case-study`. Rozpoznanie krakowskiego ITS, ocena
-i plan: `tsc_marl_research/krakow-its.md`. Obszar = Obszar 1 krakowskiego UTCS
-(al. Krasińskiego / Mickiewicza / Słowackiego + 29 Listopada; Siemens MOTION,
-preferencja ruchu kołowego), bbox `(50.050, 19.912, 50.077, 19.948)`.
+Case study from the `cracow-case-study` branch. Survey of Krakow's ITS, assessment and
+plan: `tsc_marl_research/krakow-its.md`. Area = Area 1 of Krakow's UTCS
+(al. Krasinskiego / Mickiewicza / Slowackiego + 29 Listopada; Siemens MOTION, priority
+for road traffic), bbox `(50.050, 19.912, 50.077, 19.948)`.
 
-## Budowa
+## Build
 
 ```bash
-.venv/bin/python data/raw_data/krakow_3w/build.py            # osm → net → demand → webster → profile
-.venv/bin/python data/raw_data/krakow_3w/build.py demand webster  # sam popyt + programy Webstera
-.venv/bin/python data/raw_data/krakow_3w/build.py profile    # sama diagnostyka
-.venv/bin/python data/raw_data/krakow_3w/build.py --refresh  # nowa migawka OSM
+.venv/bin/python data/raw_data/krakow_3w/build.py            # osm -> net -> demand -> webster -> profile
+.venv/bin/python data/raw_data/krakow_3w/build.py demand webster  # demand + Webster programs only
+.venv/bin/python data/raw_data/krakow_3w/build.py profile    # diagnostics only
+.venv/bin/python data/raw_data/krakow_3w/build.py --refresh  # a new OSM snapshot
 ```
 
-| plik | co | odtwarzalny z |
+| file | what | reproducible from |
 |---|---|---|
-| `3w.osm` | migawka OSM (drogi + torowiska), 2026-09-13 | Overpass (`--refresh` zmienia wynik!) |
-| `3w.net.xml` | sieć SUMO, sam ruch samochodowy | `3w.osm` + `build.py net` |
-| `3w_{low,mid,high}.rou.xml` | popyt syntetyczny, 3600 s, seed 0 — poziomy skalibrowane (niżej) | `3w.net.xml` + `build.py demand` |
-| `3w_{low,mid,high}.webster.json` | program stałoczasowy Webstera per poziom: {sygnalizacja: {stan fazy: zielone [s]}} | `.rou.xml` + `build.py webster` |
+| `3w.osm` | OSM snapshot (roads + tram tracks), 2026-09-13 | Overpass (`--refresh` changes the result!) |
+| `3w.net.xml` | SUMO network, car traffic only | `3w.osm` + `build.py net` |
+| `3w_{low,mid,high}.rou.xml` | synthetic demand, 3600 s, seed 0; levels calibrated (below) | `3w.net.xml` + `build.py demand` |
+| `3w_{low,mid,high}.webster.json` | Webster fixed-time program per level: {signal: {phase state: green [s]}} | `.rou.xml` + `build.py webster` |
 
-Dane OSM: © współtwórcy OpenStreetMap, licencja ODbL.
+OSM data: (c) OpenStreetMap contributors, ODbL licence.
 
-Configi: `configs/sim/sumo_krakow3w_{low,mid,high}.cfg`, np.
+Configs: `configs/sim/sumo_krakow3w_{low,mid,high}.cfg`, e.g.
 
 ```bash
 .venv/bin/tsc train -a maxpressure -w sumo -n sumo_krakow3w_mid --seed 0   # baseline
-.venv/bin/tsc core -w sumo -n sumo_krakow3w_mid --seed 0                   # rdzeń GAT+PPO
+.venv/bin/tsc core -w sumo -n sumo_krakow3w_mid --seed 0                   # GAT+PPO core
 ```
 
-Próg bramki-reguły (sieć bez głowy niepewności) — `runs/heads/rule_ref__<sieć>.json`:
+Rule gate threshold (a network without an uncertainty head), `runs/heads/rule_ref__<network>.json`:
 
 ```bash
-.venv/bin/tsc rulecal -n sumo_krakow3w_mid      # kwantyl 99,5% udziału zamrożonych ruchów, czysty ruch, Advanced-MP
+.venv/bin/tsc rulecal -n sumo_krakow3w_mid      # 99.5% quantile of the frozen-movement share, clean traffic, Advanced-MP
 ```
 
-| poziom | próg | fałszywe alarmy na czystym (budżet 0,5%) |
+| level | threshold | false alarms on clean (budget 0.5%) |
 |---|---:|---:|
-| low | 1,00 | **2,8%** |
-| mid | 0,79 | 0,52% |
-| high | 0,79 | 0,63% |
+| low | 1.00 | **2.8%** |
+| mid | 0.79 | 0.52% |
+| high | 0.79 | 0.63% |
 
-Na `low` budżetu NIE da się dotrzymać: przy małym ruchu całe skrzyżowania bywają puste
-(wszystkie prawdziwe ruchy stoją), a reguła nie odróżni pustego od martwego — kwantyl siada
-na 1,0. Bramka będzie tam czasem oddawać puste węzły Websterowi; koszt powinien być mały
-(pusty węzeł), ale ma wyjść w kolumnie `clean`, nie zostać założony. Na mid/high lekkie
-przekroczenie to dyskretność udziałów (węzeł ma 1–7 wlotów, udział ma kilka wartości).
+On `low` the budget CANNOT be met: with little traffic whole intersections are sometimes
+empty (all real movements stand still), and the rule cannot tell empty from dead, so the
+quantile sits at 1.0. The gate will sometimes hand empty nodes to Webster there; the cost
+should be small (an empty node), but it must show in the `clean` column rather than be
+assumed. On mid/high the slight overrun is the discreteness of shares (a node has 1-7
+approaches, so the share takes few values).
 
-## Poziomy popytu (skalibrowane 2026-10-09)
+## Demand levels (calibrated 2026-10-09)
 
-Sweep okresu `randomTrips` na programach netconverta, 1 h ruchu (`DEMAND_PERIOD` w `build.py`):
+A sweep of the `randomTrips` period on netconvert programs, 1 h of traffic (`DEMAND_PERIOD`
+in `build.py`):
 
-| popyt | strata czasu | teleporty | kolejka na wjazd | |
+| demand | time loss | teleports | insertion queue | |
 |---:|---:|---:|---:|---|
-| 1800 poj/h | 100 s | 0 | 0 | **low** — wyraźnie niedosycony |
-| 3000 poj/h | 119 s | 21 | 0 | (dawne mid; teleporty z zakleszczenia na Prądnickiej) |
-| 4500 poj/h | 141 s | 2 | 0 | **mid** — tuż przed kolanem nasycenia |
-| 5143 poj/h | 230 s | 31 (0,6%) | 0 | **high** — za kolanem, bez masowych teleportów |
-| 5538 poj/h | 302 s | 107 (1,9%) | 18 | teleporty zaczynają psuć ATT |
-| 6000 poj/h | 322 s | 239 | 26 | zakleszczenie |
-| 8000+ poj/h | 492+ s | 1482+ | 370+ | ATT bez znaczenia |
+| 1800 veh/h | 100 s | 0 | 0 | **low**: clearly undersaturated |
+| 3000 veh/h | 119 s | 21 | 0 | (former mid; teleports from a gridlock on Pradnicka) |
+| 4500 veh/h | 141 s | 2 | 0 | **mid**: just before the saturation knee |
+| 5143 veh/h | 230 s | 31 (0.6%) | 0 | **high**: past the knee, without mass teleports |
+| 5538 veh/h | 302 s | 107 (1.9%) | 18 | teleports start to spoil ATT |
+| 6000 veh/h | 322 s | 239 | 26 | gridlock |
+| 8000+ veh/h | 492+ s | 1482+ | 370+ | ATT meaningless |
 
-Teleporty przy dawnym mid: 10 z 21 na 7-metrowym odcinku ul. Prądnickiej (krawędź
-`117386961`, skrzyżowanie bez sygnalizacji, 1 → 2 → 1 pas) — artefakt importu OSM poza
-sterowanymi skrzyżowaniami; przy obecnych poziomach nie występuje.
+Teleports at the former mid: 10 of 21 on a 7 m stretch of ul. Pradnicka (edge
+`117386961`, an unsignalised junction, 1 -> 2 -> 1 lanes), an OSM import artefact outside
+the controlled intersections; it does not occur at the current levels.
 
-## FixedTime = Webster per poziom popytu
+## FixedTime = Webster per demand level
 
-`build.py webster` → SUMO `tlsCycleAdaptation` (Webster: C₀ = (1,5L + 5)/(1 − Y), zielone
-proporcjonalnie do przepływów krytycznych), strata 5 s/fazę (= przejście z protokołu:
-3 s żółtego + 2 s all-red), nasycenie 1800 poj/h/pas. Każdy poziom popytu to inna pora
-dnia — odpowiednik krakowskiej praktyki „≥4 programy na pory dnia" — a FixedTime dostaje
-program pod TEN popyt, który widzą wszystkie sterowniki.
+`build.py webster` -> SUMO `tlsCycleAdaptation` (Webster: C0 = (1.5L + 5)/(1 - Y), greens
+proportional to critical flows), lost time 5 s/phase (= the protocol's transition: 3 s
+yellow + 2 s all-red), saturation 1800 veh/h/lane. Each demand level is another time of
+day, the counterpart of Krakow's practice of ">=4 time-of-day programs", and FixedTime gets
+the program for THE demand all controllers see.
 
-Program wchodzi przez klucz `fixedTimeProgram` w `configs/sim/sumo_krakow3w_*.cfg`:
-`tsc degrade` buduje z niego i kolumnę `fixedtime`, i cel przełączenia bramki
-(`runner/degrade.fixed_time_program`). Dopasowanie po STANIE sygnałów fazy, nie po
-indeksie — adapter odkrywa fazy symulacją. LibSignalowy agent `fixedtime` (`tsc train -a
-fixedtime`) programu NIE czyta — wynik FixedTime do pracy brać z `tsc degrade`.
+The program enters through the `fixedTimeProgram` key in `configs/sim/sumo_krakow3w_*.cfg`:
+`tsc degrade` builds both the `fixedtime` column and the gate's switch target from it
+(`runner/degrade.fixed_time_program`). Matching is by the phase's signal STATE, not the
+index, since the adapter discovers phases by simulation. LibSignal's `fixedtime` agent
+(`tsc train -a fixedtime`) does NOT read the program; take FixedTime results for the
+thesis from `tsc degrade`.
 
-## Baseline'y po kalibracji (2026-10-09, ścieżka `tsc degrade`, czysty ruch, seed 0)
+## Baselines after calibration (2026-10-09, `tsc degrade` path, clean traffic, seed 0)
 
-ATT [s] / przepustowość (pojazdy, które dojechały):
+ATT [s] / throughput (vehicles that finished):
 
 | | low (1800) | mid (4500) | high (5143) |
 |---|---:|---:|---:|
-| FixedTime `t_fixed: 30` | 331,4 / 1618 | 390,2 / 3941 | 471,8 / 4111 |
-| **FixedTime Webster** | 297,9 / 1645 | **347,6 / 3972** | **390,5 / 4374** |
-| Efficient-MP | 282,6 / 1651 | 373,5 / 3846 | 477,2 / 3928 |
-| Advanced-MP | **279,8 / 1655** | 396,9 / 3676 | 481,5 / 3840 |
+| FixedTime `t_fixed: 30` | 331.4 / 1618 | 390.2 / 3941 | 471.8 / 4111 |
+| **FixedTime Webster** | 297.9 / 1645 | **347.6 / 3972** | **390.5 / 4374** |
+| Efficient-MP | 282.6 / 1651 | 373.5 / 3846 | 477.2 / 3928 |
+| Advanced-MP | **279.8 / 1655** | 396.9 / 3676 | 481.5 / 3840 |
 
-Przy niskim ruchu metody ciśnieniowe wygrywają (−6% ATT); przy `mid`/`high` PRZEGRYWAJĄ
-z Websterem o 7–23% i tracą przepustowość. Stare porównanie z `t_fixed: 30` maskowało to
-całkowicie. Hipoteza do sprawdzenia (README z 2026-09-13 widziało to samo przy dawnym
-`high`): krótkie odcinki między klastrami skrzyżowań + `t_min` → spillback, którego
-ciśnienie lokalne nie widzi; Webster koordynuje przez sam podział zielonego.
+At low traffic the pressure methods win (-6% ATT); at `mid`/`high` they LOSE to Webster by
+7-23% and lose throughput. The old comparison with `t_fixed: 30` hid this completely. A
+hypothesis to check (the README of 2026-09-13 saw the same at the former `high`): short
+stretches between intersection clusters + `t_min` -> spillback local pressure cannot see;
+Webster coordinates through the green split alone.
 
-## Świat SUMO = adapter, nie upstream
+## The SUMO world = the adapter, not upstream
 
-Każdy bieg `-w sumo` idzie przez `src/tsc_marl/libsignal/sumo_world.py`, który
-nadpisuje upstreamowy `world_sumo.World` w Registry — dla rdzenia i baseline'ów
-LibSignala naraz. Dziewięć różnic opisuje docstring modułu. Najważniejsze dla liczb:
+Every `-w sumo` run goes through `src/tsc_marl/libsignal/sumo_world.py`, which overrides
+upstream `world_sumo.World` in the Registry, for the core and LibSignal's baselines alike.
+The module docstring lists nine differences. The most important for the numbers:
 
-- **przejścia faz jak w CityFlow** — upstream po pierwszych sekundach epizodu
-  przełączał fazy natychmiast, bez fazy przejściowej (zmierzone: 0 kroków
-  przejścia po 30. sekundzie), więc `yellow` i `t_min` nic nie znaczyły,
-- **ATT jak w CityFlow** (dojechane + wciąż jadące) — upstream liczył tylko dojechane,
-- **`lane_waiting_count` = stojące teraz** — to nagroda rdzenia,
-- **zielone warunkowe `g` w fazach** — 32 lanelinki na 13 sygnalizacjach,
-- **graf sąsiedztwa po drogach** (`build_graph`, zasięg 600 m) — graf LibSignala
-  miał tu 1 krawędź na 25 węzłów, nasz ma 51 (stopień wejściowy 0–4).
+- **phase transitions as in CityFlow**: after the first seconds of an episode upstream
+  switched phases immediately, without a transition phase (measured: 0 transition steps
+  after second 30), so `yellow` and `t_min` meant nothing,
+- **ATT as in CityFlow** (finished + still running): upstream counted finished ones only,
+- **`lane_waiting_count` = halted now**: this is the core's reward,
+- **permissive green `g` in phases**: 32 lanelinks at 13 signals,
+- **a road-based neighbour graph** (`build_graph`, reach 600 m): LibSignal's graph had
+  1 edge for 25 nodes here, ours has 51 (in-degree 0-4).
 
-**Wyniki `-w sumo` sprzed adaptera są nieważne** (w tym tabela z pierwszej wersji
-tego README).
+**`-w sumo` results from before the adapter are invalid** (including the table in the first
+version of this README).
 
-## Profil sieci
+## Network profile
 
-25 sygnalizacji, silnie niejednorodnych — dokładnie to, czego nie ma w JiNan/HangZhou:
+25 signals, strongly heterogeneous, exactly what JiNan/HangZhou lack:
 
-- wloty: 1–7 (1×1, 6×2, 6×3, 6×4, 3×5, 2×6, 1×7),
-- fazy zielone: 2–7 (13×2, 7×3, 3×4, 1×5, 1×7) → rdzeń maskuje nieistniejące fazy,
-- 13 z 25 ma zielone warunkowe `g` (skręt w lewo z ustąpieniem),
-- kilka to same przejścia dla pieszych (1–2 wloty, 4 ruchy),
-- 8 sygnalizacji steruje kilkoma węzłami (klastry `joinedS_…`).
+- approaches: 1-7 (1x1, 6x2, 6x3, 6x4, 3x5, 2x6, 1x7),
+- green phases: 2-7 (13x2, 7x3, 3x4, 1x5, 1x7) -> the core masks missing phases,
+- 13 of 25 have permissive green `g` (left turn yielding),
+- several are pedestrian crossings only (1-2 approaches, 4 movements),
+- 8 signals control several nodes (`joinedS_...` clusters).
 
-## Wyniki baseline'ów — STARE (2026-09-13, sprzed kalibracji popytu i Webstera)
+## Baseline results: OLD (2026-09-13, before demand calibration and Webster)
 
-⚠ Poziomy popytu i FixedTime z tej tabeli są nieaktualne — nowa tabela wyżej
-(sekcja „Baseline'y po kalibracji").
+WARNING: the demand levels and FixedTime of this table are out of date; the new table is
+above (section "Baselines after calibration").
 
-| popyt | pojazdy | FixedTime | MaxPressure | Advanced-MP | throughput FT / MP / AMP |
+| demand | vehicles | FixedTime | MaxPressure | Advanced-MP | throughput FT / MP / AMP |
 |---|---|---|---|---|---|
-| low  | 1800 | 331,4 | 274,4 | 282,0 | 1618 / 1656 / 1660 |
-| mid  | 3000 | 336,7 | 276,2 | 283,0 | 2716 / 2756 / 2755 |
-| high | 4500 | 390,2 | 394,5 | 466,6 | 3941 / **3662** / **3465** |
+| low  | 1800 | 331.4 | 274.4 | 282.0 | 1618 / 1656 / 1660 |
+| mid  | 3000 | 336.7 | 276.2 | 283.0 | 2716 / 2756 / 2755 |
+| high | 4500 | 390.2 | 394.5 | 466.6 | 3941 / **3662** / **3465** |
 
-ATT w sekundach. Odczyt: przy low/mid MaxPressure bije FixedTime o ~18%, Advanced-MP
-o ~16%, przy tej samej przepustowości. Przy high metody ciśnieniowe przepuszczają
-mniej pojazdów (MP −7%, Advanced-MP −12%), a Advanced-MP ma najgorsze ATT —
-do zbadania (spillback na krótkich odcinkach? przesycenie?). ATT raportować zawsze
-razem z throughput.
+ATT in seconds. Reading: at low/mid MaxPressure beats FixedTime by ~18%, Advanced-MP by
+~16%, at the same throughput. At high the pressure methods let fewer vehicles through
+(MP -7%, Advanced-MP -12%), and Advanced-MP has the worst ATT; to investigate (spillback on
+short stretches? oversaturation?). Always report ATT together with throughput.
 
-Rdzeń GAT+PPO: na razie tylko smoke (2 epizody × 600 s, ~24 s) — działa, bez wyniku.
-Pełny bieg (200 epizodów × 3600 s) szacunkowo ~3 h na laptopie CPU.
+GAT+PPO core: a smoke test only so far (2 episodes x 600 s, ~24 s), it works, no result.
+A full run (200 episodes x 3600 s) is estimated at ~3 h on a laptop CPU.
 
-## Znane ograniczenia (do rozwiązania przed wynikami do pracy)
+## Known limitations (to solve before results for the thesis)
 
-1. ~~Popyt nieskalibrowany~~ — skalibrowany 2026-10-09 (sekcja „Poziomy popytu").
-2. ~~FixedTime to `t_fixed: 30`~~ — Webster per poziom od 2026-10-09 (sekcja „FixedTime").
-3. **Zbiór sygnalizacji = cały bbox**, łącznie z Kijowską, Dietla, Pawią i przejściami
-   dla pieszych. Do decyzji: przyciąć do korytarza (pozostałe `--tls.unset`?) czy zostawić.
-4. **Graf:** 4 z 25 węzłów bez sąsiadów przy zasięgu 600 m (brzeg bboxu, przejścia
-   dla pieszych) — GAT widzi tam tylko siebie. Zasięg to slot ablacyjny.
-5. **Brak tramwajów** (usuwane w `net`) — priorytet tramwajowy poza zakresem na teraz.
+1. ~~Demand not calibrated~~: calibrated 2026-10-09 (section "Demand levels").
+2. ~~FixedTime is `t_fixed: 30`~~: Webster per level since 2026-10-09 (section "FixedTime").
+3. **Signal set = the whole bbox**, including Kijowska, Dietla, Pawia and pedestrian
+   crossings. To decide: cut to the corridor (`--tls.unset` for the rest?) or keep.
+4. **Graph:** 4 of 25 nodes without neighbours at a 600 m reach (bbox edge, pedestrian
+   crossings); the GAT sees only itself there. The reach is an ablation slot.
+5. **No trams** (removed in `net`); tram priority out of scope for now.

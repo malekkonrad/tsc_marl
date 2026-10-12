@@ -1,22 +1,22 @@
-# Ślad bramki — plan `t2_trace`
+# Gate trace: plan `t2_trace`
 
-Rysunek wyjaśniający, nie pomiar: **jeden seed, jedno losowanie awarii**. Liczby do pracy pochodzą z `t2_gate_real` (3 seedy × 5 losowań).
+An explanatory figure, not a measurement: **one seed, one failure draw**. Numbers for the thesis come from `t2_gate_real` (3 seeds x 5 draws).
 
-Pole = tryb sterowania węzła po histerezie. Znacznik = detektor strzelił, ale histereza wstrzymała przełączenie (wejście wymaga `k_on` = 3 kolejnych decyzji, wyjście `k_off` = 6 — stąd pole jest SZERSZE niż ciąg znaczników).
+Fill = the node's control mode after hysteresis. Marker = the detector fired, but hysteresis held the switch (entry needs `k_on` = 3 consecutive decisions, exit `k_off` = 6, hence the fill is WIDER than the run of markers).
 
-## Co ten rysunek pokazał, a czego nie było w żadnej tabeli
+## What the figure showed that no table did
 
-**Fałszywe alarmy reguły na czystym ruchu są artefaktem ZIMNEGO STARTU, nie stanem ustalonym.** Cały udział 1,5% mieści się w decyzjach 13–24, tuż po tym, jak bufor 12 odczytów się napełni, i nie wraca do końca epizodu. Mechanizm jest zrozumiały: na starcie sieć jest pusta, a pas bez ruchu raportuje stałe zero — czyli dokładnie to, co detektor martwy (`max − min < 1e−6`). Strażnik rozgrzewki kończy się, gdy bufor jest PEŁNY, a nie gdy jest pełny SENSOWNYCH odczytów.
+**The rule's false alarms on clean traffic are a COLD START artefact, not a steady state.** The whole 1.5% share falls in decisions 13-24, right after the 12-reading buffer fills, and does not return until the end of the episode. The mechanism is clear: at the start the network is empty, and a lane without traffic reports a constant zero, exactly what a dead detector does (`max - min < 1e-6`). The warm-up guard ends when the buffer is FULL, not when it is full of MEANINGFUL readings.
 
-Trzy wnioski: (1) w stanie ustalonym reguła na czystym nie strzela w ogóle, czyli jest LEPSZA, niż mówi `gate_share`; (2) to wyjaśnia, czemu udział na czystym wynosił 1,5%, a budżet kalibracji 0,5% — różnica nie jest przekroczeniem budżetu, tylko innym zjawiskiem; (3) poprawka jest tania i warta zmierzenia: wydłużyć rozgrzewkę albo wymagać, by podejrzany ruch miał kiedykolwiek NIEZEROWY odczyt. Niezmierzone — zapisać jako otwarte.
+Three conclusions: (1) in the steady state the rule does not fire on clean at all, i.e. it is BETTER than `gate_share` says; (2) this explains why the clean share was 1.5% against a calibration budget of 0.5%: the difference is not a budget overrun but another phenomenon; (3) the fix is cheap and worth measuring: lengthen the warm-up or require a suspicious movement to have ever had a NONZERO reading. Unmeasured, to be recorded as open.
 
-Dla porównania, pod awarią zimny start odpowiada za 13–14% przypadków (`mask0p5`, `mask0p25_intersection`) i 44% przy `hold` — tam reszta rozkłada się na cały epizod, bo awaria trwa.
+For comparison, under failure the cold start accounts for 13-14% of cases (`mask0p5`, `mask0p25_intersection`) and 44% under `hold`; there the rest spreads over the whole episode, since the failure persists.
 
 ## cityflow_jinan3x4_4ph
 
-![ślad bramki cityflow_jinan3x4_4ph](figures/gate_trace_cityflow_jinan3x4_4ph.png)
+![gate trace cityflow_jinan3x4_4ph](figures/gate_trace_cityflow_jinan3x4_4ph.png)
 
-| scenariusz | udział par w trybie reguły | węzły, które choć raz przejęły |
+| scenario | share of pairs in rule mode | nodes that took over at least once |
 |---|---:|---:|
 | `clean` | 1.5% | 5/12 |
 | `gauss2` | 0.0% | 0/12 |

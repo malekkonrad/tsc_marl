@@ -1,10 +1,9 @@
-"""Wspólna infrastruktura testów.
+"""Shared test fixtures.
 
-Testy ATS nie potrzebują silnika: `Intersection` z LibSignala parsuje roadnet
-sam, a jedyne, czego dotyka na zewnątrz, to `world.eng.set_tl_phase` w `reset()`.
-Budujemy więc PRAWDZIWY obiekt `Intersection` na atrapie świata — dzięki temu
-test sprawdza kod, który naprawdę biegnie w symulacji, a nie własną kopię
-parsowania roadnetu, i chodzi w ~0,1 s zamiast stawiać CityFlow.
+ATS tests need no engine: LibSignal's `Intersection` parses the roadnet itself and
+touches the outside only through `world.eng.set_tl_phase` in `reset()`. We build the
+REAL `Intersection` on a stub world, so the tests check the code that runs in the
+simulation, not our own copy of the roadnet parsing, in ~0.1 s instead of starting CityFlow.
 """
 
 from __future__ import annotations
@@ -16,7 +15,7 @@ import pytest
 
 from tsc_marl import libsignal, paths
 
-libsignal.bootstrap()  # ścieżka do submodułu + SUMO_HOME (world/__init__ ciągnie world_sumo)
+libsignal.bootstrap()  # submodule path + SUMO_HOME (world/__init__ imports world_sumo)
 
 ROADNETS = {
     "jinan3x4": paths.DATA / "raw_data" / "jinan_3x4" / "roadnet_3_4_4phase.json",
@@ -37,8 +36,8 @@ class _FakeWorld:
 
 
 def load_intersections(roadnet: Path):
-    """(obiekt Intersection, surowy dict z roadnetu) dla każdego niewirtualnego skrzyżowania."""
-    from world.world_cityflow import Intersection  # noqa: PLC0415 - dopiero po bootstrapie
+    """(Intersection object, raw roadnet dict) for every non-virtual intersection."""
+    from world.world_cityflow import Intersection  # importable only after bootstrap
 
     raw = json.loads(roadnet.read_text())
     world = _FakeWorld()
@@ -49,30 +48,26 @@ def load_intersections(roadnet: Path):
 def roadnet(request):
     path = ROADNETS[request.param]
     if not path.is_file():
-        pytest.skip(f"brak roadnetu {path} (dane pobiera się osobno — patrz data/README.md)")
+        pytest.skip(f"no roadnet {path} (see data/README.md)")
     return load_intersections(path)
 
 
-# --------------------------------------------------------------------------
-# Poniżej: prawdziwy świat CityFlow + agent, dla testów oznaczonych `slow`.
-# Idzie TĄ SAMĄ sekwencją interfejsów co produkcja (`session.build_interfaces`) —
-# LibSignal trzyma konfigurację w globalnym `Registry`, zapełnianym w ściśle
-# określonej kolejności, więc nie da się zbudować `World` inaczej. Własna kopia
-# sekwencji w teście znaczyłaby, że test przechodzi także wtedy, gdy produkcyjna
-# się rozjedzie. Registry nie ma czystego resetu, dlatego świat stawiamy RAZ na sesję.
-# --------------------------------------------------------------------------
+# A real CityFlow world + agent for tests marked `slow`. It goes through the SAME
+# interface sequence as production (`session.build_interfaces`): LibSignal fills its
+# global Registry in a fixed order, and a private copy of that sequence would let the
+# test pass after production drifts. The Registry has no clean reset, so the world is
+# built ONCE per session.
 
 NETWORK = "cityflow_jinan3x4_4ph"
 
 
 def _build(agent_name: str, network: str):
-    libsignal.bootstrap()
-
+    # lazy: importing LibSignal fills its Registry, which only the slow tests need
     from common.registry import Registry
     from utils.logger import build_config
 
     from tsc_marl.libsignal import session
-    from tsc_marl.runner.train import parse_args
+    from tsc_marl.libsignal.experiment import parse_args
 
     session.register_engine_components()
     args = parse_args(["-a", agent_name, "-n", network])
@@ -88,9 +83,9 @@ def _build(agent_name: str, network: str):
 
 @pytest.fixture(scope="session")
 def advanced_colight_world():
-    """(world, agent) dla `advancedcolight` na JiNan 3×4. ~15 s — stąd `slow`."""
+    """(world, agent) for `advancedcolight` on JiNan 3x4; ~15 s, hence `slow`."""
     cfg = paths.CONFIGS / "sim" / f"{NETWORK}.cfg"
-    snapshot = cfg.read_bytes()  # LibSignal wpisuje tu ścieżki logów replaya
+    snapshot = cfg.read_bytes()  # LibSignal writes replay log paths here
     try:
         yield _build("advancedcolight", NETWORK)
     finally:

@@ -1,8 +1,8 @@
-"""Testy prototypu 2.0 — podział danych i pętla ucząca.
+"""Decision-uncertainty prototype: data split and training loop.
 
-Podział jest tu jedyną rzeczą, która potrafi cicho unieważnić CAŁĄ bramkę: ruch
-w `flow.json` jest deterministyczny, więc epizody mają identyczną trajektorię
-i „podział po epizodach" byłby przeciekiem co do bitu.
+The split is the one thing that can silently invalidate the whole gate: traffic
+in `flow.json` is deterministic, so episodes share the same trajectory and a split
+"by episode" would leak bit for bit.
 """
 
 from __future__ import annotations
@@ -16,8 +16,8 @@ N, F, PH, DEC, EPS = 3, 8, 2, 10, 2
 
 
 def fake(seed: int = 0) -> P.Loaded:
-    """Zbiór o kształcie zrzutu, z etykietą WYZNACZALNĄ z wejścia (argmax pierwszych
-    PH kolumn) — dzięki temu można sprawdzić, czy pętla ucząca w ogóle się uczy."""
+    """A dataset shaped like a dump, with a label COMPUTABLE from the input (argmax
+    of the first PH columns), so one can check that training learns at all."""
     rng = np.random.default_rng(seed)
     t = DEC * EPS
     x = rng.normal(size=(t, N, F)).astype(np.float32)
@@ -37,14 +37,14 @@ def fake(seed: int = 0) -> P.Loaded:
     )
 
 
-def test_czas_liczy_sie_wewnatrz_epizodu():
-    """`times` musi wracać do zera na każdym epizodzie — inaczej podział po czasie
-    wyciąłby cały drugi epizod zamiast ogona każdego."""
+def test_time_restarts_within_each_episode():
+    """`times` restarts at zero every episode; otherwise the time split would cut
+    out the whole second episode instead of each episode's tail."""
     data = fake()
     assert data.times.tolist() == list(range(DEC)) * EPS
 
 
-def test_podzial_po_czasie_nie_zachodzi_i_tnie_kazdy_epizod():
+def test_time_split_is_disjoint_and_cuts_every_episode():
     data = fake()
     train, test = data.mask(0.7, True), data.mask(0.7, False)
     assert not (train & test).any() and (train | test).all()
@@ -53,8 +53,8 @@ def test_podzial_po_czasie_nie_zachodzi_i_tnie_kazdy_epizod():
         assert train[block].sum() == 7 and test[block].sum() == 3
 
 
-def test_zerohop_ma_petle_wlasne_a_nie_pusty_graf():
-    """Regresja do pułapki z `heads`: 0-hop to N pętli własnych, NIE zero krawędzi."""
+def test_zero_hop_has_self_loops_not_an_empty_graph():
+    """Regression for the `heads` trap: 0-hop is N self-loops, NOT zero edges."""
     data = fake()
     edges = P._edges(data, P.TrainConfig(hop=False))
     assert edges.shape == (2, N)
@@ -63,10 +63,9 @@ def test_zerohop_ma_petle_wlasne_a_nie_pusty_graf():
 
 
 @pytest.mark.parametrize("mode", ["edl", "softmax"])
-def test_petla_uczaca_faktycznie_sie_uczy(mode):
-    """Zadanie jest wyznaczalne z wejścia, więc trafność ma wyraźnie przebić
-    losowanie. Test łapie błędy ZNAKU straty i pomylone osie — przechodzą przez
-    wszystkie testy kształtów."""
+def test_training_loop_actually_learns(mode):
+    """The task is computable from the input, so accuracy must clearly beat chance;
+    catches loss SIGN errors and swapped axes that pass every shape test."""
     data = fake()
     cfg = P.TrainConfig(mode=mode, epochs=60, train_scenarios=("clean",), batch=8)
     _, history = P.fit(data, cfg)
@@ -74,7 +73,7 @@ def test_petla_uczaca_faktycznie_sie_uczy(mode):
     assert history[-1]["loss"] < history[0]["loss"]
 
 
-def test_predict_zwraca_oba_zrodla_niepewnosci():
+def test_predict_returns_both_uncertainty_sources():
     data = fake()
     cfg = P.TrainConfig(epochs=5, train_scenarios=("clean",), batch=8, mc_passes=3)
     model, _ = P.fit(data, cfg)
@@ -85,12 +84,12 @@ def test_predict_zwraca_oba_zrodla_niepewnosci():
     assert np.allclose(out["edl_total"], out["edl_aleatoric"] + out["edl_epistemic"], atol=1e-5)
 
 
-def test_tabela_zna_scenariusze_treningowe():
+def test_table_knows_the_training_scenarios():
     data = fake()
     cfg = P.TrainConfig(epochs=5, train_scenarios=("clean",), batch=8, mc_passes=3)
     model, _ = P.fit(data, cfg)
     rows = P.scenario_table(model, data, cfg)
     assert {r["scenario"] for r in rows} == {"clean", "gauss1"}
-    assert [r["trenowany"] for r in rows] == [True, False]
-    # zbiór OOD nigdy nie jest „trenowany", nawet jeśli nazwa scenariusza się zgadza
-    assert all(not r["trenowany"] for r in P.scenario_table(model, data, cfg, label="d0p5"))
+    assert [r["trained"] for r in rows] == [True, False]
+    # an OOD set is never "trained", even when the scenario name matches
+    assert all(not r["trained"] for r in P.scenario_table(model, data, cfg, label="d0p5"))

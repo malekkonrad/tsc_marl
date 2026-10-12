@@ -1,50 +1,52 @@
-# T2 — ABLACJA KANAŁÓW UW-attention: którędy płynie zysk modulacji.
+# T2: UW-attention CHANNEL ABLATION: which way the modulation's gain flows.
 #
-# SKĄD TEN PLAN. `t2_uw_rule` (results/t2_uw_rule.md) dał dwa wyniki naraz:
-#   - UW z wyrocznią/regułą DZIAŁA samodzielnie (JiNan `mask0p5_int` −167 / −122 s),
-#   - złożone z bramką fallbacku NIE DAJE NIC przy maskach skrzyżowań, nawet gdy obie
-#     strony są wyroczniami (+0,1 / +0,3 / −0,1 / −0,2 s).
-# Wyjaśnienie zapisane w C5 (`kontrybucje.md`): modulacja po stronie źródła działa
-# dwoma kanałami — PĘTLĄ WŁASNĄ (martwy węzeł przestaje ufać swojej obserwacji
-# i opiera się na sąsiadach) i KRAWĘDZIAMI (sąsiedzi przestają ufać jego wiadomości).
-# Bramka zabiera akcję martwego węzła, więc pętla własna traci znaczenie; zero
-# złożenia oznaczałoby, że kanał krawędzi jest wart ~0, a cały zysk szedł pętlą.
-# To jest jednak WNIOSKOWANIE Z RÓŻNICY DWÓCH PAR, nie pomiar. Ten plan mierzy wprost.
+# WHERE THIS PLAN COMES FROM. `t2_uw_rule` (results/t2_uw_rule.md) gave two results at once:
+#   - UW with the oracle/rule WORKS on its own (JiNan `mask0p5_int` -167 / -122 s),
+#   - composed with the fallback gate it GIVES NOTHING under intersection masks, even when
+#     both sides are oracles (+0.1 / +0.3 / -0.1 / -0.2 s).
+# The explanation recorded in C5 (`kontrybucje.md`): source-side modulation works through
+# two channels, the SELF LOOP (a dead node stops trusting its own observation and leans on
+# its neighbours) and the EDGES (neighbours stop trusting its message). The gate takes
+# away the dead node's action, so the self loop loses its meaning; a zero for the
+# composition would mean the edge channel is worth ~0 and the whole gain went through
+# the loop. That is, however, INFERENCE FROM THE DIFFERENCE OF TWO PAIRS, not a
+# measurement. This plan measures it directly.
 #
-# KONSTRUKCJA. `channels` w `uw` zeruje jedną z dwóch części wektora log ρ
-# (`controllers.source_log_rho`). Części są ROZŁĄCZNE i sumują się do pełnej
-# modulacji, więc ablacja rozkłada zysk dokładnie. Wyrocznia, nie reguła: pytanie
-# dotyczy MECHANIZMU, a wyrocznia nie ma rozgrzewki ani fałszywych alarmów — każda
-# różnica między kolumnami to wyłącznie kanał. Wszystkie kolumny z tego samego
-# checkpointu, ten sam zestaw losowań, n = 5.
+# CONSTRUCTION. `channels` in `uw` zeroes one of the two parts of the log rho vector
+# (`controllers.source_log_rho`). The parts are DISJOINT and sum to the full modulation,
+# so the ablation decomposes the gain exactly. The oracle, not the rule: the question is
+# about the MECHANISM, and the oracle has no warm-up or false alarms, so every difference
+# between columns is the channel alone. All columns from the same checkpoint, the same
+# set of draws, n = 5.
 #
-#   gatppo                    rdzeń (odniesienie wszystkich par)
-#   gatppo_uw_oracle          oba kanały — powtórka `t2_uw_src` w tym zestawie losowań
-#   gatppo_uw_oracle_self     tylko pętle własne
-#   gatppo_uw_oracle_edges    tylko krawędzie między węzłami
+#   gatppo                    core (reference of every pair)
+#   gatppo_uw_oracle          both channels, a repeat of `t2_uw_src` on this set of draws
+#   gatppo_uw_oracle_self     self loops only
+#   gatppo_uw_oracle_edges    edges between nodes only
 #
-# SCENARIUSZE: tylko te, w których wyrocznia w ogóle widzi awarię. Na `gauss*`
-# i `drift*` u ≡ 0 z definicji (brak martwych pasów) — ich wiersze byłyby kopią
-# rdzenia i tylko podnosiłyby liczbę porównań przy progu |t| ≥ 2,8.
+# SCENARIOS: only those in which the oracle sees a failure at all. Under `gauss*` and
+# `drift*` u = 0 by definition (no dead lanes); their rows would copy the core and only
+# raise the number of comparisons at the |t| >= 2.8 threshold.
 #
-# HIPOTEZY ZAPISANE PRZED POMIAREM:
-#   K1 (główna): przy `mask*_intersection` `self` ≈ `all` na obu sieciach — Δ vs rdzeń
-#      co najmniej 80% pełnej modulacji, różnica między nimi poniżej progu.
-#   K2: przy `mask*_intersection` `edges` bez istotnego zysku vs rdzeń.
-#   K3 (maski pasowe, `mask0p5`): też głównie pętla — przy częściowo oślepionym
-#      węźle jego własne odczyty są w połowie zdrowe, więc oczekiwany zysk `self`
-#      mniejszy niż przy martwym skrzyżowaniu, ale znak ten sam. `edges` ~0.
-#   K4 (`hold`): wszystkie trzy ~0 — pełna modulacja była tam na zerze (`t2_uw_src`).
-#   Odczyt:
-#   - K1 + K2 → zdanie z C5 („zysk UW idzie przez pętlę własną, ochrona sąsiadów jest
-#     warta ~0") przestaje być wnioskowaniem i może stać w abstrakcie.
-#   - `edges` istotne samo, a złożenie z bramką i tak 0 → kanał sąsiadów ISTNIEJE,
-#     tylko bramka go zastępuje (np. sąsiedzi tracą przez złe AKCJE martwego węzła,
-#     a nie przez jego wiadomości). C5 do korekty: redundancja zostaje, mechanizm inny.
-#   - `self` i `edges` osobno słabe, razem silne → kanały współdziałają; rozkład
-#     zysku nie jest addytywny i zdanie o „samej pętli" trzeba wycofać.
+# HYPOTHESES RECORDED BEFORE MEASUREMENT:
+#   K1 (main): at `mask*_intersection` `self` ~ `all` on both networks: delta vs the core
+#      at least 80% of the full modulation, the difference between them below threshold.
+#   K2: at `mask*_intersection` `edges` without a significant gain vs the core.
+#   K3 (lane masks, `mask0p5`): also mainly the loop; with a partly blinded node its own
+#      readings are half healthy, so the expected `self` gain is smaller than for a dead
+#      intersection, but of the same sign. `edges` ~0.
+#   K4 (`hold`): all three ~0; the full modulation was at zero there (`t2_uw_src`).
+#   Reading:
+#   - K1 + K2 -> the C5 statement ("the UW gain goes through the self loop, protecting
+#     neighbours is worth ~0") stops being inference and can stand in the abstract.
+#   - `edges` significant alone while the composition with the gate is still 0 -> the
+#     neighbour channel EXISTS, only the gate replaces it (e.g. neighbours lose through the
+#     dead node's bad ACTIONS rather than its messages). C5 to correct: the redundancy
+#     stays, the mechanism differs.
+#   - `self` and `edges` weak apart, strong together -> the channels interact; the gain
+#     decomposition is not additive and the "loop alone" statement must be withdrawn.
 #
-# WYMAGA: nic poza checkpointami rdzenia (wyrocznia nie używa artefaktów głowy).
+# REQUIRES: nothing beyond the core checkpoints (the oracle uses no head artefacts).
 name: t2_uw_channels
 mode: realistic
 draws: 5

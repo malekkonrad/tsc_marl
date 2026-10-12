@@ -1,76 +1,62 @@
-"""Advanced-CoLight (Zhang i in. 2022) — CoLight z ATS zamiast `lane_count`.
+"""Advanced-CoLight (Zhang et al., 2022): CoLight with the ATS state instead of `lane_count`.
 
-Architektura sieci BEZ ZMIAN: `ColightNet` dostaje tylko inny wymiar wejścia
-(jedyne miejsce, gdzie wymiar obserwacji wchodzi do modelu, to pierwszy
-`nn.Linear` w `Embedding_MLP`). Cały wkład metody siedzi w reprezentacji stanu
-— i to jest teza papieru: "expression might be enough".
+The network architecture is unchanged: `ColightNet` only gets another input
+size (the first `nn.Linear` of `Embedding_MLP`). The method's whole
+contribution is the state representation, which is the paper's claim
+("expression might be enough").
 
-Stan (sekcja 4.3): bieżąca faza + ATS (Def. 11), czyli dla KAŻDEGO ruchu (l,m)
-efficient pressure e(l,m) i effective running r(l,m). Nie sumy po fazie — te są
-decyzją Advanced-MP, nie stanem RL. Liczy to `tsc_marl.core.features.StateBuilder`,
-ten sam, którego używa rdzeń Fazy 1: stan jest CAŁYM wkładem tej metody, więc
-dwie jego kopie byłyby najgorszym możliwym miejscem na rozjazd (patrz docstring
-`core/features.py`).
-
-Reward zostaje CoLightowy (−Σ kolejek) — Advanced-XLight zmienia tylko stan.
+State: the current phase plus ATS (Def 11), i.e. efficient pressure and
+effective running per movement. It is computed by `core.features.StateBuilder`,
+the same code the core uses, because two copies of the state would be the worst
+possible place for a discrepancy. The reward stays CoLight's (minus the queues).
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 from agent.base import Registry
 from agent.colight import CoLightAgent
 
-if TYPE_CHECKING:  # `features` importuje `tsc_marl.libsignal.agents` po `ats`, więc import
-    # tych nazw na górze zamykałby cykl: features -> agents/__init__ -> tutaj ->
-    # features. W runtime bierzemy je leniwie, w `_builder()`.
-    from tsc_marl.core.features import StateBuilder, Structs
+from tsc_marl.core.features import StateBuilder, Structs
 
 
 @Registry.register_model("advancedcolight")
 class AdvancedCoLight(CoLightAgent):
     def __init__(self, world, rank):
-        # MUSI powstać przed super(): __init__ rodzica woła _build_model(), a ten
-        # sięga po builder. CoLight sam mapuje rank → intersection_id, więc tu
-        # przekazujemy rank surowy (podwójne mapowanie = TypeError na liście).
+        # Must exist before super(): the parent's __init__ calls _build_model(),
+        # which needs the builder. CoLight maps rank -> intersection id itself, so
+        # the raw rank is passed on.
         self._features: StateBuilder | None = None
         super().__init__(world, rank)
 
-    # ------------------------------------------------------------------ statyka
+    # ------------------------------------------------------------------ static
 
     def _builder(self) -> StateBuilder:
-        """Leniwy i cache'owany: roadnet się nie zmienia, a `reset()` między
-        epizodami przebudowuje tylko generatory. Leniwość jest konieczna, bo
-        wołane z DWÓCH stron — z `_build_model()` (w środku `__init__` rodzica,
-        zanim istnieje optymalizator) i z `get_ob()`.
+        """Lazy and cached (the roadnet does not change), because it is needed both
+        by `_build_model()`, inside the parent's `__init__`, and by `get_ob()`.
 
-        Kolejność wierszy to `world.intersections` — ta sama, w której rodzic
-        zbudował `ob_generator`. Rdzeń Fazy 1 poda tu `graph.order_intersections`;
-        na roadnetach CityFlow obie są dziś identyczne (patrz `core/graph.py`).
+        Rows follow `world.intersections`, the order the parent built its
+        generators in; on CityFlow roadnets it equals the graph order
+        (`core/graph.py`).
         """
         if self._features is None:
-            from tsc_marl.core.features import StateBuilder  # noqa: PLC0415 - cykl importów
-
-            # state/reward na sztywno: Advanced-CoLight JEST zdefiniowany przez ATS,
-            # więc nie podlega przełącznikowi ablacyjnemu — ten należy do rdzenia.
+            # state and reward fixed: Advanced-CoLight IS defined by ATS
             self._features = StateBuilder.from_registry(
                 self.world, self.world.intersections, state="ats", reward="queue"
             )
         return self._features
 
     def _ats_structs(self) -> list[Structs]:
-        """Statyka per skrzyżowanie — używane przez testy kontraktu obserwacji."""
+        """Per-intersection static data, used by the observation contract tests."""
         return self._builder().structs
 
     def _build_model(self):
-        """Nadpisane WYŁĄCZNIE po to, żeby podać właściwy `ob_length` — sieć
-        buduje rodzic. Wołane dwa razy (model + target), więc idempotentne."""
+        """Overridden only to set `ob_length`; the parent builds the network.
+        Called twice (model and target), so idempotent."""
         self.ob_length = self._builder().ob_length
         return super()._build_model()
 
-    # ---------------------------------------------------------------- obserwacja
+    # ---------------------------------------------------------------- observation
 
     def get_ob(self):
-        """[skrzyżowania, ob_length] — układ wiersza i padding opisuje `core/features.py`."""
+        """[N, ob_length]; row layout and padding as in `core/features.py`."""
         return self._builder().observe()

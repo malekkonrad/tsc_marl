@@ -1,6 +1,6 @@
 includes:
   - configs/tsc/base.yml
-  - configs/tsc/thesis_protocol.yml   # zamrożony protokół — musi być OSTATNI
+  - configs/tsc/thesis_protocol.yml   # frozen protocol, must be LAST
 
 
 model:
@@ -27,9 +27,9 @@ model:
 
 trainer:
   learning_start: 1000
-  # STABILIZACJA (2026-08-16): bez tego CoLight rozbiega się — dochodzi do ~315
-  # i rozpada do 1200. update_target_rate liczy się w DECYZJACH, więc 10 znaczyło
-  # aktualizację sieci target co 10 kroków (standard DQN: 500-10000).
-  buffer_size: 20000        # było 5000
-  update_target_rate: 500   # było 10
+  # STABILISATION (2026-08-16): without it CoLight diverges, reaching ~315 and then
+  # falling apart to 1200. update_target_rate counts DECISIONS, so 10 meant updating
+  # the target network every 10 steps (DQN standard: 500-10000).
+  buffer_size: 20000        # was 5000
+  update_target_rate: 500   # was 10
   episodes: 200

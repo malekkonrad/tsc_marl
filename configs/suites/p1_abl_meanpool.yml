@@ -1,7 +1,7 @@
-# Ablacja 1.6 — GAT vs mean-pool (GraphSAGE): czy UCZONE ważenie sąsiadów coś daje.
-# Actor: SAGEConv(mean) zamiast MultiHeadAttModel, reszta bez zmian (krytyk zostaje GAT).
+# Ablation 1.6: GAT vs mean-pool (GraphSAGE): does LEARNED neighbour weighting help?
+# Actor: SAGEConv(mean) instead of MultiHeadAttModel, the rest unchanged (the critic stays GAT).
 #
-# GPU (entry: core) — do liczenia na gliderze. Sufiks run_id = nazwa pliku.
+# GPU (entry: core), to be computed on the GPU machine. run_id suffix = file name.
 entry: core
 mode: realistic
 timeout: 86400
@@ -9,7 +9,7 @@ ngpu: "0"
 
 grid:
   network: [cityflow_jinan3x4_4ph, cityflow_hangzhou4x4_4ph]
-  seed: [0, 1, 2, 3, 4]   # 3–4 dograne pod Fazę 3 (protokół: 5 seedów w robustness)
+  seed: [0, 1, 2, 3, 4]   # 3-4 added for Phase 3 (protocol: 5 seeds in robustness)
 
 overrides:
   model: {encoder: mean}

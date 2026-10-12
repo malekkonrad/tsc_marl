@@ -27,14 +27,6 @@ LAYERS = (
 )
 RANK = {name: rank for rank, names in enumerate(LAYERS) for name in names}
 
-# Known upward imports, each scheduled for removal. The test fails both on a new
-# violation and on a listed one that no longer exists, so the list cannot go stale.
-KNOWN = {
-    ("core/loop.py", "robustness"),
-    ("libsignal/experiment.py", "runner"),
-    ("libsignal/session.py", "runner"),
-}
-
 
 def imported_modules(path: Path) -> set[str]:
     out: set[str] = set()
@@ -80,9 +72,7 @@ def test_layers_cover_the_package():
 
 
 def test_no_upward_imports():
-    found = upward_imports()
-    assert found - KNOWN == set(), "new upward import"
-    assert KNOWN - found == set(), "fixed, remove it from KNOWN"
+    assert upward_imports() == set()
 
 
 def test_runlog_is_independent():

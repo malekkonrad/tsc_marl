@@ -1,28 +1,29 @@
 # data/
 
-Wejściowe scenariusze symulacji. Wyniki uruchomień **nie** trafiają tutaj, tylko do
-`runs/` (patrz `logger.root_dir` w `configs/tsc/base.yml`).
+Input simulation scenarios. Run outputs do **not** go here but to `runs/` (see
+`logger.root_dir` in `configs/tsc/base.yml`).
 
-## Co jest wersjonowane
+## What is versioned
 
-Tylko sieci faktycznie używane w pracy (9,4 MB) — reszta zbiorów LibSignala
-(~300 MB: Manhattan, arterial, cologne, …) zostaje w upstreamie i nie jest tu kopiowana:
+Only the networks used in the thesis (~25 MB). The rest of LibSignal's datasets
+(~300 MB: Manhattan, arterial, Cologne, ...) stays upstream and is not copied here.
 
-| katalog | sieć | źródło |
+| directory | network | source |
 |---|---|---|
-| `raw_data/jinan_3x4/` | JiNan 3×4, warianty ruchu real / 2000 / 2500 | dane z linii CoLight / Advanced-XLight |
-| `raw_data/hangzhou_4x4_advanced/` | HangZhou 4×4, warianty real / 5816 | jw. |
-| `raw_data/krakow_3w/` | Kraków, al. Trzech Wieszczów (SUMO, 25 sygnalizacji), popyt low / mid / high | OSM + `build.py` (case study, gałąź `cracow-case-study`) |
+| `raw_data/jinan_3x4/` | JiNan 3x4 (CityFlow); traffic: real, 2000, 2500, demand x0.25/0.5/0.75 | CoLight / Advanced-XLight line of work; demand variants from `tsc demand` |
+| `raw_data/hangzhou_4x4_advanced/` | HangZhou 4x4 (CityFlow); traffic: real, 5816 | as above |
+| `raw_data/krakow_3w/` | Krakow, al. Trzech Wieszczow (SUMO, 25 signals); demand low / mid / high + held-out `mid_s1` | OSM + `build.py`, see its [README](raw_data/krakow_3w/README.md) |
 
-Każda sieć ma wariant 4-fazowy (`roadnet_*_4phase.json`) — to jego używa protokół
-pracy, bo w nim liczą swoje wyniki papiery referencyjne. Sieci podpina się przez
-`configs/sim/*.cfg` (pola `roadnetFile` / `flowFile`, ścieżki względem `data/`).
+Each CityFlow network has a 4-phase variant (`roadnet_*_4phase.json`). The thesis
+protocol uses it, because the reference papers report their results on it. Networks
+are wired in through `configs/sim/*.cfg` (`roadnetFile` / `flowFile` fields, paths
+relative to `data/`).
 
-## Formaty
+## Formats
 
-- **CityFlow**: `roadnet.json` + `flow.json` + config wskazujący na oba.
-- **SUMO**: `*.net.xml` + `*.rou.xml` (+ `*.sumocfg`). Konwersja z CityFlow:
-  `python external/LibSignal/../CityFlow/tools/Converter/converter.py`.
+- **CityFlow**: `roadnet.json` + `flow.json` + a config pointing to both.
+- **SUMO**: `*.net.xml` + `*.rou.xml`; the Krakow network also has a fixed-time
+  Webster program per demand level (`*.webster.json`).
 
-Duże sieci generowane lokalnie są ignorowane przez `.gitignore` — commituj wyłącznie
-scenariusze, których wyniki trafiają do pracy, żeby dało się je odtworzyć.
+Large locally generated networks are ignored by `.gitignore`; commit only the
+scenarios whose results go into the thesis, so they can be reproduced.

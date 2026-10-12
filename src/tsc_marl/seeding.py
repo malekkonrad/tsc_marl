@@ -3,7 +3,7 @@
 The simulator is not seeded here: traffic is fixed by the flow file, and
 `PYTHONHASHSEED` must be set before the interpreter starts (`runner/cli.py`).
 PyTorch does not guarantee bit-identical results across versions, hardware or
-CPU vs GPU, so results are reported as mean ± std over seeds.
+CPU vs GPU, so results are reported as mean +- std over seeds.
 """
 
 from __future__ import annotations

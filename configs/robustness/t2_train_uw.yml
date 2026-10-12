@@ -1,32 +1,33 @@
-# T2 dla polityki TRENOWANEJ z mechanizmem — trzy ramiona z §3 notatki Fazy 3.
+# T2 for the policy TRAINED with the mechanism: the three arms of section 3 of the
+# Phase 3 note.
 #
-# Kolumny (wszystkie zamrożone, ta sama pętla ewaluacji, te same losowania awarii):
+# Columns (all frozen, the same evaluation loop, the same failure draws):
 #
-#   gatppo           rdzeń trenowany na CZYSTYM        rodzic: p1_gate
-#   gatppo_fail      rdzeń trenowany Z AWARIAMI        rodzic: p1_fail
-#   gatppo_fail_uw   rdzeń z awariami I Z UW-attention rodzic: p1_uw
-#   fixedtime        próg opłacalności fallbacku
+#   gatppo           core trained on CLEAN            parent: p1_gate
+#   gatppo_fail      core trained WITH FAILURES       parent: p1_fail
+#   gatppo_fail_uw   core with failures AND UW        parent: p1_uw
+#   fixedtime        fallback break-even threshold
 #
-# TU RÓŻNICE NIE SĄ Z JEDNEGO CHECKPOINTU — i to jest jedyna rzecz, która odróżnia ten
-# plan od `t2_uw`. Tam modulacja była bezparametrowa, więc dwie kolumny liczyły się
-# z tych samych wag i porównanie było parowane po SAMYM mechanizmie. Tutaj każde ramię
-# ma własny trening, więc parujemy po (sieć, scenariusz, seed, losowanie) — wspólne
-# zostają losowanie awarii i ruch, a rozrzut między seedami wchodzi do różnicy.
-# Dlatego seedów ma być tyle samo w każdej kolumnie i dlatego `baseline:` jest tu
-# JAWNY: raport domyślnie sparowałby `gatppo_fail_uw` z pierwszą kolumną `policy`,
-# czyli z ramieniem 1 — a to mierzyłoby „trening z awariami + mechanizm" razem.
+# HERE THE DIFFERENCES DO NOT COME FROM ONE CHECKPOINT, the only thing that sets this
+# plan apart from `t2_uw`. There the modulation had no parameters, so two columns were
+# computed from the same weights and the comparison was paired on the mechanism ALONE.
+# Here each arm has its own training, so pairing is by (network, scenario, seed, draw):
+# the failure draw and the traffic stay shared, and the between-seed spread enters the
+# difference. Hence the same number of seeds in every column, and hence an EXPLICIT
+# `baseline:`: by default the report would pair `gatppo_fail_uw` with the first `policy`
+# column, arm 1, which would measure "failure training + mechanism" together.
 #
-# DWA ODCZYTY TEJ SAMEJ TABELI:
-#   ramię 2 vs ramię 1  = ile daje sam trening z awariami (domain randomization),
-#   ramię 3 vs ramię 2  = ile daje MECHANIZM ponad to. To jest wynik tej pracy.
+# TWO READINGS OF THE SAME TABLE:
+#   arm 2 vs arm 1  = what failure training alone gives (domain randomization),
+#   arm 3 vs arm 2  = what the MECHANISM adds on top. This is the result of this work.
 #
-# WYMAGA: policzonych suite'ów `p1_fail` i `p1_uw` (wagi tylko na gliderze) oraz
-# artefaktów głowy dla każdej sieci planu:
-#   tsc obshead -n <sieć> --save --window 12 --persistence
+# REQUIRES: computed suites `p1_fail` and `p1_uw` (weights only on the GPU machine) and
+# head artefacts for every network of the plan:
+#   tsc obshead -n <network> --save --window 12 --persistence
 #
-# Scenariusze CELOWO te same co w `t2_uw` — tabele obu planów mają się czytać obok
-# siebie, a hipoteza A3b (mechanizm pomaga przy szumie i CZĘŚCIOWYCH maskach, nie przy
-# martwym całym skrzyżowaniu) jest zapisana dla tego zestawu.
+# Scenarios DELIBERATELY the same as in `t2_uw`: the tables of both plans are to be read
+# side by side, and hypothesis A3b (the mechanism helps under noise and PARTIAL masks,
+# not for a whole dead intersection) is recorded for this set.
 name: t2_train_uw
 mode: realistic
 draws: 5
@@ -40,18 +41,18 @@ controllers:
     agent: gatppo
     seeds: [0, 1, 2]
     parent: "{agent}__{network}__s{seed}_y{yellow}__p1_fail"
-    # Odczyt „ramię 2 vs ramię 1" z nagłówka tego planu MA BYĆ W RAPORCIE, a nie
-    # doliczany ręcznie. Dopisane po pierwszym przebiegu: bez tej linii kolumna jest
-    # gołym `policy` i nie trafiała do żadnej tabeli Δ, przez co −140,0 s przy
-    # `mask0p5` (t = −10,8, lepszy w 15/15) nie pojawiło się nigdzie w `t2_train_uw.md`.
+    # The "arm 2 vs arm 1" reading from this plan's header MUST BE IN THE REPORT, not
+    # computed by hand. Added after the first pass: without this line the column is a
+    # plain `policy` and reached no delta table, so -140.0 s at `mask0p5`
+    # (t = -10.8, better in 15/15) appeared nowhere in `t2_train_uw.md`.
     baseline: gatppo
   gatppo_fail_uw:
     agent: gatppo
     seeds: [0, 1, 2]
     parent: "{agent}__{network}__s{seed}_y{yellow}__p1_uw"
-    # Mechanizm MUSI być włączony także w ewaluacji — polityka uczyła się z nim,
-    # więc bez niego mierzylibyśmy sieć pozbawioną części własnego wejścia.
-    # τ to samo co w treningu (`configs/suites/p1_uw.yml`).
+    # The mechanism MUST be on at evaluation too: the policy learned with it, so without
+    # it we would measure a network deprived of part of its own input.
+    # tau the same as in training (`configs/suites/p1_uw.yml`).
     uw: {tau: 0.25}
     baseline: gatppo_fail
   fixedtime: {}

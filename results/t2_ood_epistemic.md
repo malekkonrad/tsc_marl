@@ -1,53 +1,53 @@
-# Test gałęzi epistemic — plan `t2_ood`
+# Epistemic branch test: plan `t2_ood`
 
-Zamrożone sterowniki na ruchu spoza treningu. Polityki uczone biorą wagi z sieci TRENINGOWEJ (`{base}` w szablonie rodzica), ruch jest z innego pliku. Czysty scenariusz = czyste odczyty; `gauss2` = ten sam ruch z szumem detektorów, żeby porównać reakcję ensemble na nowy ruch z reakcją na awarię sensora.
+Frozen controllers on traffic outside training. Learned policies take weights from the TRAINING network (`{base}` in the parent template), traffic comes from another file. The clean scenario = clean readings; `gauss2` = the same traffic with detector noise, to compare the ensemble's reaction to new traffic with its reaction to sensor failure.
 
-## Polityki uczone na `cityflow_jinan3x4_4ph`
+## Policies trained on `cityflow_jinan3x4_4ph`
 
-### ATT na czystych odczytach
+### ATT on clean readings
 
-| ruch | fixedtime | efficientmp | advancedmp | advancedcolight | gatppo | rdzeń vs lepsza reguła |
+| traffic | fixedtime | efficientmp | advancedmp | advancedcolight | gatppo | core vs better rule |
 |---|---:|---:|---:|---:|---:|---:|
-| ruch treningowy | 507.0 | 313.9 | 301.8 | 294.4 ± 1.8 | 295.8 ± 1.2 | -2.0% (p 1.00) |
-| popyt ×0,25 | 322.3 | 258.8 | 256.8 | 252.9 ± 1.1 | 253.2 ± 1.7 | -1.4% (p 1.00) |
-| inny plik ruchu (2000) | 412.1 | 288.4 | 288.1 | 283.1 ± 0.7 | 283.6 ± 0.6 | -1.5% (p 1.00) |
+| training traffic | 507.0 | 313.9 | 301.8 | 294.4 +- 1.8 | 295.8 +- 1.2 | -2.0% (p 1.00) |
+| demand x0.25 | 322.3 | 258.8 | 256.8 | 252.9 +- 1.1 | 253.2 +- 1.7 | -1.4% (p 1.00) |
+| another traffic file (2000) | 412.1 | 288.4 | 288.1 | 283.1 +- 0.7 | 283.6 +- 0.6 | -1.5% (p 1.00) |
 
-▲ = rdzeń ISTOTNIE gorszy od lepszego z MaxPressure (jednostronny t, p < 0.05, seedy polityki vs deterministyczna reguła) — tylko tam gałąź (a) miałaby robotę.
+(!) = the core SIGNIFICANTLY worse than the better MaxPressure (one-sided t, p < 0.05, policy seeds vs the deterministic rule); only there would branch (a) have work.
 
-### Rozbieżność 5 actorów (epistemic w polityce)
+### Disagreement of 5 actors (epistemic in the policy)
 
-| ruch | MI czyste | MI szum σ=2 | niezgodne głosy czyste | niezgodne głosy szum |
+| traffic | MI clean | MI noise sigma=2 | disagreeing votes clean | disagreeing votes noise |
 |---|---:|---:|---:|---:|
-| ruch treningowy | 0.2283 | 0.2872 | 26.5% | 27.8% |
-| popyt ×0,25 | 0.1689 | 0.2781 | 34.4% | 29.0% |
-| inny plik ruchu (2000) | 0.1892 | 0.2843 | 24.9% | 28.7% |
+| training traffic | 0.2283 | 0.2872 | 26.5% | 27.8% |
+| demand x0.25 | 0.1689 | 0.2781 | 34.4% | 29.0% |
+| another traffic file (2000) | 0.1892 | 0.2843 | 24.9% | 28.7% |
 
-## Polityki uczone na `cityflow_hangzhou4x4_4ph`
+## Policies trained on `cityflow_hangzhou4x4_4ph`
 
-### ATT na czystych odczytach
+### ATT on clean readings
 
-| ruch | fixedtime | efficientmp | advancedmp | advancedcolight | gatppo | rdzeń vs lepsza reguła |
+| traffic | fixedtime | efficientmp | advancedmp | advancedcolight | gatppo | core vs better rule |
 |---|---:|---:|---:|---:|---:|---:|
-| ruch treningowy | 568.9 | 331.2 | 325.5 | 317.4 ± 0.5 | 317.5 ± 0.7 | -2.5% (p 1.00) |
-| inny plik ruchu (5816) | 559.5 | 428.0 | 419.0 | 437.7 ± 15.1 | 420.1 ± 1.5 | +0.3% (p 0.10) |
+| training traffic | 568.9 | 331.2 | 325.5 | 317.4 +- 0.5 | 317.5 +- 0.7 | -2.5% (p 1.00) |
+| another traffic file (5816) | 559.5 | 428.0 | 419.0 | 437.7 +- 15.1 | 420.1 +- 1.5 | +0.3% (p 0.10) |
 
-▲ = rdzeń ISTOTNIE gorszy od lepszego z MaxPressure (jednostronny t, p < 0.05, seedy polityki vs deterministyczna reguła) — tylko tam gałąź (a) miałaby robotę.
+(!) = the core SIGNIFICANTLY worse than the better MaxPressure (one-sided t, p < 0.05, policy seeds vs the deterministic rule); only there would branch (a) have work.
 
-### Rozbieżność 5 actorów (epistemic w polityce)
+### Disagreement of 5 actors (epistemic in the policy)
 
-| ruch | MI czyste | MI szum σ=2 | niezgodne głosy czyste | niezgodne głosy szum |
+| traffic | MI clean | MI noise sigma=2 | disagreeing votes clean | disagreeing votes noise |
 |---|---:|---:|---:|---:|
-| ruch treningowy | 0.1082 | 0.2125 | 16.6% | 21.2% |
-| inny plik ruchu (5816) | 0.1858 | 0.2327 | 22.4% | 22.8% |
+| training traffic | 0.1082 | 0.2125 | 16.6% | 21.2% |
+| another traffic file (5816) | 0.1858 | 0.2327 | 22.4% | 22.8% |
 
-## Werdykt
+## Verdict
 
-1. **Rdzeń nie przegrywa istotnie z MaxPressure na żadnym ruchu spoza treningu.** Remis w granicach rozrzutu seedów: „inny plik ruchu (5816)” +0.3% (p 0.10). Przełączenie na MaxPressure nie ma tu nic do zyskania, więc gałąź (a) dwupoziomowego fallbacku nie ma roboty — fallback jednopoziomowy do FixedTime.
+1. **The core does not lose significantly to MaxPressure on any traffic outside training.** A tie within the seed spread: "another traffic file (5816)" +0.3% (p 0.10). Switching to MaxPressure has nothing to gain here, so branch (a) of the two-level fallback has no work: a single-level fallback to FixedTime.
 
-Rozbieżność 5 actorów (MI) na CZYSTYM wejściu, względem ruchu treningowego:
+Disagreement of 5 actors (MI) on CLEAN input, relative to training traffic:
 
-* `popyt ×0,25`: MI -0.0594 (-26%); dla porównania szum σ=2 na ruchu treningowym +0.0588 → nie rośnie.
-* `inny plik ruchu (2000)`: MI -0.0392 (-17%); dla porównania szum σ=2 na ruchu treningowym +0.0588 → nie rośnie.
-* `inny plik ruchu (5816)`: MI +0.0776 (+72%); dla porównania szum σ=2 na ruchu treningowym +0.1043 → **rośnie** — sygnał nowego ruchu istnieje (słabiej niż pod szumem: bez kanału obserwacyjnego nieodróżnialny).
+* `demand x0.25`: MI -0.0594 (-26%); for comparison, noise sigma=2 on training traffic +0.0588 -> does not rise.
+* `another traffic file (2000)`: MI -0.0392 (-17%); for comparison, noise sigma=2 on training traffic +0.0588 -> does not rise.
+* `another traffic file (5816)`: MI +0.0776 (+72%); for comparison, noise sigma=2 on training traffic +0.1043 -> **rises**: a new-traffic signal exists (weaker than under noise: indistinguishable without the observation channel).
 
-2. **Gałąź (a) broni się tylko tam, gdzie OBA warunki zachodzą na tym samym ruchu:** istotna przegrana z MaxPressure i wzrost MI na czystym wejściu. Nie zachodzą nigdzie — MI rośnie na „inny plik ruchu (5816)”, ale tam polityka nie przegrywa, więc nie ma czego ratować.
+2. **Branch (a) holds only where BOTH conditions hold on the same traffic:** a significant loss to MaxPressure and an MI rise on clean input. They hold nowhere; MI rises on "another traffic file (5816)", but there the policy does not lose, so there is nothing to rescue.

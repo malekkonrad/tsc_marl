@@ -1,24 +1,19 @@
-"""Próg bramki-REGUŁY bez głowy niepewności — dla sieci, na których głowy nie ma (Kraków).
+"""Rule-gate threshold without an uncertainty head, for networks that have no head (Krakow).
 
-DLACZEGO OSOBNO. Na JiNan/HangZhou próg reguły powstaje razem z głową obserwacyjną
-(`tsc obshead --save`, artefakt `runs/heads/gate_ref__<sieć>.npz`), bo tam ablacja
-porównywała regułę z bramką UQ i oba progi MUSIAŁY wyjść z jednego kryterium. Ten potok
-czyta jednak roadnet w formacie CityFlow (`obs_head.movement_sources`) i uczy głowę,
-której reguła nie potrzebuje — a UW-attention, jedyny inny odbiorca głowy, jest
-zamknięty (C5). Na SUMO liczymy więc SAM próg reguły, tym samym przepisem:
+On JiNan/HangZhou the rule threshold is computed together with the observation
+head (`tsc obshead --save`, `runs/heads/gate_ref__<net>.npz`), so that the rule
+and the UQ gate come from one criterion. That pipeline reads CityFlow roadnets
+and trains a head the rule does not need, so on SUMO the rule threshold alone is
+computed with the same recipe:
 
-    próg = kwantyl (1 − GATE_FALSE_ALARM) udziału zamrożonych ruchów węzła,
-           na czystym ruchu pod ekspertem Advanced-MP, tylko kroki z PEŁNYM oknem.
+    threshold = (1 - GATE_FALSE_ALARM) quantile of a node's frozen-movement
+                fraction, on clean traffic under the Advanced-MP expert,
+                full-window steps only.
 
-Ekspert ten sam co w zrzucie BC (`uncertainty/dataset.py`), budżet fałszywych alarmów
-ten sam (0,5%), okno to samo (12) — różnica wobec `gate_ref` jest tylko taka, że nie
-ma podziału na część uczącą głowę, bo głowy nie ma. Udział liczony po PRAWDZIWYCH
-ruchach (`StateBuilder.movement_mask`), inaczej dopchane zera Krakowa (1–7 wlotów)
-wyglądałyby na martwe detektory.
-
-Sygnał reguły ZALEŻY OD POLITYKI (`p1_uw_rule`: nienauczona polityka głodzi wloty
-i reguła strzela na 87% krawędzi przy czystym ruchu). Kalibracja pod ekspertem mówi
-więc „ile fałszywych alarmów przy rozsądnym sterowaniu", nie przy każdym.
+Same expert, false-alarm budget (0.5%) and window (12) as `gate_ref`; fractions
+over REAL movements (`StateBuilder.movement_mask`), otherwise Krakow's padding
+would look like dead detectors. The rule's signal depends on the policy, so this
+calibrates "false alarms under reasonable control", not under any control.
 """
 
 from __future__ import annotations
@@ -29,17 +24,16 @@ from pathlib import Path
 
 import numpy as np
 
-#: Okno reguły — to samo, z którym policzono `gate_ref` JiNan/HangZhou
-#: (`tsc obshead --save --window 12 --persistence`).
+#: Rule window, as in JiNan/HangZhou `gate_ref` (`tsc obshead --save --window 12`).
 RULE_WINDOW = 12
 RULE_FORMAT = 1
 
 
 @dataclass(frozen=True)
 class RuleReference:
-    """Próg samej reguły. Pola `window` i `rule` jak w `obs_head.GateReference`, więc
-    `build_gate` i `uw_signal` czytają oba artefakty tak samo; `uq` i `u_mov_ref`
-    są None — bramka UQ na takiej sieci nie istnieje i ma się o tym głośno dowiedzieć."""
+    """Rule threshold alone. `window` and `rule` as in `obs_head.GateReference`, so
+    both artefacts are read the same way; `uq` and `u_mov_ref` are None, so a UQ
+    gate on such a network fails loudly."""
 
     network: str
     window: int
@@ -48,17 +42,16 @@ class RuleReference:
     expert: str
     episodes: int
     decisions: int
-    # Odsetek par (decyzja, węzeł) z czystego ruchu, na których bramka z TYM progiem by
-    # strzeliła (porównanie `>=`, jak w `RuleGate`). Budżet to cel, a to jest pomiar:
-    # na rzadkim ruchu (Kraków `low`) całe węzły bywają puste, kwantyl siada na 1,0
-    # i budżetu nie da się dotrzymać — liczba ma to pokazać, a nie ukryć.
+    # Share of clean (decision, node) pairs on which a gate with THIS threshold would
+    # fire (`>=`, as in `RuleGate`). The budget is the target, this is the
+    # measurement: on sparse traffic the quantile can sit at 1.0 and miss the budget.
     false_alarm_realized: float = float("nan")
     uq: None = None
     u_mov_ref: None = None
 
 
 def rule_path(network: str) -> Path:
-    from tsc_marl.paths import RUNS  # noqa: PLC0415
+    from tsc_marl.paths import RUNS
 
     return RUNS / "heads" / f"rule_ref__{network}.json"
 
@@ -66,33 +59,35 @@ def rule_path(network: str) -> Path:
 def load_rule(path: Path, *, network: str) -> RuleReference:
     raw = json.loads(path.read_text())
     if raw.pop("format", None) != RULE_FORMAT:
-        raise ValueError(f"{path.name}: format progu reguły inny niż {RULE_FORMAT}")
+        raise ValueError(f"{path.name}: rule threshold format is not {RULE_FORMAT}")
     ref = RuleReference(**raw)
     if ref.network != network:
-        raise SystemExit(f"{path.name} policzony dla '{ref.network}', a sieć to '{network}'")
+        raise SystemExit(
+            f"{path.name} was computed for '{ref.network}', the network is '{network}'"
+        )
     return ref
 
 
 def threshold(scores: np.ndarray, false_alarm: float) -> float:
-    """Kwantyl (1 − budżet) udziałów [kroki z pełnym oknem, N] — jak w `obs_head.gate_reference`."""
+    """(1 - budget) quantile of fractions [full-window steps, N], as in `obs_head`."""
     return float(np.quantile(scores, 1.0 - false_alarm))
 
 
 def calibrate(
     network: str, *, episodes: int = 3, expert: str = "advancedmp", false_alarm: float | None = None
 ) -> Path:
-    """Czysty ruch pod ekspertem → udział zamrożonych ruchów per (decyzja, węzeł) → próg."""
-    from tsc_marl import libsignal  # noqa: PLC0415
+    """Clean traffic under the expert -> frozen fraction per (decision, node) -> threshold."""
+    from tsc_marl import libsignal
 
     libsignal.bootstrap()
-    from tsc_marl.core.features import StateBuilder  # noqa: PLC0415
-    from tsc_marl.core.graph import RoadNetGraph  # noqa: PLC0415
-    from tsc_marl.core.loop import LoopConfig, TrafficEnv  # noqa: PLC0415
-    from tsc_marl.libsignal import session  # noqa: PLC0415
-    from tsc_marl.robustness import controllers as c  # noqa: PLC0415
-    from tsc_marl.uncertainty.obs_head import GATE_FALSE_ALARM  # noqa: PLC0415
+    from tsc_marl.core.features import StateBuilder
+    from tsc_marl.core.graph import RoadNetGraph
+    from tsc_marl.core.loop import LoopConfig, TrafficEnv
+    from tsc_marl.libsignal import session
+    from tsc_marl.robustness import controllers as c
+    from tsc_marl.uncertainty.obs_head import GATE_FALSE_ALARM
 
-    budzet = GATE_FALSE_ALARM if false_alarm is None else false_alarm
+    budget = GATE_FALSE_ALARM if false_alarm is None else false_alarm
     patch = {"model": {"graphic": True}}
     with session.standalone_world(expert, network, config_patch=patch) as (world, _a, config):
         loop = LoopConfig.from_registry()
@@ -110,27 +105,26 @@ def calibrate(
             t_min=int(model["t_min"]),
             w1=model.get("w1") if expert == "advancedmp" else None,
         )
-        # próg ma być mierzony DOKŁADNIE tą funkcją, którą potem liczy bramka —
-        # `threshold=inf`, bo interesuje nas surowy wynik, nie maska
-        regula = c.RuleGate(
+        # measured with EXACTLY the gate's function; `threshold=inf` gives the raw score
+        rule = c.RuleGate(
             window=RULE_WINDOW, threshold=np.inf, n_mov=feats.n_mov, real=feats.movement_mask()
         )
-        wyniki = []
+        scores_list = []
         for ep in range(episodes):
             obs = env.reset(ep)
-            regula.reset()
+            rule.reset()
             for t in range(loop.decisions):
-                regula.mask(obs)
-                if t >= RULE_WINDOW - 1:  # tylko pełne okno — rozgrzewka to same zera
-                    wyniki.append(regula.last_score.copy())
+                rule.mask(obs)
+                if t >= RULE_WINDOW - 1:  # full window only; warm-up is all zeros
+                    scores_list.append(rule.last_score.copy())
                 obs, _, _ = env.step(mp.act(obs))
-    scores = np.stack(wyniki)
+    scores = np.stack(scores_list)
     ref = RuleReference(
         network=network,
         window=RULE_WINDOW,
-        rule=(prog := threshold(scores, budzet)),
-        false_alarm=float(budzet),
-        false_alarm_realized=float((scores >= prog).mean()),
+        rule=(cut := threshold(scores, budget)),
+        false_alarm=float(budget),
+        false_alarm_realized=float((scores >= cut).mean()),
         expert=expert,
         episodes=episodes,
         decisions=int(scores.shape[0]),

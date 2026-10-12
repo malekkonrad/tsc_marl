@@ -1,21 +1,17 @@
-"""Krzywe uczenia z zapisanych biegów — `make plot`.
+"""Learning curves from stored runs: `make plot`.
 
-Czyta metryki przez `runlog`, a dla biegów W TOKU spada na `_DTL.log` LibSignala,
-który jest dopisywany na bieżąco. Dzięki temu ta sama komenda działa w trakcie
-7-godzinnego treningu i po nim — `metrics.csv` powstaje dopiero na końcu biegu,
-bo `experiment.ingest` czyta log silnika po fakcie.
+Reads metrics through `runlog`, and for runs IN PROGRESS falls back to LibSignal's
+`_DTL.log`, written as training goes (`metrics.csv` appears only at the end, when
+`experiment.ingest` reads the engine log). Plotting lives here, not in `runlog`,
+because the `_DTL.log` fallback is LibSignal knowledge.
 
-Rysowanie mieszka tutaj, a nie w `runlog`, bo fallback na `_DTL.log` to wiedza
-o LibSignalu. Część generyczna (długa ramka → wykres) siedzi w `draw` i da się
-ją stąd wyjąć, gdyby kiedyś miała trafić do narzędzia.
-
-    make plot                                   # ATT (test) ze wszystkich biegów
+    make plot                                   # test ATT of all runs
     python -m tsc_marl.analysis.plot --metric queue --split train
     python -m tsc_marl.analysis.plot -r colight__jinan__s0_y5 colight__jinan__s1_y5 --band
-    python -m tsc_marl.analysis.plot -o results/figures/krzywa.png
+    python -m tsc_marl.analysis.plot -o results/figures/curve.png
 
-Rysunki GATE-a Fazy 1 (`gate_figures`) nie idą przez CLI — rysuje je `tsc table`
-razem z `results/p1_gate.md`, żeby raport i wykresy zawsze pochodziły z tych samych biegów.
+The Phase 1 GATE figures (`gate_figures`) are drawn by `tsc table` together with
+`results/p1_gate.md`, so the report and the figures come from the same runs.
 """
 
 from __future__ import annotations
@@ -26,7 +22,7 @@ from pathlib import Path
 
 import matplotlib
 
-matplotlib.use("Agg")  # bez GUI: liczymy na maszynie zdalnej, zapisujemy plik
+matplotlib.use("Agg")  # no GUI: runs on a remote machine, saves a file
 import matplotlib.pyplot as plt  # noqa: E402
 
 from tsc_marl.libsignal import experiment as tx  # noqa: E402
@@ -36,7 +32,7 @@ DEFAULT_OUT = RUNS / "plots"
 
 
 def live_curve(view) -> list[dict]:
-    """Metryki biegu, który jeszcze nie zdążył ich zapisać — prosto z logu silnika."""
+    """Metrics of a run that has not stored them yet, straight from the engine log."""
     params = view.params
     logdir = (
         view.path
@@ -51,14 +47,14 @@ def live_curve(view) -> list[dict]:
 
 
 def gather(exp, run_ids: list[str] | None, metric: str, split: str):
-    """{run_id: [(epizod, wartość)]} — z `metrics.csv`, a dla biegów w toku z `_DTL.log`."""
+    """{run_id: [(episode, value)]} from `metrics.csv`, or `_DTL.log` for runs in progress."""
     out: dict[str, list[tuple[int, float]]] = {}
     for view in exp.runs():
         if run_ids and view.id not in run_ids:
             continue
         csv_path = view.path / "metrics.csv"
         if csv_path.is_file():
-            import pandas as pd  # noqa: PLC0415
+            import pandas as pd
 
             df = pd.read_csv(csv_path)
             df = df[(df["metric"] == metric) & (df["split"] == split)]
@@ -75,9 +71,9 @@ def gather(exp, run_ids: list[str] | None, metric: str, split: str):
 
 
 def group_key(view) -> str:
-    """Etykieta grupy dla wstęgi mean±std: wszystko poza seedem."""
+    """Group label for the mean +- std band: everything but the seed."""
     p = view.params
-    return f"{p.get('agent')} · {p.get('network')} · y{p.get('yellow_length')}"
+    return f"{p.get('agent')}, {p.get('network')}, y{p.get('yellow_length')}"
 
 
 def draw(curves: dict[str, list[tuple[int, float]]], metric: str, split: str, title: str):
@@ -85,7 +81,7 @@ def draw(curves: dict[str, list[tuple[int, float]]], metric: str, split: str, ti
     for label, points in sorted(curves.items()):
         xs, ys = zip(*points, strict=True)
         ax.plot(xs, ys, marker="o", markersize=3, linewidth=1.4, label=label)
-    ax.set_xlabel("epizod")
+    ax.set_xlabel("episode")
     ax.set_ylabel(f"{metric} ({split})")
     ax.grid(alpha=0.3)
     ax.set_title(title)
@@ -97,9 +93,9 @@ def draw(curves: dict[str, list[tuple[int, float]]], metric: str, split: str, ti
 def draw_band(
     groups: dict[str, list[list[tuple[int, float]]]], metric: str, split: str, title: str
 ):
-    """mean ± std po seedach. Wstęga liczona TYLKO dla epizodów, które ma każdy bieg
-    w grupie — inaczej ogon najdłuższego biegu udawałby średnią z całej grupy."""
-    import numpy as np  # noqa: PLC0415
+    """mean +- std over seeds, ONLY over episodes every run in the group has;
+    otherwise the longest run's tail would pose as the group mean."""
+    import numpy as np
 
     fig, ax = plt.subplots(figsize=(8, 4.5))
     for label, runs in sorted(groups.items()):
@@ -110,7 +106,7 @@ def draw_band(
         mean, std = values.mean(axis=0), values.std(axis=0)
         ax.plot(common, mean, linewidth=1.8, label=f"{label}  (n={len(runs)})")
         ax.fill_between(common, mean - std, mean + std, alpha=0.2)
-    ax.set_xlabel("epizod")
+    ax.set_xlabel("episode")
     ax.set_ylabel(f"{metric} ({split})")
     ax.grid(alpha=0.3)
     ax.set_title(title)
@@ -119,13 +115,13 @@ def draw_band(
     return fig
 
 
-# Rysunki GATE-a Fazy 1 (`report.build_gate_report`). Kolor idzie za METODĄ we wszystkich
-# trzech — ta sama metoda ma ten sam kolor na każdym rysunku. Para sprawdzona walidatorem
-# palety pod daltonizm (protan ΔE 24.7), obie > 3:1 na białym tle.
+# Phase 1 GATE figures (`report.build_gate_report`). Colour follows the METHOD in all
+# three. The pair passed a colour-blindness palette check (protan dE 24.7), both > 3:1
+# on white.
 GATE_COLORS = {"advancedcolight": "#2a78d6", "gatppo": "#eb6834"}
 INK, INK_MUTED, GRID, AXIS = "#52514e", "#898781", "#e1e0d9", "#c3c2b7"
 PPO_DIAGNOSTICS = (
-    ("entropy", "entropia polityki", False),
+    ("entropy", "policy entropy", False),
     ("approx_kl", "approx. KL (update)", False),
     ("clip_frac", "clip fraction", False),
     ("value_loss", "value loss", True),
@@ -146,8 +142,8 @@ def _style(ax):
 
 
 def _log_axis(ax):
-    """Skala log z czytelnymi liczbami (1-2-5 w dekadzie) zamiast samego 10^k."""
-    from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter  # noqa: PLC0415
+    """Log scale with readable numbers (1-2-5 per decade) instead of bare 10^k."""
+    from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter
 
     ax.set_yscale("log")
     ax.yaxis.set_major_locator(LogLocator(base=10, subs=(1, 2, 5)))
@@ -156,7 +152,7 @@ def _log_axis(ax):
 
 
 def _seed_band(curves, run_ids, split: str, metric: str):
-    """(epizody, średnia, min, max) po seedach — tylko epizody, które ma KAŻDY bieg."""
+    """(episodes, mean, min, max) over seeds, only episodes EVERY run has."""
     sub = curves[
         curves["run_id"].isin(run_ids) & (curves["split"] == split) & (curves["metric"] == metric)
     ]
@@ -171,10 +167,10 @@ def _plot_band(ax, band, color, label=None):
 
 
 def gate_figures(curves, runs, labels, reference_att, tolerance, out_dir):
-    """Krzywe uczenia GATE-a Fazy 1 -> `out_dir/p1_*.png` (+ `.pdf` do pracy).
+    """Phase 1 GATE learning curves -> `out_dir/p1_*.png` (+ `.pdf` for the thesis).
 
-    `runs`: ramka z kolumnami run_id, network, agent. `reference_att`: {sieć: ATT
-    referencji} — z niego linia progu bramki. Zwraca [(plik PNG, podpis)]."""
+    `runs`: a frame with run_id, network, agent. `reference_att`: {network: reference
+    ATT}, which gives the gate threshold line. Returns [(PNG file, caption)]."""
     out_dir.mkdir(parents=True, exist_ok=True)
     networks = list(reference_att)
     ids = {
@@ -192,7 +188,7 @@ def gate_figures(curves, runs, labels, reference_att, tolerance, out_dir):
         plt.close(fig)
         figures.append((f"{name}.png", caption))
 
-    # 1. Test ATT: pełny zakres (start ~1300 s) i przybliżenie na plateau z progiem.
+    # 1. Test ATT: the full range (start ~1300 s) and a zoom on the plateau with the threshold.
     fig, axes = plt.subplots(2, len(networks), figsize=(10, 6.6), sharex=True)
     for col, net in enumerate(networks):
         top, zoom = axes[0][col], axes[1][col]
@@ -204,7 +200,7 @@ def gate_figures(curves, runs, labels, reference_att, tolerance, out_dir):
         gate = ref * (1 + tolerance)
         zoom.axhline(gate, color=INK_MUTED, linewidth=1, linestyle="--")
         zoom.annotate(
-            f"próg bramki: +{tolerance * 100:.0f}% ({gate:.0f} s)",
+            f"gate threshold: +{tolerance * 100:.0f}% ({gate:.0f} s)",
             (0.99, gate),
             xycoords=("axes fraction", "data"),
             xytext=(0, 4),
@@ -215,22 +211,22 @@ def gate_figures(curves, runs, labels, reference_att, tolerance, out_dir):
         )
         zoom.set_ylim(ref * 0.97, gate * 1.03)
         top.set_title(net, fontsize=10)
-        zoom.set_xlabel("epizod")
+        zoom.set_xlabel("episode")
         for ax in (top, zoom):
             _style(ax)
-    axes[0][0].set_ylabel("ATT test [s] — pełny zakres")
-    axes[1][0].set_ylabel("ATT test [s] — plateau")
+    axes[0][0].set_ylabel("test ATT [s], full range")
+    axes[1][0].set_ylabel("test ATT [s], plateau")
     fig.legend(loc="upper center", ncol=2, frameon=False, fontsize=9, bbox_to_anchor=(0.5, 1.02))
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     save(
         fig,
         "p1_att_test",
-        f"Test ATT po epizodach. Linia = średnia po seedach, wstęga = min–max (n = {n_seeds}). "
-        "Górny rząd: pełny zakres; dolny: przybliżenie na plateau z progiem bramki "
-        f"(ATT {labels[reference]} + {tolerance * 100:.0f}%).",
+        f"Test ATT per episode. Line = mean over seeds, band = min-max (n = {n_seeds}). "
+        "Top row: full range; bottom: zoom on the plateau with the gate threshold "
+        f"(ATT of {labels[reference]} + {tolerance * 100:.0f}%).",
     )
 
-    # 2. Diagnostyka PPO rdzenia — czy update jest zdrowy (entropia spada, KL i clip w normie).
+    # 2. The core's PPO diagnostics: is the update healthy (entropy falls, KL and clip in range).
     fig, axes = plt.subplots(
         len(networks), len(PPO_DIAGNOSTICS), figsize=(12, 2.9 * len(networks)), sharex=True
     )
@@ -243,19 +239,19 @@ def gate_figures(curves, runs, labels, reference_att, tolerance, out_dir):
             if row == 0:
                 ax.set_title(title, fontsize=10)
             if row == len(networks) - 1:
-                ax.set_xlabel("epizod")
+                ax.set_xlabel("episode")
             _style(ax)
         axes[row][0].set_ylabel(net, fontsize=9)
     fig.tight_layout()
     save(
         fig,
         "p1_ppo_diagnostics",
-        f"Sygnały update'u PPO — {labels[core]}, jeden update na epizod. Wiersze = sieci; "
-        f"linia = średnia po seedach, wstęga = min–max (n = {n_seeds}). Value loss w skali log.",
+        f"PPO update signals, {labels[core]}, one update per episode. Rows = networks; "
+        f"line = mean over seeds, band = min-max (n = {n_seeds}). Value loss on a log scale.",
     )
 
-    # 3. Strata TD Advanced-CoLighta. Zera przed `learning_start` wycięte — w skali log
-    # nie istnieją, a nie niosą informacji (bufor jeszcze się zapełnia).
+    # 3. Advanced-CoLight's TD loss. Zeros before `learning_start` are cut: they do not
+    # exist on a log scale and carry no information (the buffer is still filling).
     fig, axes = plt.subplots(1, len(networks), figsize=(10, 3.2))
     for col, net in enumerate(networks):
         ax = axes[col]
@@ -264,42 +260,42 @@ def gate_figures(curves, runs, labels, reference_att, tolerance, out_dir):
         _plot_band(ax, (steps[keep], mean[keep], lo[keep], hi[keep]), GATE_COLORS[reference])
         _log_axis(ax)
         ax.set_title(net, fontsize=10)
-        ax.set_xlabel("epizod")
+        ax.set_xlabel("episode")
         _style(ax)
-    axes[0].set_ylabel("strata TD (train)")
+    axes[0].set_ylabel("TD loss (train)")
     fig.tight_layout()
     save(
         fig,
         "p1_colight_loss",
-        f"Strata TD {labels[reference]} po epizodach (skala log; epizody przed "
-        f"`learning_start` pominięte). Linia = średnia po seedach, wstęga = min–max "
+        f"TD loss of {labels[reference]} per episode (log scale; episodes before "
+        f"`learning_start` left out). Line = mean over seeds, band = min-max "
         f"(n = {n_seeds}).",
     )
     return figures
 
 
 def main(argv: list[str] | None = None) -> None:
-    ap = argparse.ArgumentParser(description="Krzywe uczenia z runs/")
-    ap.add_argument("-r", "--runs", nargs="+", default=None, help="run_id (domyślnie wszystkie)")
+    ap = argparse.ArgumentParser(description="Learning curves from runs/")
+    ap.add_argument("-r", "--runs", nargs="+", default=None, help="run_id (default: all)")
     ap.add_argument("--metric", default="att", help="att, queue, reward, loss, delay, throughput")
     ap.add_argument("--split", default="test", choices=["train", "test"])
     ap.add_argument(
-        "--band", action="store_true", help="mean±std po seedach zamiast osobnych linii"
+        "--band", action="store_true", help="mean +- std over seeds instead of separate lines"
     )
-    ap.add_argument("-o", "--out", default=None, help="plik wyjściowy (domyślnie runs/plots/)")
+    ap.add_argument("-o", "--out", default=None, help="output file (default: runs/plots/)")
     args = ap.parse_args(argv)
 
     exp = tx.experiment()
     curves = gather(exp, args.runs, args.metric, args.split)
     if not curves:
         print(
-            f"Brak danych dla metric={args.metric} split={args.split}. "
-            "Metody bez treningu nie mają krzywej (jeden pomiar).",
+            f"No data for metric={args.metric} split={args.split}. "
+            "Methods without training have no curve (one measurement).",
             file=sys.stderr,
         )
         raise SystemExit(1)
 
-    title = f"{args.metric} ({args.split}) — {exp.name}"
+    title = f"{args.metric} ({args.split}), {exp.name}"
     if args.band:
         views = {v.id: v for v in exp.runs()}
         groups: dict[str, list[list[tuple[int, float]]]] = {}
@@ -309,12 +305,12 @@ def main(argv: list[str] | None = None) -> None:
     else:
         fig = draw(curves, args.metric, args.split, title)
 
-    # wstęga i osobne linie to różne wykresy — nie mogą nadpisywać jednego pliku
+    # a band and separate lines are different plots and must not share a file
     name = f"{args.metric}_{args.split}{'_band' if args.band else ''}.png"
     out = Path(args.out) if args.out else DEFAULT_OUT / name
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=120)
-    print(f"{out}  ({len(curves)} biegów)")
+    print(f"{out}  ({len(curves)} runs)")
 
 
 if __name__ == "__main__":

@@ -1,64 +1,67 @@
-# Próg reguły w DÓŁ — domknięcie „Otwarte" z §2b notatki Fazy 3.
+# The rule threshold DOWNWARDS: closing the "Open" item of section 2b of the Phase 3 note.
 #
-# PYTANIE. Przy `mask0p5` na JiNan reguła daje 525,7 s, czyli 3,7% NAD progiem FixedTime
-# (507,0). Złożenie z treningiem na awariach schodzi do 481,1 s (`t2_gate_dr`), ale płaci
-# +3,3 s na czystym. Jeśli SAMA reguła po rekalibracji zejdzie pod 507, narracja pracy się
-# upraszcza radykalnie: jeden mechanizm, zero treningu, zero podatku na ruchu czystym.
-# Ten plan sprawdza, czy tak jest.
+# QUESTION. At `mask0p5` on JiNan the rule gives 525.7 s, 3.7% ABOVE the FixedTime threshold
+# (507.0). Composed with failure training it goes down to 481.1 s (`t2_gate_dr`), but pays
+# +3.3 s on clean. If the rule ALONE, recalibrated, goes below 507, the thesis narrative
+# simplifies radically: one mechanism, no training, no tax on clean traffic.
+# This plan checks whether that is so.
 #
-# ⚠ ZIARNISTOŚĆ — NAJWAŻNIEJSZE OGRANICZENIE TEGO PLANU. Wynik reguły to UŁAMEK
-# podejrzanych ruchów węzła, a ruchów jest 8 (`env.features.n_mov`), więc wynik należy do
-# {0, 1/8, ..., 1} i porównanie jest `>=`. Kalibracja dała 0,25 = 2/8 na JiNan
-# (`runs/heads/gate_ref__cityflow_jinan3x4_4ph.npz`), zatem NA TEJ SIECI ISTNIEJE
-# DOKŁADNIE JEDEN niższy próg: 0,125 = 1/8. „Sweep w dół" jest tu pojedynczym punktem,
-# nie krzywą — i jeśli 0,125 nie wystarczy, następnym pokrętłem NIE jest próg, tylko OKNO
-# (12 kroków = 3 min) albo histereza (k_on = 3). Do zapisania w rozdziale 4 wprost, bo
-# „obniżyliśmy próg" sugeruje continuum, którego nie ma.
+# WARNING: GRANULARITY, THE MOST IMPORTANT LIMITATION OF THIS PLAN. The rule score is the
+# FRACTION of a node's suspicious movements, and there are 8 movements (`env.features.n_mov`),
+# so the score lies in {0, 1/8, ..., 1} and the comparison is `>=`. Calibration gave
+# 0.25 = 2/8 on JiNan (`runs/heads/gate_ref__cityflow_jinan3x4_4ph.npz`), so ON THIS NETWORK
+# THERE IS EXACTLY ONE lower threshold: 0.125 = 1/8. The "sweep downwards" is a single point
+# here, not a curve, and if 0.125 is not enough, the next knob is NOT the threshold but the
+# WINDOW (12 steps = 3 min) or the hysteresis (k_on = 3). To be stated plainly in chapter 4,
+# since "we lowered the threshold" suggests a continuum that does not exist.
 #
-# HangZhou jest tu z innego powodu: tam kalibracja dała 0,875 = 7/8 (na czystym oknie tej
-# sieci wiele ruchów legalnie stoi), czułość 0,08–0,23, więc bramka strzela rzadko i pewnie.
-# Sześć stopni w dół to realna przestrzeń i to jest DOSŁOWNIE otwarte pytanie z §2b
-# („większy budżet fałszywych alarmów na sieciach rzadkich"). Stąd 0,25 i 0,5 jako punkty
-# pośrednie — bez nich skok 0,875 → 0,125 nie dałby się zinterpretować.
+# HangZhou is here for another reason: there calibration gave 0.875 = 7/8 (on this network's
+# clean window many movements legitimately stand still), recall 0.08-0.23, so the gate fires
+# rarely and confidently. Six steps down is real room, and that is LITERALLY the open
+# question of section 2b ("a larger false-alarm budget on sparse networks"). Hence 0.25 and
+# 0.5 as intermediate points; without them the jump 0.875 -> 0.125 could not be interpreted.
 #
-# KOLUMNY liczą się z TEGO SAMEGO checkpointu (bramka jest bezparametrowa wobec wag), więc
-# różnice są parowane. `threshold` wchodzi do odcisku biegu (`MECHANISM_KEYS`) — bez tego
-# cztery kolumny miałyby ten sam odcisk i trzy zostałyby pominięte jako „jest wynik".
-# Kolumna `gatppo_gate_auto` liczy próg z artefaktu i jest KONTROLĄ: na JiNan musi wyjść
-# identycznie jak 0,250, na HangZhou identycznie jak żaden z jawnych progów (0,875).
+# The COLUMNS are computed from THE SAME checkpoint (the gate has no parameters with respect
+# to the weights), so differences are paired. `threshold` enters the run fingerprint
+# (`MECHANISM_KEYS`); without it four columns would share a fingerprint and three would be
+# skipped as "has a result". The `gatppo_gate_auto` column takes the threshold from the
+# artefact and is a CONTROL: on JiNan it must come out identical to 0.250, on HangZhou
+# identical to none of the explicit thresholds (0.875).
 #
-# HIPOTEZY ZAPISANE PRZED POMIAREM
+# HYPOTHESES RECORDED BEFORE MEASUREMENT
 #
-#  H1 (główna, JiNan). Próg 0,125 zejdzie przy `mask0p5` poniżej 507,0 s. Podstawa: przy
-#     0,25 czułość reguły to 0,70 przy udziale 57,4%, więc jest jeszcze co wykrywać.
-#     WARUNEK ZALICZENIA JEST TRÓJSTRONNY i zapisany teraz, żeby nie dobierać go po
-#     zobaczeniu tabeli: (a) `mask0p5` < 507,0; (b) `clean` — Δ wobec rdzenia NIEISTOTNE;
-#     (c) `mask0p25` i `mask0p25_hold_t60` NIE GORSZE niż przy progu 0,250. Spełnione (a)
-#     bez (b) i (c) nie jest sukcesem — to przesunięcie kosztu, nie jego usunięcie.
+#  H1 (main, JiNan). Threshold 0.125 goes below 507.0 s at `mask0p5`. Basis: at 0.25 the
+#     rule's recall is 0.70 at a 57.4% share, so there is still something to detect.
+#     THE PASS CONDITION IS THREEFOLD and recorded now so it is not chosen after seeing the
+#     table: (a) `mask0p5` < 507.0; (b) `clean`: delta vs the core NOT SIGNIFICANT;
+#     (c) `mask0p25` and `mask0p25_hold_t60` NOT WORSE than at threshold 0.250. Meeting (a)
+#     without (b) and (c) is not a success: it moves the cost rather than removing it.
 #
-#  H2 (gdzie jest wąskie gardło). Wiążącym ograniczeniem będzie `clean` i rodzina
-#     `mask0p25`, bo tam polityka bije FixedTime (296 vs 507, czyli 211 s zapasu do
-#     stracenia) — a nie `mask0p5`. Przewidywany tryb porażki H1: `mask0p5` owszem zejdzie,
-#     ale `clean` urośnie istotnie, bo `gate_share` na czystym przy 1/8 przebije budżet
-#     0,5% wyzwoleń. Diagnostyka rozstrzygająca: `gate_share__clean` — przy 0,25 wynosi
-#     1,6%, przy histerezie 3/6 odpowiada to ~0,3% wyzwoleń.
+#  H2 (where the bottleneck is). The binding constraint will be `clean` and the `mask0p25`
+#     family, since there the policy beats FixedTime (296 vs 507, 211 s of headroom to
+#     lose), not `mask0p5`. Predicted failure mode of H1: `mask0p5` does go down, but `clean`
+#     grows significantly, since `gate_share` on clean at 1/8 breaks the 0.5% trigger
+#     budget. Decisive diagnostic: `gate_share__clean`; at 0.25 it is 1.6%, which with 3/6
+#     hysteresis corresponds to ~0.3% of triggers.
 #
-#  H3 (test szczelności analizy z §7.1). Przy 0,125 `gauss2` NADAL nie strzeli ani razu.
-#     Uzasadnienie mechanistyczne: kryterium podejrzenia to `max − min < 1e−6` w oknie 12,
-#     a próg decyduje tylko o TYM, ILU ruchów to dotyczy — nie o tym, JAK mocno. Szum łamie
-#     kryterium przy każdym progu. GDYBY `gauss2` strzeliło, znaczyłoby to, że coś innego
-#     niż awaria zamraża odczyt, i cała tabela 7.1 („reguła strzela tam, gdzie się opłaca")
-#     wymaga rewizji. To jest najtańszy test tej tezy, jaki istnieje.
+#  H3 (a tightness test of the section 7.1 analysis). At 0.125 `gauss2` STILL does not fire
+#     once. Mechanistic justification: the suspicion criterion is `max - min < 1e-6` over a
+#     window of 12, and the threshold only decides HOW MANY movements it concerns, not HOW
+#     STRONGLY. Noise breaks the criterion at any threshold. IF `gauss2` fired, it would mean
+#     something other than a failure freezes the reading, and the whole table 7.1 ("the rule
+#     fires where it pays off") would need revision. This is the cheapest test of that claim
+#     there is.
 #
-#  H4 (HangZhou). Zysk z obniżenia będzie tam WIĘKSZY niż na JiNan, bo 0,875 jest skrajnie
-#     zachowawcze. Ryzyko przeciwne i dlatego progi pośrednie: na czystym oknie HangZhou
-#     wiele ruchów legalnie stoi, więc 0,125 może strzelać niemal stale i zniszczyć wynik
-#     czysty. Przewidywany punkt pracy: 0,25 albo 0,5, nie 0,125.
+#  H4 (HangZhou). The gain from lowering will be LARGER there than on JiNan, since 0.875 is
+#     extremely conservative. The opposite risk, hence the intermediate thresholds: on
+#     HangZhou's clean window many movements legitimately stand still, so 0.125 may fire
+#     almost constantly and destroy the clean result. Predicted operating point: 0.25 or
+#     0.5, not 0.125.
 #
-# ZAKRES: dwie sieci, 3 seedy. Wagi rdzenia dla obu sieci są lokalnie, bramka nie dotyka
-# wag — plan jest ewaluacją na CPU, bez GPU i bez treningu.
+# SCOPE: two networks, 3 seeds. The core weights for both networks are local, the gate does
+# not touch weights; the plan is a CPU evaluation, without a GPU or training.
 #
-# WYMAGA: runs/heads/gate_ref__{sieć}.npz (są dla obu sieci).
+# REQUIRES: runs/heads/gate_ref__{network}.npz (present for both networks).
 name: t2_gate_thr
 mode: realistic
 draws: 5
@@ -69,27 +72,27 @@ networks: [cityflow_jinan3x4_4ph, cityflow_hangzhou4x4_4ph]
 controllers:
   gatppo: {seeds: [0, 1, 2]}
 
-  # 1/8 ruchów — JEDYNY próg niższy od kalibracji JiNan. To jest pytanie planu.
+  # 1/8 of movements, the ONLY threshold below the JiNan calibration. The plan's question.
   gatppo_gate_t0p125:
     agent: gatppo
     seeds: [0, 1, 2]
     gate: {kind: rule, threshold: 0.125, k_on: 3, k_off: 6}
 
-  # 2/8 — kalibracja JiNan; na HangZhou pierwszy punkt pośredni
+  # 2/8, the JiNan calibration; on HangZhou the first intermediate point
   gatppo_gate_t0p250:
     agent: gatppo
     seeds: [0, 1, 2]
     gate: {kind: rule, threshold: 0.250, k_on: 3, k_off: 6}
 
-  # 4/8 — drugi punkt pośredni dla HangZhou, kontrola kierunku dla JiNan
+  # 4/8, the second intermediate point for HangZhou, a direction check for JiNan
   gatppo_gate_t0p500:
     agent: gatppo
     seeds: [0, 1, 2]
     gate: {kind: rule, threshold: 0.500, k_on: 3, k_off: 6}
 
-  # próg Z ARTEFAKTU (0,25 JiNan / 0,875 HangZhou) — kontrola kalibracji:
-  # na JiNan MUSI wyjść identycznie jak kolumna 0,250, inaczej coś jest nie tak
-  # ze ścieżką `build_gate`.
+  # threshold FROM THE ARTEFACT (0.25 JiNan / 0.875 HangZhou), a calibration control:
+  # on JiNan it MUST come out identical to the 0.250 column, otherwise something is
+  # wrong with the `build_gate` path.
   gatppo_gate_auto:
     agent: gatppo
     seeds: [0, 1, 2]

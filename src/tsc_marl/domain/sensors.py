@@ -1,63 +1,28 @@
-"""Model awarii sensorów — przyrząd pomiarowy Fazy 2 (bramka 2.0) i protokołu 3.2.
+"""Sensor failure layer: what the detectors report instead of the truth.
 
-GDZIE WSTRZYKUJEMY: na poziomie DETEKTORA, czyli w per-pasowe zliczenia
-`q[lane]` i `running[lane]`, pomiędzy `windowed_queue`/`effective_running`
-a `movement_pressure`/`movement_running` (patrz `features.observe`).
+Failures are injected at the DETECTOR level, into per-lane counts (`q[lane]`,
+`running[lane]`) between `windowed_queue`/`effective_running` and the ATS
+formulas (`StateBuilder.observe`). Not per vehicle: a real detector reports a
+count, not a list. Not per feature: a movement's pressure already mixes several
+lanes, and one broken detector is not one broken movement.
 
-Nie na poziomie POJAZDU, bo `get_vehicle_distance`/`get_vehicle_speed` są
-kluczowane id pojazdu GLOBALNIE dla całej sieci — psucie per pas wymagałoby ich
-przebudowy, a realny detektor (pętla, kamera) i tak raportuje LICZBĘ, nie listę
-pojazdów. Nie na poziomie RUCHU (gotowego wiersza cech), bo `movement_pressure`
-zmieszało już kilka pasów w jedną liczbę: zepsuty detektor na jednym pasie to nie
-to samo co popsuty cały ruch, a na tej granularności stoi claim per-edge z 2.2.
+Consequences:
 
-CO WYCHODZI Z TEGO ZA DARMO: `features.rewards()` czyta
-`world.get_info('lane_waiting_count')` niezależnie od tej ścieżki, więc nagroda
-zostaje CZYSTA z konstrukcji, a nie z flagi — czyli dokładnie scope CORE Fazy 3
-(trening na czystym, awaria w runtime na ZAMROŻONEJ polityce).
+* the reward reads the world's cache, not this path, so it stays clean by
+  construction;
+* every controller reads the same corrupted observation, so all of them face
+  the same failure;
+* the validity flag never enters the state vector, so `ob_length` is the same
+  in every scenario.
 
-DWIE KLASY USZKODZEŃ, o różnym czasie życia:
+Two classes of damage with different lifetimes: persistent (`mask`, `drift`),
+drawn once per episode per failure unit, since a broken sensor does not
+flicker; and transient (`gauss`, `urand`), drawn every decision.
 
-    TRWAŁE     losowane RAZ na epizod, kluczowane JEDNOSTKĄ awarii — które
-               detektory są martwe (`mask`) i jak są rozkalibrowane (`drift`).
-               Zepsuty czujnik nie migocze: losowanie maski co decyzję
-               symulowałoby awarię fizycznie nieistniejącą, a głowa niepewności
-               nauczyłaby się tego migotania jako sygnału.
-    CHWILOWE   losowane co decyzję — szum pomiarowy (`gauss`, `urand`).
-
-Ten podział to operacjonalizacja rozdziału aleatoric/epistemic (bramka 2.0 b),
-a nie porządkowanie kodu.
-
-TRZY POZIOMY OBSERWOWALNOŚCI — oś, wokół której układa się Faza 3:
-
-    obserwowalne     `valid=False` czytane wprost przez bramkę → rule-gate
-                     wystarcza i UQ jest zbędne. To BASELINE ablacji (d), nie CORE.
-    wnioskowalne     `mask` + podstawienie: dziury nie widać wprost, ale zostaje
-                     ślad — przy `zero` wyraźny (dokładne 0 przez wiele decyzji),
-                     przy `hold` praktycznie żaden.
-    nieobserwowalne  `drift`: wartości sensowne, żadnych dziur ani skoków
-                     wariancji. Rule-gate jest tu ślepy z definicji i tylko tu
-                     UQ zarabia na siebie.
-
-PODSTAWIENIE NIE JEST NEUTRALNE. Martwy pas raportujący 0 nie znaczy „nie wiem",
-tylko „pusty wlot" — dla EP/MaxPressure to konkretna instrukcja „nie dawaj tu
-zielonego". `zero` wstrzykuje więc systematyczne kłamstwo o ZNANYM KIERUNKU;
-zostaje domyślne, bo taki protokół maskowania przejmujemy z [[li-2025-robustlight]]
-i tylko tak krzywe degradacji są porównywalne z ich liczbami. `hold` jest
-wariantem TRUDNIEJSZYM (i bliższym realnemu sterownikowi): nie zostawia śladu,
-na którym rule-gate mógłby wygrać trywialnie.
-
-FLAGA BRAKU NIE WCHODZI DO WEKTORA STANU. Rule-gate to BRAMKA, nie wejście
-polityki — czyta `broken` / `valid` obok obserwacji. Dzięki temu `ob_length`
-zostaje identyczne we wszystkich scenariuszach awarii i polityka z Fazy 1 pasuje
-do nich bez zmiany architektury.
-
-KALIBRACJA POZIOMÓW — PUŁAPKA PORÓWNYWALNOŚCI. RobustLight ma stan EP + running
-(czyli nasz ATS) i podaje skalę 3,5–4,0 dla `gauss`/`urand` oraz maski 25/50%,
-ale psuje na poziomie STANU, a my na poziomie DETEKTORA. To nie jest ta sama
-liczba: EP to różnica ŚREDNICH po M pasach, więc sigma wstrzyknięta per pas
-wychodzi na cesze osłabiona o ~1/sqrt(M), a różnica wjazd−wyjazd wariancje
-dodaje. Przelicznik trzeba ZMIERZYĆ i podać w pracy (`SensorModel` nie zgaduje).
+Substitution is not neutral: a dead lane reporting 0 says "empty approach",
+which max-pressure reads as "no green here". `zero` is the default because it
+is the masking protocol of RobustLight (Li et al., 2025); `hold` leaves no
+trace a rule could catch.
 """
 
 from __future__ import annotations
@@ -77,58 +42,48 @@ FAILURE_KINDS = ("none", "gauss", "urand", "mask", "drift")
 FAILURE_UNITS = ("lane", "road", "intersection")
 SUBSTITUTIONS = ("zero", "hold", "mean")
 
-#: Kanały odczytu. Jeden FIZYCZNY detektor obsługuje oba — pas z martwym
-#: czujnikiem nie raportuje ani kolejki, ani pojazdów jadących.
+#: Reading channels. One physical detector serves both: a lane with a dead
+#: sensor reports neither queue nor moving vehicles.
 CHANNELS = ("queue", "running")
 
 
 @dataclass(frozen=True)
 class FailureSpec:
-    """Scenariusz awarii. Zamrożony w YAML-u (sekcja `model`), NIE w Pythonie:
-    `experiment.build_params` liczy odcisk sekcji `model`+`trainer`, więc spec
-    żyjący tylko w kodzie nie zmieniłby odcisku i `skip-if-done` uznałby bieg
-    z innym poziomem szumu za już policzony. Ten sam błąd już raz kosztował
-    (patrz `run_core.py` i hiperparametry PPO)."""
+    """Failure scenario. Configured in YAML (`model` section), so it is part of
+    the run fingerprint and a different scenario is a different run."""
 
     kind: str = "none"
     level: float = 0.0
-    #: Co jest JEDNĄ awarią: pojedynczy detektor, cała kamera na wlocie, czy całe
-    #: skrzyżowanie bez sensorów (scenariusz kriging z 3.2). Dotyczy uszkodzeń
-    #: TRWAŁYCH (`mask`, `drift`) — szum pomiarowy jest zawsze per odczyt.
+    #: What ONE failure is: a single detector, a whole approach, or a whole
+    #: intersection. Applies to persistent damage; noise is always per reading.
     unit: str = "lane"
     substitution: str = "zero"
-    #: Od której DECYZJI w epizodzie awaria jest aktywna. 0 = od początku (tak
-    #: maskuje [[li-2025-robustlight]], więc to zostaje domyślne i porównywalne).
-    #: Wartość > 0 daje awarię W RUNTIME — narrację deploymentową z planu Fazy 3
-    #: — i jest WARUNKIEM sensowności `substitution='hold'`: detektor martwy od
-    #: pierwszej decyzji nie ma czego trzymać, więc `hold` degeneruje się wtedy
-    #: do `zero`. Powrót sensora (metryka time-to-recover) to osobne rozszerzenie.
+    #: Decision from which the failure is active; 0 = from the start (as in
+    #: RobustLight). A later onset is what makes `hold` meaningful: a detector
+    #: dead from the first decision has nothing to hold and degenerates to `zero`.
     onset: int = 0
-    #: Strumień NIEZALEŻNY od `--seed`. Powód: `--seed` steruje tylko
-    #: random/numpy/torch, a ruch jest ustalony w flow.json — gdyby wzorzec
-    #: awarii szedł z tego samego ziarna, seedy różniłyby się jednocześnie
-    #: inicjalizacją sieci I tym, które detektory padły, i w tabeli T2 nie dałoby
-    #: się rozdzielić źródeł rozrzutu.
+    #: Random stream INDEPENDENT of `--seed`: otherwise two seeds would differ in
+    #: network initialisation AND in which detectors failed, and the sources of
+    #: variance could not be separated.
     seed: int = 0
 
     def __post_init__(self) -> None:
         if self.kind not in FAILURE_KINDS:
-            raise ValueError(f"kind={self.kind!r}, dozwolone: {FAILURE_KINDS}")
+            raise ValueError(f"kind={self.kind!r}, allowed: {FAILURE_KINDS}")
         if self.unit not in FAILURE_UNITS:
-            raise ValueError(f"unit={self.unit!r}, dozwolone: {FAILURE_UNITS}")
+            raise ValueError(f"unit={self.unit!r}, allowed: {FAILURE_UNITS}")
         if self.substitution not in SUBSTITUTIONS:
-            raise ValueError(f"substitution={self.substitution!r}, dozwolone: {SUBSTITUTIONS}")
+            raise ValueError(f"substitution={self.substitution!r}, allowed: {SUBSTITUTIONS}")
         if self.level < 0:
-            raise ValueError(f"level={self.level}, musi być >= 0")
+            raise ValueError(f"level={self.level}, must be >= 0")
         if self.onset < 0:
-            raise ValueError(f"onset={self.onset}, musi być >= 0")
+            raise ValueError(f"onset={self.onset}, must be >= 0")
         if self.kind == "mask" and self.level > 1:
-            raise ValueError(f"level={self.level} dla 'mask' to UŁAMEK jednostek, więc <= 1")
-        # Fail loud zamiast cichego ignorowania: `unit` nie ma sensu dla szumu
-        # pomiarowego, a literówka w YAML-u ma się wywalić przy budowie, nie po
-        # 200 epizodach dziwnych wyników.
+            raise ValueError(f"level={self.level} for 'mask' is a FRACTION of units, so <= 1")
+        # Fail loudly: `unit` means nothing for measurement noise, and a YAML typo
+        # must fail at construction.
         if self.kind in ("gauss", "urand") and self.unit != "lane":
-            raise ValueError(f"kind={self.kind!r} jest per ODCZYT — unit musi zostać 'lane'")
+            raise ValueError(f"kind={self.kind!r} is per reading; unit must stay 'lane'")
 
     @property
     def active(self) -> bool:
@@ -136,9 +91,8 @@ class FailureSpec:
 
     @classmethod
     def from_registry(cls, **overrides: Any) -> FailureSpec:
-        """Wariant konfigurowany jak reszta repo — przez YAML-e LibSignala
-        (`model.failure`, żeby wpadł do odcisku configu)."""
-        from common.registry import Registry  # noqa: PLC0415 - dopiero po bootstrapie
+        """From LibSignal's YAML config (`model.failure`)."""
+        from common.registry import Registry
 
         param = Registry.mapping["model_mapping"]["setting"].param
         raw = dict(param.get("failure") or {})
@@ -156,12 +110,11 @@ class FailureSpec:
         }
 
     def suffix(self) -> str:
-        """Człon `run_id` — bez tego dwa scenariusze awarii nadpisałyby się
-        nawzajem w `runs/` (ten sam agent, sieć, seed i yellow)."""
+        """Part of a `run_id`, so two scenarios never share a run directory;
+        empty for no failure."""
         if not self.active:
             return ""
-        # kropka wypada: ten sufiks trafia do `run_id` i do nazw kluczy w npz,
-        # a tam kropka rozdziela rozszerzenie
+        # no dots: the suffix ends up in run ids and npz keys
         base = f"{self.kind}{self.level:g}".replace(".", "p")
         parts = [base] if self.unit == "lane" else [base, self.unit]
         if self.substitution != "zero":
@@ -170,20 +123,23 @@ class FailureSpec:
             parts.append(f"t{self.onset}")
         return "_".join(parts)
 
+    def slug(self) -> str:
+        """Scenario name used as a key in results: the suffix, or "clean"."""
+        return self.suffix() or "clean"
+
 
 def failure_units(
     intersections: Sequence[Intersection], lanes: Iterable[str], unit: str
 ) -> dict[str, str]:
-    """pas -> klucz jednostki awarii.
+    """lane -> failure unit key.
 
-    Dla `intersection` właścicielem detektora jest skrzyżowanie, DO KTÓREGO pas
-    dojeżdża (pas wjazdowy) — bo tam stoi kamera. Pas wyjazdowy jednego
-    skrzyżowania jest pasem wjazdowym następnego, więc przypisanie jest spójne
-    globalnie; pasy wyjeżdżające poza sieć (sąsiad wirtualny, poza listą) nie
-    mają właściciela i stanowią własną, jednoelementową jednostkę.
+    For `intersection` the detector belongs to the intersection the lane leads
+    INTO (where the camera stands). One intersection's out lane is the next one's
+    in lane, so the assignment is globally consistent; lanes leaving the network
+    have no owner and form their own single-lane unit.
     """
     if unit not in FAILURE_UNITS:
-        raise ValueError(f"unit={unit!r}, dozwolone: {FAILURE_UNITS}")
+        raise ValueError(f"unit={unit!r}, allowed: {FAILURE_UNITS}")
     lanes = list(lanes)
     if unit == "lane":
         return {lane: lane for lane in lanes}
@@ -198,15 +154,13 @@ def failure_units(
 
 
 class SensorModel:
-    """Stan detektorów CAŁEJ sieci, kluczowany id pasa.
+    """Detector state of the WHOLE network, keyed by lane id.
 
-    Jedna instancja na `StateBuilder`, współdzielona przez wszystkie
-    skrzyżowania. To jest istotne, a nie wygodne: pas wyjazdowy skrzyżowania A
-    jest pasem wjazdowym skrzyżowania B, więc ten sam fizyczny detektor jest
-    czytany dwa razy w jednej decyzji. Gdyby stan (albo szum) był losowany
-    osobno dla każdego czytelnika, jeden zepsuty czujnik pokazywałby dwóm
-    sąsiadom dwie różne wartości — sieć uśredniłaby szum między sąsiadami
-    i awaria wyszłaby ŁAGODNIEJSZA, niż jest naprawdę.
+    One instance per `StateBuilder`, shared by all intersections. This matters:
+    A's out lane is B's in lane, so one physical detector is read twice per
+    decision. Drawing state or noise per reader would show two neighbours two
+    different values, the network would average the noise out, and the failure
+    would look MILDER than it is.
     """
 
     def __init__(self, spec: FailureSpec, groups: Mapping[str, str]) -> None:
@@ -222,14 +176,11 @@ class SensorModel:
         self._decision = -1
         self.reset(0)
 
-    # --------------------------------------------------------------- epizod
+    # --------------------------------------------------------------- episode
 
     def reset(self, episode: int = 0) -> None:
-        """Nowy epizod: przelosuj stan TRWAŁY, wyczyść pamięć podręczną.
-
-        `hold` też się czyści — po `world.reset()` ostatnia znana wartość
-        z poprzedniego epizodu opisuje inny ruch i byłaby przeciekiem.
-        """
+        """New episode: redraw persistent damage, clear caches, including the
+        `hold` memory (values from before `world.reset()` would leak)."""
         self.episode = episode
         self._decision = -1
         self._cache.clear()
@@ -243,46 +194,39 @@ class SensorModel:
             return
         keys = sorted(set(self.groups.values()))
         if self.spec.kind == "mask":
-            # UŁAMEK DOKŁADNY, nie prawdopodobieństwo per jednostka: protokół
-            # mówi "maski 25/50%", więc 25% ma znaczyć 25%, a nie "średnio 25%".
+            # An exact fraction, not a per-unit probability: 25% means 25%.
             n = int(round(self.spec.level * len(keys)))
             chosen = {keys[i] for i in persistent.permutation(len(keys))[:n]}
             self._broken = frozenset(l for l in self._lanes if self.groups[l] in chosen)
         elif self.spec.kind == "drift":
-            # Błąd kalibracji jest MULTIPLIKATYWNY (detektor liczy o x% za mało),
-            # nie addytywny: tylko wtedy wartości zostają sensowne w całym
-            # zakresie obciążenia i scenariusz jest naprawdę nieobserwowalny.
+            # Calibration error is multiplicative (the detector counts x% too few),
+            # so values stay plausible at any load and the failure is unobservable.
             gains = 1.0 + persistent.normal(0.0, self.spec.level, size=len(keys))
             per_key = dict(zip(keys, np.clip(gains, 0.0, None), strict=True))
             self._gain = {l: float(per_key[self.groups[l]]) for l in self._lanes}
 
     def begin_decision(self) -> None:
-        """Nowy odczyt wszystkich detektorów. Woła to `StateBuilder.observe()`
-        RAZ na decyzję, przed pętlą po skrzyżowaniach — pamięć podręczna
-        gwarantuje, że jeden detektor daje w tej decyzji jedną wartość.
-
-        Liczy też decyzje, bo od nich zależy `onset`. Odczyt `corrupt=False`
-        licznika NIE rusza: obserwacja czysta jest pomiarem referencyjnym,
-        nie decyzją sterownika."""
+        """A new reading of all detectors, called once per decision by
+        `StateBuilder.observe()`; the cache makes one detector give one value per
+        decision. Also counts decisions for `onset` (a `corrupt=False` reading
+        does not)."""
         self._decision += 1
         self._cache.clear()
 
     @property
     def live(self) -> bool:
-        """Czy awaria już trwa. Przed pierwszym `begin_decision()` — nie: żadna
-        decyzja się jeszcze nie zaczęła, więc detektory są zdrowe."""
-        return self._decision >= self.spec.onset  # onset >= 0, więc -1 nigdy nie przechodzi
+        """Whether the failure is active; never before the first decision."""
+        return self._decision >= self.spec.onset  # onset >= 0, so -1 never passes
 
-    # --------------------------------------------------------------- odczyt
+    # --------------------------------------------------------------- reading
 
     def read(
         self, values: Mapping[str, float], lanes: Sequence[str], *, channel: str
     ) -> dict[str, float]:
-        """Odczyt detektorów `lanes` w kanale `channel`. Zwraca NOWY słownik —
-        `values` bywa cachem świata (`lane_waiting_count`), który czyta też
-        `rewards()`, więc modyfikacja w miejscu skaziłaby nagrodę."""
+        """Reading of detectors `lanes` on `channel`. Returns a NEW dict: `values`
+        may be the world's cache, which `rewards()` reads too."""
         if channel not in CHANNELS:
-            raise ValueError(f"channel={channel!r}, dozwolone: {CHANNELS}")
+            raise ValueError(f"channel={channel!r}, allowed: {CHANNELS}")
         clean = {lane: float(values.get(lane, 0.0)) for lane in lanes}
         if not self.spec.active:
             return clean
@@ -300,20 +244,18 @@ class SensorModel:
 
     def _measure(self, lane: str, clean: float, channel: str) -> tuple[float, bool]:
         if not self.live:
-            # Przed onsetem detektor jest zdrowy — i to jest jedyny moment,
-            # w którym `hold` ma co zapamiętać.
+            # Healthy before onset: the only time `hold` has something to remember.
             self._last[(channel, lane)] = clean
             return clean, True
         if lane in self._broken:
-            return 0.0, False  # wartość podstawi `_substitute`
+            return 0.0, False  # `_substitute` fills the value in
         value = clean * self._gain.get(lane, 1.0)
         if self.spec.kind == "gauss":
             value += float(self._noise.normal(0.0, self.spec.level))
         elif self.spec.kind == "urand":
             value += float(self._noise.uniform(-self.spec.level, self.spec.level))
-        # Zliczenie nie bywa ujemne. NIE zaokrąglamy: EP to i tak różnica
-        # średnich (ułamkowa), a kwantyzacja dołożyłaby drugi, niemodelowany
-        # mechanizm i zjadałaby małe sigma.
+        # A count is never negative. Not rounded: EP is fractional anyway, and
+        # quantisation would add a second, unmodelled effect.
         value = max(0.0, value)
         self._last[(channel, lane)] = value
         return value, True
@@ -330,7 +272,7 @@ class SensorModel:
             for lane in broken:
                 reported[lane] = fill
         elif self.spec.substitution == "hold":
-            # Detektor martwy od początku epizodu nie ma czego trzymać -> 0.
+            # a detector dead since the episode start has nothing to hold -> 0
             for lane in broken:
                 reported[lane] = self._last.get((channel, lane), 0.0)
         return reported
@@ -339,25 +281,22 @@ class SensorModel:
 
     @property
     def broken(self) -> frozenset[str]:
-        """Pasy z martwym detektorem w TYM epizodzie. To jest ground truth, na
-        którym bramka 2.0 mierzy, czy głowa niepewności lokalizuje awarię —
-        bez tego sweep degradacji nie ma osi Y."""
+        """Lanes with a dead detector in this episode: ground truth for oracles
+        and for evaluating failure detection, never part of the state."""
         return self._broken
 
     @property
     def gain(self) -> Mapping[str, float]:
-        """Rozkalibrowanie per pas (1.0 = detektor zdrowy). Ground truth dla
-        scenariusza NIEOBSERWOWALNEGO."""
+        """Calibration gain per lane (1.0 = healthy); ground truth for drift."""
         return dict(self._gain)
 
     def valid(self, lanes: Iterable[str]) -> dict[str, bool]:
-        """Czy detektor raportuje cokolwiek. Czyta to BRAMKA (rule-gate
-        z ablacji (d) i poziom (b) fallbacku), nigdy wektor stanu."""
+        """Whether a detector reports anything; read by oracles, never by the state."""
         return {lane: lane not in self._broken for lane in lanes}
 
     def report(self) -> dict[str, Any]:
-        """Do `runlog`: scenariusz + co faktycznie padło. Sam spec nie wystarcza,
-        bo ta sama specyfikacja na innej sieci psuje inne pasy."""
+        """For `runlog`: the scenario and what actually failed (the same spec
+        breaks different lanes on another network)."""
         return {
             **self.spec.as_dict(),
             "episode": self.episode,
@@ -373,3 +312,87 @@ class SensorModel:
             f"substitution={s.substitution!r}, onset={s.onset}, "
             f"broken={len(self._broken)}/{len(self._lanes)})"
         )
+
+
+# ------------------------------------------------------------------ failure mix
+
+
+@dataclass(frozen=True)
+class FailureMix:
+    """Distribution of failure scenarios over training episodes (failure
+    randomization), configured as `model.failure_mix`.
+
+    `sample(episode)` draws from a stream keyed by (mix seed, episode), not from
+    a global generator: the schedule does not depend on `--seed` or on how many
+    episodes ran before, so two training arms see the same failures and a
+    resumed run gets the same scenarios as a continuous one. Which detectors
+    fail is then chosen by `SensorModel` from (`spec.seed`, `episode`).
+    """
+
+    specs: tuple[FailureSpec, ...]
+    weights: tuple[float, ...]
+    seed: int = 0
+
+    def __post_init__(self) -> None:
+        if not self.specs:
+            raise ValueError("empty failure mix; give at least one scenario")
+        if len(self.specs) != len(self.weights):
+            raise ValueError(f"{len(self.specs)} scenarios, {len(self.weights)} weights")
+        if any(w < 0 for w in self.weights):
+            raise ValueError(f"weights must be non-negative, got {self.weights}")
+        if sum(self.weights) <= 0:
+            raise ValueError("the sum of weights must be positive")
+
+    @property
+    def probabilities(self) -> np.ndarray:
+        w = np.asarray(self.weights, dtype=np.float64)
+        return w / w.sum()
+
+    def sample(self, episode: int) -> FailureSpec:
+        rng = np.random.default_rng([self.seed, int(episode)])
+        return self.specs[int(rng.choice(len(self.specs), p=self.probabilities))]
+
+    def as_dict(self) -> dict[str, Any]:
+        """For the run parameters, so a run shows what the policy trained on."""
+        return {
+            "seed": self.seed,
+            "scenarios": [
+                {"weight": float(w), **s.as_dict()}
+                for s, w in zip(self.specs, self.weights, strict=True)
+            ],
+        }
+
+    def describe(self) -> str:
+        return ", ".join(
+            f"{s.slug()}={p:.0%}" for s, p in zip(self.specs, self.probabilities, strict=True)
+        )
+
+    @classmethod
+    def from_config(cls, raw: Any) -> FailureMix | None:
+        """`model.failure_mix` -> mix, or None (a run without failures):
+
+            failure_mix:
+              seed: 0
+              scenarios:
+                - {weight: 3, kind: none}
+                - {weight: 1, kind: gauss, level: 2.0}
+
+        Unknown scenario fields fail in `FailureSpec`.
+        """
+        if not raw:
+            return None
+        if not isinstance(raw, dict) or "scenarios" not in raw:
+            raise ValueError("failure_mix must be a mapping with a `scenarios` key")
+        specs, weights = [], []
+        for entry in raw["scenarios"]:
+            item = dict(entry)
+            weights.append(float(item.pop("weight", 1.0)))
+            specs.append(FailureSpec(**item))
+        return cls(tuple(specs), tuple(weights), seed=int(raw.get("seed", 0)))
+
+    @classmethod
+    def from_registry(cls) -> FailureMix | None:
+        from common.registry import Registry
+
+        param = Registry.mapping["model_mapping"]["setting"].param
+        return cls.from_config(param.get("failure_mix"))

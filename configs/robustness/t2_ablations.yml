@@ -1,11 +1,12 @@
-# T2 dla ABLACJI AGREGACJI — czy przewaga rdzenia pod awarią pochodzi z attention.
+# T2 for the AGGREGATION ABLATIONS: does the core's advantage under failure come from
+# attention.
 #
-# Na czystym ruchu actor bez sąsiadów i mean-pool są o 0,3–1,3% LEPSZE od GAT
-# (results/p1_ablations.md), a pod martwymi skrzyżowaniami rdzeń degraduje się
-# dużo łagodniej niż Advanced-CoLight (results/t2_nomech.md). Ten plan rozstrzyga,
-# czy to zasługa ważenia sąsiadów: te same scenariusze co t2_nomech, trzy warianty
-# actora, te same seedy. Hipoteza z open-questions.md: GNN wygrywa właśnie pod
-# awarią sensora, nie na czystej małej siatce.
+# On clean traffic the actor without neighbours and mean-pool are 0.3-1.3% BETTER than
+# GAT (results/p1_ablations.md), while under dead intersections the core degrades much
+# more gently than Advanced-CoLight (results/t2_nomech.md). This plan decides whether
+# that is due to neighbour weighting: the same scenarios as t2_nomech, three actor
+# variants, the same seeds. Hypothesis from open-questions.md: the GNN wins precisely
+# under sensor failure, not on a clean small grid.
 name: t2_ablations
 mode: realistic
 draws: 5
@@ -15,11 +16,11 @@ networks: [cityflow_jinan3x4_4ph, cityflow_hangzhou4x4_4ph]
 
 controllers:
   gatppo: {seeds: [0, 1, 2, 3, 4]}
-  # `baseline:` dopisane 2026-09-20. Kolumny ablacji to osobne TRENINGI, więc bez
-  # niego raport dawał wyłącznie ±std — a tabela z ±std przy `mask0p25_intersection`
-  # (sd rzędu 90–200 s) nie odróżnia efektu od szumu. To ta sama pułapka, którą
-  # notatka Fazy 3 opisuje przy `mask0p25_hold_t60`. Δ < 0 = ABLACJA lepsza, czyli
-  # attention/GNN GORSZE — kolumną ocenianą jest wariant, odniesieniem rdzeń.
+  # `baseline:` added 2026-09-20. The ablation columns are separate TRAININGS, so
+  # without it the report gave only +-std, and a +-std table at `mask0p25_intersection`
+  # (sd of 90-200 s) cannot tell an effect from noise. The same trap the Phase 3 note
+  # describes for `mask0p25_hold_t60`. delta < 0 = the ABLATION is better, i.e.
+  # attention/GNN is WORSE: the assessed column is the variant, the reference the core.
   gatppo_mean:
     agent: gatppo
     seeds: [0, 1, 2, 3, 4]

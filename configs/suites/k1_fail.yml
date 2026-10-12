@@ -1,22 +1,23 @@
-# Kraków (SUMO, `cracow-case-study`): rdzeń uczony Z AWARIAMI (DR) — odpowiednik
-# `p1_fail`. Rodzic kolumn `gatppo_fail*` w `t2_krakow`.
+# Krakow (SUMO, `cracow-case-study`): the core trained WITH FAILURES (DR), the
+# counterpart of `p1_fail`. Parent of the `gatppo_fail*` columns in `t2_krakow`.
 #
-# ⚠ BLOK `failure_mix` SKOPIOWANY CO DO ZNAKU z `p1_fail.yml` — replikacja C6 na trzeciej
-# sieci ma mierzyć tę samą dźwignię, a nie inną mieszankę (test w `test_training.py`).
+# WARNING: the `failure_mix` BLOCK is COPIED CHARACTER FOR CHARACTER from `p1_fail.yml`:
+# replicating C6 on a third network must measure the same lever, not another mix
+# (tested in `test_training.py`).
 #
-# Uczony WYŁĄCZNIE na `mid` (4500 poj/h, tuż przed kolanem nasycenia — kalibracja
-# w `data/raw_data/krakow_3w/README.md`); `low` i `high` są w `t2_krakow` ruchem SPOZA
-# treningu, jak warianty popytu `_d0p25` / `_r2000` na JiNan w `t2_ood`. Ta sama sieć,
-# więc ten sam wymiar obserwacji i ten sam graf — checkpoint przenosi się wprost.
+# Trained ONLY on `mid` (4500 veh/h, just before the saturation knee; calibration in
+# `data/raw_data/krakow_3w/README.md`); `low` and `high` are traffic OUTSIDE training
+# in `t2_krakow`, like the demand variants `_d0p25` / `_r2000` on JiNan in `t2_ood`. The
+# same network, so the same observation size and graph: the checkpoint transfers directly.
 #
-# Trening na CPU (`ngpu: -1`): GPU nic tu nie przyspiesza — wąskim gardłem jest SUMO —
-# a 2026-10-09 karta glidera była zajęta przez innego użytkownika (15,6 z 16 GB). Równolegle:
+# Training on CPU (`ngpu: -1`): a GPU speeds nothing up here (SUMO is the bottleneck),
+# and on 2026-10-09 the GPU machine's card was taken by another user (15.6 of 16 GB). In parallel:
 #     tsc suite run k1_fail -j 3
-# Sufiks run_id = nazwa pliku: `gatppo__sumo_krakow3w_mid__s<seed>_y5__k1_fail`.
+# run_id suffix = file name: `gatppo__sumo_krakow3w_mid__s<seed>_y5__k1_fail`.
 entry: core
 mode: realistic
 timeout: 86400
-ngpu: "-1"           # CPU: wąskim gardłem jest SUMO, a GPU glidera bywa zajęte przez innych
+ngpu: "-1"           # CPU: SUMO is the bottleneck, and the GPU machine's card is often taken
 
 defaults:
   world: sumo
@@ -27,39 +28,39 @@ grid:
 
 overrides:
   model:
-    # Scenariusz losowany NA EPIZOD ze strumienia (seed mixu, numer epizodu) —
-    # niezależnego od `--seed` polityki, żeby oba ramiona widziały ten sam
-    # harmonogram awarii (patrz `robustness/training.py`). KTÓRE detektory padną,
-    # wybiera już `SensorModel` z (spec.seed, episode), więc dwa epizody z tym
-    # samym scenariuszem psują inne pasy.
+    # The scenario is drawn PER EPISODE from a stream (mix seed, episode number)
+    # independent of the policy's `--seed`, so both arms see the same failure
+    # schedule (see `robustness/training.py`). WHICH detectors fail is then chosen
+    # by `SensorModel` from (spec.seed, episode), so two episodes with the same
+    # scenario break different lanes.
     failure_mix:
       seed: 0
       scenarios:
-        # 1/3 epizodów czystych. Nie ostrożność, tylko warunek A3a: polityka ma
-        # zostać porównywalna z rdzeniem na czystym ruchu, a kolumna `clean` w T2
-        # jest odniesieniem dla wszystkich degradacji.
+        # 1/3 of episodes clean. Not caution but condition A3a: the policy must stay
+        # comparable with the core on clean traffic, and the `clean` column in T2
+        # is the reference for every degradation.
         - {weight: 4, kind: none}
-        # szum pomiarowy — poziom OBSERWOWALNY, `uw_spread` na T2: 0,74 / 2,21
+        # measurement noise, the OBSERVABLE level; `uw_spread` in T2: 0.74 / 2.21
         - {weight: 1, kind: gauss, level: 1.0}
         - {weight: 1, kind: gauss, level: 2.0}
-        # martwe detektory ze śladem (`zero`) — poziom WNIOSKOWALNY, tu leży
-        # większość zysku fallbacku i tu mechanizm ma największą szansę
+        # dead detectors with a trace (`zero`), the INFERABLE level; most of the
+        # fallback gain lies here, and the mechanism has its best chance here
         - {weight: 2, kind: mask, level: 0.25}
         - {weight: 1, kind: mask, level: 0.5}
-        # całe skrzyżowanie bez czujników: wszystkie krawędzie wchodzące równie
-        # niepewne, softmax na wspólną stałą niezmienniczy — scenariusz, w którym
-        # mechanizm Z DEFINICJI nie ma czego różnicować. Zostaje w mieszance, żeby
-        # polityka nie uczyła się, że „awaria ⇒ zawsze da się wybrać sąsiada".
+        # a whole intersection without sensors: all inbound edges equally uncertain,
+        # softmax is invariant to a shared constant, a scenario in which the
+        # mechanism BY DEFINITION has nothing to differentiate. It stays in the mix so
+        # the policy does not learn that "failure => a neighbour can always be chosen".
         - {weight: 1, kind: mask, level: 0.25, unit: intersection}
-        # martwe BEZ śladu: zamrożony odczyt zamiast zera. `onset: 60` jest
-        # konieczne — detektor martwy od pierwszej decyzji nie ma czego trzymać
-        # i `hold` degeneruje się do `zero` (patrz `domain/sensors.py`).
+        # dead WITHOUT a trace: a frozen reading instead of zero. `onset: 60` is
+        # necessary: a detector dead from the first decision has nothing to hold
+        # and `hold` degenerates to `zero` (see `domain/sensors.py`).
         - {weight: 1, kind: mask, level: 0.25, substitution: hold, onset: 60}
-        # rozkalibrowanie — poziom NIEOBSERWOWALNY; głowa go nie wykrywa
-        # (AUROC 0,536), więc jest tu jako test, czy nie szkodzi
+        # miscalibration, the UNOBSERVABLE level; the head does not detect it
+        # (AUROC 0.536), so it is here as a test that it does no harm
         - {weight: 1, kind: drift, level: 0.3}
     #
-    # CZEGO W MIESZANCE NIE MA I DLACZEGO: `mask 0.75` i `gauss 4.0`. Przy tych
-    # poziomach WSZYSTKO, co czyta czujniki, przegrywa z FixedTime o 45% — to jest
-    # dziedzina bramki fallbacku (§2 notatki), nie ważenia sąsiadów. O
-    # publikowalności decyduje zakres środkowy i on jest tu przeważony.
+    # WHAT THE MIX LEAVES OUT AND WHY: `mask 0.75` and `gauss 4.0`. At these levels
+    # EVERYTHING that reads the sensors loses to FixedTime by 45%; that is the
+    # domain of the fallback gate (section 2 of the note), not of neighbour
+    # weighting. Publishability is decided by the middle range, weighted up here.

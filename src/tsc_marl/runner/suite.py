@@ -1,13 +1,11 @@
-"""Deklaratywne siatki biegów — „co policzyć" w pliku YAML, nie w historii powłoki.
+"""Declarative run grids (suites): what to compute lives in a YAML file, not in
+shell history.
 
-Suite opisuje INTENCJĘ eksperymentu: które punkty {agent × sieć × seed}, jakim
-wejściem i z jakimi nadpisaniami configu. Uruchomienie jest wtedy powtarzalne
-i widoczne w gicie, a nie odtwarzalne z pamięci.
-
-Każdy punkt leci w OSOBNYM podprocesie, bo LibSignal trzyma konfigurację
-w globalnym `Registry` i nie da się go czysto zresetować między punktami.
-Stąd jedyny nieoczywisty element całego pliku — sposób przekazania nadpisań
-przez granicę procesu (patrz `argv`).
+A suite states the intent of an experiment: which points {agent x network x
+seed}, which entry point and which config overrides, so a run is repeatable and
+visible in git. Every point runs in its OWN subprocess, because LibSignal keeps
+configuration in a global Registry; overrides cross the process boundary as a
+path to the suite file (see `argv`).
 
     tsc suite run p1_gate
     tsc suite status p1_gate
@@ -25,25 +23,23 @@ from typing import Any
 
 from tsc_marl import libsignal
 from tsc_marl.libsignal import experiment
-from tsc_marl.paths import CONFIGS, REPO_ROOT
+from tsc_marl.paths import REPO_ROOT
 
-SUITES = CONFIGS / "suites"
+SUITES = experiment.SUITES
 
-# Dwa tryby raportowania to jedna wartość `yellow_length`, a nie dwa drzewa configów.
+# Two reporting modes are one `yellow_length` value, not two config trees.
 YELLOW_BY_MODE = {"realistic": 5, "benchmark": 0}
 
-# `entry` wybiera moduł wejściowy. Bez tego runner umiał odpalać wyłącznie agentów
-# LibSignala — rdzeń Fazy 1 (własna pętla PPO) był z niego nieosiągalny.
+# `entry` picks the entry module: LibSignal agents or the core (its own PPO loop).
 ENTRIES = {"tsc": "tsc_marl.runner.train", "core": "tsc_marl.runner.train_core"}
 
-# Pola, po których wolno rozpinać siatkę. `world` też, bo Faza 5 (SUMO) będzie
-# chciała ten sam suite na dwóch symulatorach.
+# Fields a grid may span (`world` too: one suite on both simulators).
 GRID_FIELDS = ("agent", "world", "network", "seed")
 
 
 @dataclass(frozen=True)
 class Point:
-    """Jeden punkt siatki = jeden bieg = jeden podproces."""
+    """One grid point = one run = one subprocess."""
 
     agent: str
     world: str
@@ -61,12 +57,10 @@ class Suite:
     entry: str = "tsc"
     mode: str = "realistic"
     timeout: int = 3600
-    # Karta, na której ma liczyć KAŻDY punkt siatki. "-1" = CPU (domyślnie, bo
-    # tak wygląda maszyna deweloperska). To pole opisuje MASZYNĘ, nie eksperyment,
-    # więc leci flagą do dziecka i ląduje w sekcji `command` configu — jedynej,
-    # której `experiment.build_params` NIE bierze do odcisku. Dzięki temu ten sam
-    # bieg policzony na CPU i na GPU ma ten sam `params_hash`, czyli skip-if-done
-    # widzi go jako jeden eksperyment, a nie dwa.
+    # GPU for EVERY point, "-1" = CPU (default). It describes the MACHINE, not the
+    # experiment, so it travels as a flag into the config's `command` section, the
+    # one `experiment.build_params` leaves out of the fingerprint: a point computed
+    # on CPU and on GPU is one experiment, not two.
     ngpu: str = "-1"
     grid: dict[str, list[Any]] = field(default_factory=dict)
     defaults: dict[str, Any] = field(default_factory=dict)
@@ -82,23 +76,16 @@ class Suite:
 
     @property
     def suffix(self) -> str:
-        """Sufiks `run_id` dla suite'ów, które nadpisują config.
-
-        Bez niego dwa suite'y z różnymi `overrides` na tym samym punkcie dałyby ten
-        sam `run_id` przy innym `config_hash` — czyli `RunIdCollision` przy każdym
-        uruchomieniu. Suite BEZ nadpisań sufiksu nie dostaje: liczy dokładnie to,
-        co policzyłbyś ręcznie, więc ma trafiać w te same identyfikatory i widzieć
-        wcześniejsze wyniki jako gotowe.
-        """
-        return self.name if self.overrides else ""
+        """Run id suffix, see `experiment.suite_suffix`."""
+        return experiment.suite_suffix(self.name, self.overrides)
 
     def points(self) -> list[Point]:
-        """Iloczyn kartezjański `grid`; pola spoza siatki biorą wartość z `defaults`."""
+        """Cartesian product of `grid`; fields outside the grid come from `defaults`."""
         axes = {}
         for f in GRID_FIELDS:
             values = self.grid.get(f, self.defaults.get(f))
             if values is None:
-                raise SystemExit(f"suite '{self.name}': brak '{f}' w `grid` ani w `defaults`")
+                raise SystemExit(f"suite '{self.name}': no '{f}' in `grid` or `defaults`")
             axes[f] = values if isinstance(values, list) else [values]
         return [
             Point(**dict(zip(GRID_FIELDS, combo, strict=True)))
@@ -106,13 +93,11 @@ class Suite:
         ]
 
     def argv(self, point: Point, replace: bool = False) -> list[str]:
-        """Argumenty dla podprocesu liczącego ten punkt.
+        """Arguments of the subprocess computing this point.
 
-        Flagami jedzie wyłącznie TOŻSAMOŚĆ punktu. Nadpisania jadą jako `--suite
-        <ścieżka>` — dziecko czyta ten sam plik samo. Alternatywa (serializacja
-        słownika do `--set model.NUM_HEADS='[5,5]'`) wymagałaby własnego parsera
-        typów YAML-owych w obie strony i dawałaby komendę, której nie da się
-        skopiować z logu i powtórzyć ręcznie.
+        Flags carry only the point's IDENTITY; overrides travel as `--suite <path>`
+        and the child reads the same file. Serialising a dict into argv would need a
+        YAML type parser both ways and give a command one cannot copy from a log.
         """
         argv = [
             "-a", point.agent,
@@ -129,46 +114,36 @@ class Suite:
 
 
 def load(path: str | Path) -> Suite:
-    """Wczytaj suite. Przyjmuje ścieżkę albo samą nazwę (`p1_gate`)."""
+    """Load and validate a suite, given as a path or just a name (`p1_gate`)."""
     import yaml
 
-    p = Path(path)
-    if not p.suffix:
-        p = SUITES / f"{p.name}.yml"
-    if not p.is_absolute():
-        p = REPO_ROOT / p
-    if not p.is_file():
-        dostepne = ", ".join(sorted(s.stem for s in SUITES.glob("*.yml"))) or "brak"
-        raise SystemExit(f"nie ma suite'a '{path}' ({p}). Dostępne: {dostepne}")
-
+    p = experiment.suite_path(path)
     raw = yaml.safe_load(p.read_text()) or {}
-    # `path` ustawiamy sami — w YAML-u byłoby duplikatem argumentu konstruktora
-    dozwolone = set(Suite.__dataclass_fields__) - {"path"}
-    nieznane = set(raw) - dozwolone
-    if nieznane:
-        raise SystemExit(f"suite '{p.name}': nieznane pola {sorted(nieznane)}")
+    # `path` is set here; in YAML it would duplicate a constructor argument
+    allowed = set(Suite.__dataclass_fields__) - {"path"}
+    unknown = set(raw) - allowed
+    if unknown:
+        raise SystemExit(f"suite '{p.name}': unknown fields {sorted(unknown)}")
     raw.setdefault("name", p.stem)
     raw.setdefault("defaults", {}).setdefault("world", "cityflow")
     if raw.get("entry") == "core":
         raw["defaults"].setdefault("agent", "gatppo")
     if raw.get("mode", "realistic") not in YELLOW_BY_MODE:
-        raise SystemExit(f"suite '{p.name}': `mode` musi być jednym z {sorted(YELLOW_BY_MODE)}")
+        raise SystemExit(f"suite '{p.name}': `mode` must be one of {sorted(YELLOW_BY_MODE)}")
     if raw.get("entry", "tsc") not in ENTRIES:
-        raise SystemExit(f"suite '{p.name}': `entry` musi być jednym z {sorted(ENTRIES)}")
+        raise SystemExit(f"suite '{p.name}': `entry` must be one of {sorted(ENTRIES)}")
     return Suite(path=p, **raw)
 
 
-# ------------------------------------------------------------------ planowanie
+# ------------------------------------------------------------------ planning
 
 
 def plan(suite: Suite, point: Point):
-    """(args, params, run_id) dla punktu — bez uruchamiania czegokolwiek.
-
-    Idzie DOKŁADNIE tą drogą co proces liczący (`session.resolve`), żeby
-    „czy już policzone?" znaczyło to samo po obu stronach granicy procesu.
-    """
+    """(args, params, run_id) for a point without running anything, along EXACTLY
+    the computing process's path (`session.resolve`), so "already computed" means
+    the same on both sides of the process boundary."""
     from tsc_marl.libsignal import session
-    from tsc_marl.runner.train import parse_args
+    from tsc_marl.libsignal.experiment import parse_args
 
     args = parse_args(suite.argv(point))
     config, suffix = session.resolve(args)
@@ -179,11 +154,11 @@ def plan(suite: Suite, point: Point):
     return args, params, rid
 
 
-# ---------------------------------------------------------------- uruchamianie
+# ---------------------------------------------------------------- running
 
 
 def run_one(suite: Suite, point: Point, replace: bool = False) -> tuple[str, float]:
-    """Odpala jeden punkt w podprocesie. Zwraca (status, sekundy)."""
+    """Run one point in a subprocess. -> (status, seconds)."""
     cmd = [sys.executable, "-m", suite.module, *suite.argv(point, replace)]
     t0 = time.time()
     try:
@@ -199,7 +174,7 @@ def run_one(suite: Suite, point: Point, replace: bool = False) -> tuple[str, flo
         return "timeout", time.time() - t0
     if p.returncode != 0:
         tail = "\n".join((p.stdout + p.stderr).strip().splitlines()[-3:])
-        print(f"    ! bieg nieudany:\n      {tail}", file=sys.stderr)
+        print(f"    ! run failed:\n      {tail}", file=sys.stderr)
         return "failed", time.time() - t0
     return "ok", time.time() - t0
 
@@ -207,26 +182,25 @@ def run_one(suite: Suite, point: Point, replace: bool = False) -> tuple[str, flo
 def run(
     suite: Suite, replace: bool = False, jobs: int = 1, stagger: float | None = None
 ) -> dict[str, int]:
-    """Policz wszystkie punkty suite'a. Zwraca licznik statusów.
+    """Compute every point of a suite. -> status counts.
 
-    `jobs > 1` liczy punkty RÓWNOLEGLE (osobne podprocesy — i tak każdy punkt ma
-    własny, bo Registry jest globalne). Biegi i tak żyją w osobnych katalogach,
-    więc `runlog` nie ma tu nic do synchronizacji; jedyny współdzielony zasób to
-    `configs/sim/*.cfg` — patrz `run_parallel`.
+    `jobs > 1` runs points IN PARALLEL; runs live in separate directories, so
+    `runlog` needs no synchronisation; the only shared resource is
+    `configs/sim/*.cfg` (see `run_parallel`).
     """
-    libsignal.bootstrap()  # potrzebne do czytania configów przy planowaniu siatki
+    libsignal.bootstrap()  # needed to read configs while planning
     exp = experiment.experiment()
-    licznik = {"ok": 0, "pominięte": 0, "failed": 0, "timeout": 0}
+    counts = {"ok": 0, "skipped": 0, "failed": 0, "timeout": 0}
 
-    print(f"suite '{suite.name}' → {suite.module}, yellow={suite.yellow}, {suite.path}")
+    print(f"suite '{suite.name}' -> {suite.module}, yellow={suite.yellow}, {suite.path}")
     todo: list[Point] = []
     for point in suite.points():
         _, params, rid = plan(suite, point)
-        # skip-if-done po ODCISKU PARAMETRÓW, nie po nazwie: zmiana czegokolwiek
-        # w configu metody (albo w `overrides` suite'a) unieważnia poprzedni wynik
+        # skip-if-done by PARAMS FINGERPRINT, not by name: any change to the method
+        # config (or the suite's `overrides`) invalidates the previous result
         if not replace and exp.is_done(rid, params):
-            print(f"  {point.label()}  pomijam (jest wynik)")
-            licznik["pominięte"] += 1
+            print(f"  {point.label()}  skipped (result exists)")
+            counts["skipped"] += 1
             continue
         todo.append(point)
 
@@ -235,44 +209,40 @@ def run(
             print(f"  {point.label()} ...", end=" ", flush=True)
             status, dt = run_one(suite, point, replace)
             print(f"{status} ({dt:.0f}s)")
-            licznik[status] = licznik.get(status, 0) + 1
+            counts[status] = counts.get(status, 0) + 1
     else:
         gap = STAGGER_S if stagger is None else stagger
         for status in run_parallel(suite, todo, replace, jobs, gap).values():
-            licznik[status] = licznik.get(status, 0) + 1
+            counts[status] = counts.get(status, 0) + 1
 
-    print(f"\n{licznik}. Biegi: {exp.path}")
-    return licznik
+    print(f"\n{counts}. Runs: {exp.path}")
+    return counts
 
 
-# ------------------------------------------------------------ równolegle
+# ------------------------------------------------------------ parallel
 
-#: Odstęp między STARTAMI podprocesów. Nie kosmetyka: `World_param_Interface`
-#: LibSignala przepisuje `configs/sim/<sieć>.cfg` przez `open(path, 'w')`
-#: (obcina plik, potem pisze), a CityFlow czyta go przy budowie świata. Dwa
-#: procesy startujące w tej samej sekundzie potrafią więc przeczytać plik
-#: ucięty w połowie — `JSONDecodeError` albo pad silnika. Świat powstaje w
-#: pierwszych ~10 s życia procesu, później pliku nikt już nie czyta.
+#: Gap between subprocess STARTS. LibSignal's `World_param_Interface` rewrites
+#: `configs/sim/<network>.cfg` with `open(path, 'w')` (truncate, then write) and
+#: CityFlow reads it while building the world, so two processes starting together
+#: can read a half-written file (`JSONDecodeError` or an engine crash).
 STAGGER_S = 15.0
-#: Pad szybszy niż to jest traktowany jako pad STARTU (patrz wyżej) i ponawiany
-#: raz. Pad po kilku minutach to prawdziwy błąd biegu — jego nie powtarzamy.
+#: A failure faster than this counts as a START failure (see above) and is retried
+#: once; a failure after minutes is a real error and is not repeated.
 EARLY_FAIL_S = 90.0
 
 
 def _child_threads(jobs: int) -> str:
-    """Wątki BLAS/torch na dziecko. Domyślnie torch bierze WSZYSTKIE rdzenie, więc
-    N równoległych biegów to N×rdzenie wątków walczących o te same rdzenie —
-    przełączanie kontekstów zjada więcej, niż daje równoległość."""
-    import os  # noqa: PLC0415
+    """BLAS/torch threads per child: by default torch takes ALL cores, and N
+    parallel runs would fight over them."""
+    import os
 
     return str(max(1, (os.cpu_count() or 1) // jobs))
 
 
 def logs_dir(suite: Suite) -> Path:
-    """stdout/stderr podprocesów. Do PLIKU, nie do potoku: przy kilku dzieciach
-    naraz nikt nie czyta potoków na bieżąco, a pełny bufor potoku (64 KB)
-    zatrzymuje proces piszący — trening wisiałby bez żadnego komunikatu."""
-    from tsc_marl.paths import RUNS  # noqa: PLC0415
+    """Children's stdout/stderr go to a FILE, not a pipe: nobody reads pipes of
+    several children live, and a full pipe buffer (64 KB) blocks the writer."""
+    from tsc_marl.paths import RUNS
 
     d = RUNS / "_suite_logs" / suite.name
     d.mkdir(parents=True, exist_ok=True)
@@ -286,7 +256,7 @@ def run_parallel(
     jobs: int,
     stagger: float = STAGGER_S,
 ) -> dict[Point, str]:
-    """Licz `points` w `jobs` podprocesach naraz. -> {punkt: status}."""
+    """Compute `points` in `jobs` subprocesses at once. -> {point: status}."""
     env = libsignal.child_env()
     env.setdefault("OMP_NUM_THREADS", _child_threads(jobs))
     env.setdefault("MKL_NUM_THREADS", env["OMP_NUM_THREADS"])
@@ -295,16 +265,16 @@ def run_parallel(
     def launch(point: Point):
         cmd = [sys.executable, "-m", suite.module, *suite.argv(point, replace)]
         name = f"{point.agent}__{point.network}__s{point.seed}.log"
-        log = open(logs / name, "a", encoding="utf-8")  # noqa: SIM115 - zamyka schedule
+        log = open(logs / name, "a", encoding="utf-8")  # noqa: SIM115 - closed by schedule
         log.write(f"\n$ {' '.join(cmd)}\n")
         log.flush()
         proc = subprocess.Popen(cmd, cwd=REPO_ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
         return proc, log
 
-    print(f"  {len(points)} punktów, {jobs} naraz, logi: {logs}")
-    # Migawka configów symulatora dla CAŁEJ siatki: dziecko przywraca to, co
-    # zastało na starcie, a przy równoległych biegach mogło zastać plik już
-    # zabrudzony przez sąsiada. Ostatnie słowo należy więc do rodzica.
+    print(f"  {len(points)} points, {jobs} at once, logs: {logs}")
+    # A snapshot of the simulator configs for the WHOLE grid: a child restores what
+    # it found at start, which may already be dirtied by a sibling, so the parent
+    # has the last word.
     with libsignal.sim_configs_untouched():
         return schedule(points, launch, jobs, suite.timeout, stagger)
 
@@ -314,25 +284,24 @@ def _label(point) -> str:
 
 
 def schedule(points, launch, jobs: int, timeout: float, stagger: float) -> dict:
-    """Kolejka z `jobs` slotami. Rozdzielona od `run_parallel`, żeby dało się ją
-    przetestować na zwykłych procesach `sleep`, bez stawiania CityFlow.
-
-    `launch(point) -> (Popen, plik_logu)`. Zwraca {punkt: 'ok'|'failed'|'timeout'}.
+    """A queue with `jobs` slots, separate from `run_parallel` so it can be tested
+    with plain `sleep` processes. `launch(point) -> (Popen, log_file)`.
+    -> {point: 'ok'|'failed'|'timeout'}.
     """
     pending = list(points)
     retried: set = set()
-    active: dict = {}  # punkt -> (proc, log, t0)
+    active: dict = {}  # point -> (proc, log, t0)
     done: dict = {}
     last_start = -float("inf")
 
     while pending or active:
-        # start nowych — najwyżej jeden na `stagger` sekund
+        # start new ones, at most one per `stagger` seconds
         while pending and len(active) < jobs and time.time() - last_start >= stagger:
             point = pending.pop(0)
             proc, log = launch(point)
             active[point] = (proc, log, time.time())
             last_start = time.time()
-            print(f"  → start  {_label(point)}", flush=True)
+            print(f"  -> start  {_label(point)}", flush=True)
 
         for point, (proc, log, t0) in list(active.items()):
             dt = time.time() - t0
@@ -349,37 +318,34 @@ def schedule(points, launch, jobs: int, timeout: float, stagger: float) -> dict:
                 done[point] = "ok"
             elif code != "timeout" and dt < EARLY_FAIL_S and point not in retried:
                 retried.add(point)
-                pending.insert(0, point)  # najpierw ponów to, co padło przy starcie
-                print(f"  ! pad po {dt:.0f}s (start?) — ponawiam {_label(point)}", flush=True)
+                pending.insert(0, point)  # retry start failures first
+                print(f"  ! failed after {dt:.0f}s (start?), retrying {_label(point)}", flush=True)
                 continue
             else:
                 done[point] = "timeout" if code == "timeout" else "failed"
-            print(f"  ✓ {done[point]:7s} {_label(point)} ({dt:.0f}s)", flush=True)
+            print(f"  - {done[point]:7s} {_label(point)} ({dt:.0f}s)", flush=True)
         time.sleep(0.2)
     return done
 
 
 def status(suite: Suite) -> list[dict[str, Any]]:
-    """Stan każdego punktu siatki: status biegu i jego wynik raportowy.
-
-    Punkt, którego nigdy nie policzono, ma status `brak` — a nie znika z tabeli.
-    Suite jest listą TODO, więc pusta pozycja to informacja, nie brak danych.
-    """
+    """State of every grid point: run status and report result. A point never
+    computed has status `missing` instead of vanishing from the table."""
     libsignal.bootstrap()
     exp = experiment.experiment()
-    wiersze = []
+    rows = []
     for point in suite.points():
         _, params, rid = plan(suite, point)
         view = next((r for r in exp.runs() if r.id == rid), None)
-        wiersze.append(
+        rows.append(
             {
                 "run_id": rid,
                 "agent": point.agent,
                 "network": point.network,
                 "seed": point.seed,
-                "status": "brak" if view is None else view.status,
-                "aktualny": bool(view and exp.is_done(rid, params)),
+                "status": "missing" if view is None else view.status,
+                "current": bool(view and exp.is_done(rid, params)),
                 "att_last10": (view.result.get("att_last10") if view else None),
             }
         )
-    return wiersze
+    return rows

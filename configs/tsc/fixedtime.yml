@@ -1,6 +1,6 @@
 includes:
   - configs/tsc/base.yml
-  - configs/tsc/thesis_protocol.yml   # zamrożony protokół — musi być OSTATNI
+  - configs/tsc/thesis_protocol.yml   # frozen protocol, must be LAST
 
 
 model:

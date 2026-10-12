@@ -1,198 +1,91 @@
-"""Testy warstwy treningu z awariami (domain randomization) z Fazy 3, §3.
+"""Training with the mechanism: suite consistency, `uw` validation, rule thresholds.
 
-Dwie rzeczy, których zepsucie jest CICHE i unieważnia cały eksperyment:
-
-1. Harmonogram awarii ma zależeć wyłącznie od (seed mixu, numer epizodu) — nie od
-   `--seed` polityki i nie od stanu globalnego RNG. Inaczej ramiona 2 i 3 widzą różne
-   awarie i różnica między nimi miesza mechanizm z innym losowaniem.
-2. Mieszanka w `p1_fail.yml` i `p1_uw.yml` ma być IDENTYCZNA. Rozjazd w jednej wadze
-   nie wywala niczego — daje tabelę, która odpowiada na inne pytanie.
+The failure mix of the control arm (`p1_fail`) and of the mechanism arms must be
+IDENTICAL: a different weight raises nothing and gives a table that answers
+another question.
 """
 
 from __future__ import annotations
 
-import random
+import json
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
 import yaml
 
-from tsc_marl.domain.sensors import FailureSpec
+from tsc_marl.domain.sensors import FailureMix
 from tsc_marl.paths import CONFIGS
-from tsc_marl.robustness.training import FailureMix
-
-MIESZANKA = {
-    "seed": 0,
-    "scenarios": [
-        {"weight": 4, "kind": "none"},
-        {"weight": 2, "kind": "mask", "level": 0.25},
-        {"weight": 1, "kind": "gauss", "level": 2.0},
-    ],
-}
+from tsc_marl.robustness import controllers as c
+from tsc_marl.robustness import rule_ref, training
+from tsc_marl.robustness.training import check_uw, gate_reference, uw_signal
+from tsc_marl.uncertainty import obs_head as oh
 
 
-def mix() -> FailureMix:
-    return FailureMix.from_config(MIESZANKA)
-
-
-# ------------------------------------------------------------------- losowanie
-
-
-def test_scenariusz_zalezy_tylko_od_numeru_epizodu():
-    """Wznowiony trening od epizodu 137 ma dostać ten sam scenariusz co bieg ciągły,
-    a dwa ramiona — ten sam harmonogram. Stąd RNG kluczowany epizodem, nie strumień
-    ciągnięty po kolei."""
-    m = mix()
-    assert [m.sample(e) for e in range(30)] == [m.sample(e) for e in range(30)]
-    assert m.sample(137) == m.sample(137)
-
-
-def test_losowanie_nie_zalezy_od_globalnego_rng():
-    """`--seed` steruje inicjalizacją sieci przez `set_global_seed`. Gdyby wzorzec
-    awarii szedł z tego samego źródła, seedy różniłyby się JEDNOCZEŚNIE polityką
-    i tym, które detektory padły — i rozrzutu w T2 nie dałoby się rozdzielić.
-    Ta sama zasada, co w `domain/sensors.py`."""
-    m = mix()
-    random.seed(1234)
-    np.random.seed(1234)
-    pierwsze = [m.sample(e) for e in range(20)]
-    random.seed(9)
-    np.random.seed(9)
-    assert [m.sample(e) for e in range(20)] == pierwsze
-
-
-def test_seed_mieszanki_zmienia_harmonogram():
-    a = FailureMix.from_config(MIESZANKA)
-    b = FailureMix.from_config({**MIESZANKA, "seed": 1})
-    assert [a.sample(e) for e in range(40)] != [b.sample(e) for e in range(40)]
-
-
-def test_wagi_sa_respektowane():
-    """4:2:1 — sprawdzamy rząd wielkości, nie dokładny ułamek: to jest kontrola,
-    że wagi w ogóle działają, a nie test generatora numpy."""
-    m = mix()
-    proby = [m.sample(e) for e in range(3000)]
-    czyste = sum(1 for s in proby if not s.active)
-    assert m.probabilities.tolist() == pytest.approx([4 / 7, 2 / 7, 1 / 7])
-    assert 0.5 < czyste / len(proby) < 0.65
-
-
-def test_mieszanka_zawiera_epizody_czyste_i_z_awaria():
-    """Ramię z samymi awariami zapomniałoby czystego ruchu, a kolumna `clean` w T2
-    jest odniesieniem dla wszystkich degradacji (A3a)."""
-    m = mix()
-    proby = {m.sample(e) for e in range(200)}
-    assert any(not s.active for s in proby)
-    assert any(s.active for s in proby)
-
-
-# ----------------------------------------------------------------- parsowanie
-
-
-def test_brak_mieszanki_to_none():
-    """Bieg bez `failure_mix` ma być DOKŁADNIE rdzeniem z Fazy 1 — None, nie
-    mieszanka z jednym czystym scenariuszem (tamta przebudowuje `StateBuilder`)."""
-    assert FailureMix.from_config(None) is None
-    assert FailureMix.from_config({}) is None
-
-
-def test_literowka_w_scenariuszu_wywala_sie_przy_budowie():
-    """Ma paść przy starcie, nie po 200 epizodach dziwnych wyników."""
-    with pytest.raises(TypeError):
-        FailureMix.from_config({"scenarios": [{"kind": "mask", "lvl": 0.25}]})
-    with pytest.raises(ValueError, match="kind"):
-        FailureMix.from_config({"scenarios": [{"kind": "maska", "level": 0.25}]})
-
-
-def test_odrzuca_bezsensowne_wagi():
-    with pytest.raises(ValueError, match="nieujemne"):
-        FailureMix((FailureSpec(),), (-1.0,))
-    with pytest.raises(ValueError, match="dodatnia"):
-        FailureMix((FailureSpec(),), (0.0,))
-    with pytest.raises(ValueError, match="pusta"):
-        FailureMix((), ())
-
-
-def test_as_dict_opisuje_caly_harmonogram():
-    """Bez tego z `runs/` nie wynika, na czym uczyła się polityka — a dwa ramiona
-    z różnymi mieszankami wyglądałyby w katalogu tak samo."""
-    d = mix().as_dict()
-    assert d["seed"] == 0
-    assert [s["weight"] for s in d["scenarios"]] == [4.0, 2.0, 1.0]
-    assert [s["kind"] for s in d["scenarios"]] == ["none", "mask", "gauss"]
-
-
-# ------------------------------------------------------ spójność obu ramion
+def suite(name: str) -> dict:
+    return yaml.safe_load((CONFIGS / "suites" / f"{name}.yml").read_text())
 
 
 def suite_mix(name: str) -> dict:
-    raw = yaml.safe_load((CONFIGS / "suites" / f"{name}.yml").read_text())
-    return raw["overrides"]["model"]["failure_mix"]
+    return suite(name)["overrides"]["model"]["failure_mix"]
 
 
-def test_ramiona_maja_te_sama_mieszanke():
-    """`p1_fail` (bez UW) i `p1_uw` (z UW) różnią się WYŁĄCZNIE mechanizmem —
-    to jest cały sens ramienia kontrolnego. Rozjazd w jednej wadze nie wywala
-    niczego, tylko unieważnia porównanie 2↔3."""
+# ------------------------------------------------------ the arms are consistent
+
+
+def test_arms_share_the_failure_mix():
+    """`p1_fail` (without UW) and `p1_uw` (with UW) differ ONLY in the mechanism."""
     assert suite_mix("p1_fail") == suite_mix("p1_uw")
 
 
-def test_tylko_ramie_uw_wlacza_mechanizm():
-    bez = yaml.safe_load((CONFIGS / "suites" / "p1_fail.yml").read_text())["overrides"]["model"]
-    z = yaml.safe_load((CONFIGS / "suites" / "p1_uw.yml").read_text())["overrides"]["model"]
-    assert "uw" not in bez
-    assert z["uw"]["tau"] == 0.25
-    assert set(z) - set(bez) == {"uw"}
+def test_only_the_uw_arm_enables_the_mechanism():
+    without = suite("p1_fail")["overrides"]["model"]
+    with_uw = suite("p1_uw")["overrides"]["model"]
+    assert "uw" not in without
+    assert with_uw["uw"]["tau"] == 0.25
+    assert set(with_uw) - set(without) == {"uw"}
 
 
-def test_mieszanka_suite_ow_sie_parsuje():
-    """Plik YAML ma dawać zbudowaną mieszankę, a nie wyjątek w 3. godzinie biegu."""
+def test_suite_mix_parses():
+    """The YAML must give a mix, not an exception three hours into a run."""
     m = FailureMix.from_config(suite_mix("p1_uw"))
     assert m is not None
-    slugs = {s.suffix() or "clean" for s in m.specs}
-    assert "clean" in slugs
-    # trzy poziomy obserwowalności z `domain/sensors.py` mają być reprezentowane
-    assert any(s.kind == "gauss" for s in m.specs)  # obserwowalne
-    assert any(s.kind == "mask" and s.substitution == "hold" for s in m.specs)  # wnioskowalne
-    assert any(s.kind == "drift" for s in m.specs)  # nieobserwowalne
+    assert "clean" in {s.slug() for s in m.specs}
+    # observable, inferable and unobservable failures are all represented
+    assert any(s.kind == "gauss" for s in m.specs)
+    assert any(s.kind == "mask" and s.substitution == "hold" for s in m.specs)
+    assert any(s.kind == "drift" for s in m.specs)
 
 
-# ------------------------------------------- ramię 3b: UW z reguły w treningu (`p1_uw_rule`)
-
-
-def test_ramie_z_regula_ma_te_sama_mieszanke_co_kontrola():
-    """`p1_uw_rule` vs `p1_fail` — ta sama zasada co dla `p1_uw`: jedyną różnicą
-    suite'ów ma być mechanizm, inaczej para „trening z UW vs DR" mierzy też rozkład."""
+def test_rule_arm_shares_the_mix_with_the_control():
+    """`p1_uw_rule` vs `p1_fail`: the only difference is the mechanism."""
     assert suite_mix("p1_fail") == suite_mix("p1_uw_rule")
-    bez = yaml.safe_load((CONFIGS / "suites" / "p1_fail.yml").read_text())["overrides"]["model"]
-    z = yaml.safe_load((CONFIGS / "suites" / "p1_uw_rule.yml").read_text())["overrides"]["model"]
-    assert set(z) - set(bez) == {"uw"}
-    assert z["uw"] == {"tau": 0.25, "side": "source", "u": "rule"}
+    without = suite("p1_fail")["overrides"]["model"]
+    with_uw = suite("p1_uw_rule")["overrides"]["model"]
+    assert set(with_uw) - set(without) == {"uw"}
+    assert with_uw["uw"] == {"tau": 0.25, "side": "source", "u": "rule"}
 
 
 @pytest.mark.parametrize(
     "uw, fragment",
     [
-        ({"u": "rule"}, "side: source"),  # reguła istnieje tylko po stronie źródła
+        ({"u": "rule"}, "side: source"),  # the rule exists only on the source side
         ({"u": "rul", "side": "source"}, "u="),
-        ({"side": "source", "u": "oracle", "channels": "petle"}, "channels="),
-        ({"channels": "self"}, "channels tylko"),  # głowa nie rozdziela kanałów
-        ({"tau": 0.25, "threshhold": 0.5}, "nieznane klucze"),
-        ({"side": "source", "u": "oracle", "threshold": 0.5}, "threshold tylko"),
+        ({"side": "source", "u": "oracle", "channels": "loops"}, "channels="),
+        ({"channels": "self"}, "channels only"),  # the head has no channels
+        ({"tau": 0.25, "threshhold": 0.5}, "unknown keys"),
+        ({"side": "source", "u": "oracle", "threshold": 0.5}, "threshold only"),
     ],
 )
-def test_literowki_w_uw_sa_bledem_a_nie_domyslem(uw, fragment):
-    """Jeden walidator dla planu i suite'a: literówka w suite treningowym dałaby po
-    cichu głowę po stronie celu, czyli powtórzyła `p1_uw` pod nazwą `p1_uw_rule`."""
-    from tsc_marl.robustness.training import check_uw  # noqa: PLC0415
-
-    blad = check_uw(uw)
-    assert blad is not None and fragment in blad
+def test_typos_in_uw_are_errors_not_defaults(uw, fragment):
+    """One validator for plans and suites: a typo in a training suite would
+    silently fall back to the head on the target side."""
+    error = check_uw(uw)
+    assert error is not None and fragment in error
 
 
-def test_poprawne_spec_uw_przechodza():
-    from tsc_marl.robustness.training import check_uw  # noqa: PLC0415
-
+def test_valid_uw_specs_pass():
     for uw in (
         {"tau": 0.25},
         {"tau": 0.25, "side": "source"},
@@ -202,51 +95,38 @@ def test_poprawne_spec_uw_przechodza():
         assert check_uw(uw) is None, uw
 
 
-def test_uw_signal_buduje_regule_z_progami_bramki():
-    """Trening i ewaluacja budują sygnał tą samą funkcją; dla `u: rule` okno i próg
-    MUSZĄ pochodzić z `gate_ref` tej sieci — tak jak w bramce-regule."""
-    import torch  # noqa: PLC0415
-
-    from tsc_marl.robustness import controllers as c  # noqa: PLC0415
-    from tsc_marl.robustness.training import gate_reference, uw_signal  # noqa: PLC0415
-    from tsc_marl.uncertainty import obs_head as oh  # noqa: PLC0415
-
-    siec = "cityflow_jinan3x4_4ph"
-    if not oh.gate_path(siec).is_file():
-        pytest.skip("brak runs/heads/gate_ref — artefakt liczony przez `tsc obshead`")
-    from types import SimpleNamespace  # noqa: PLC0415
+def test_uw_signal_builds_the_rule_from_gate_thresholds():
+    """Training and evaluation build the signal with the same function; for
+    `u: rule` window and threshold come from this network's `gate_ref`."""
+    network = "cityflow_jinan3x4_4ph"
+    if not oh.gate_path(network).is_file():
+        pytest.skip("no runs/heads/gate_ref (computed by `tsc obshead`)")
 
     env = SimpleNamespace(
         graph=SimpleNamespace(edge_index=torch.tensor([[0, 1], [1, 0]])),
         features=SimpleNamespace(n_mov=8, movement_mask=lambda: None),
     )
-    sygnal = uw_signal({"tau": 0.25, "side": "source", "u": "rule"}, siec, env)
-    progi = gate_reference(siec)
-    assert isinstance(sygnal, c.RuleUncertainty)
-    assert sygnal._gate.window == progi.window
-    assert sygnal._gate.threshold == pytest.approx(progi.rule)
+    signal = uw_signal({"tau": 0.25, "side": "source", "u": "rule"}, network, env)
+    thresholds = gate_reference(network)
+    assert isinstance(signal, c.RuleUncertainty)
+    assert signal._gate.window == thresholds.window
+    assert signal._gate.threshold == pytest.approx(thresholds.rule)
 
 
-# ---------------------------------------------- próg samej reguły (sieci bez głowy, SUMO)
+# ---------------------------------------------- rule threshold alone (networks without a head)
 
 
-def test_prog_reguly_to_kwantyl_budzetu_falszywych_alarmow():
-    from tsc_marl.robustness.rule_ref import threshold  # noqa: PLC0415
-
-    wyniki = np.zeros((1000, 1))
-    wyniki[-4:] = 1.0  # 0,4% decyzji z pełnym zamrożeniem — mieści się w budżecie 0,5%
-    assert threshold(wyniki, 0.005) == 0.0
-    wyniki[-6:] = 1.0  # 0,6% — budżet przekroczony, próg musi pójść w górę
-    assert threshold(wyniki, 0.005) > 0.0
+def test_rule_threshold_is_the_false_alarm_quantile():
+    scores = np.zeros((1000, 1))
+    scores[-4:] = 1.0  # 0.4% fully frozen decisions: within the 0.5% budget
+    assert rule_ref.threshold(scores, 0.005) == 0.0
+    scores[-6:] = 1.0  # 0.6%: over budget, the threshold must rise
+    assert rule_ref.threshold(scores, 0.005) > 0.0
 
 
-def test_prog_reguly_zapis_odczyt_i_pierwszenstwo_gate_ref(tmp_path, monkeypatch):
-    """Sieć z `gate_ref` (CityFlow, z głową) czyta GO, a nie `rule_ref` — liczby
-    JiNan/HangZhou nie mogą się zmienić. Sieć bez niego czyta `rule_ref`."""
-    import json  # noqa: PLC0415
-
-    from tsc_marl.robustness import rule_ref, training  # noqa: PLC0415
-
+def test_rule_threshold_round_trip_and_gate_ref_precedence(tmp_path, monkeypatch):
+    """A network with `gate_ref` (CityFlow, with a head) reads IT, not `rule_ref`,
+    so the JiNan/HangZhou numbers cannot change; one without reads `rule_ref`."""
     monkeypatch.setattr(rule_ref, "rule_path", lambda net: tmp_path / f"rule_ref__{net}.json")
     blob = {
         "format": rule_ref.RULE_FORMAT,
@@ -262,26 +142,23 @@ def test_prog_reguly_zapis_odczyt_i_pierwszenstwo_gate_ref(tmp_path, monkeypatch
     ref = training.gate_reference("sumo_x")
     assert (ref.window, ref.rule, ref.uq) == (12, 0.4, None)
     with pytest.raises(SystemExit, match="rulecal"):
-        training.gate_reference("sumo_brak")
-    from tsc_marl.uncertainty import obs_head as oh  # noqa: PLC0415
+        training.gate_reference("sumo_missing")
 
     if oh.gate_path("cityflow_jinan3x4_4ph").is_file():
         assert training.gate_reference("cityflow_jinan3x4_4ph").uq is not None
 
 
-def test_krakow_dr_ma_mieszanke_z_p1_fail():
-    """Replikacja C6 na Krakowie mierzy TĘ SAMĄ dźwignię co na JiNan/HangZhou."""
+def test_krakow_dr_uses_the_p1_fail_mix():
+    """The Krakow replication measures the same lever as JiNan/HangZhou."""
     assert suite_mix("k1_fail") == suite_mix("p1_fail")
-    core = yaml.safe_load((CONFIGS / "suites" / "k1_core.yml").read_text())
+    core = suite("k1_core")
     assert "overrides" not in core or "failure_mix" not in core["overrides"].get("model", {})
 
 
-def test_k2_to_k1_plus_zapis_najlepszego_checkpointu():
-    """Powtórka ma różnić się od `k1_*` WYŁĄCZNIE `save_best` — inaczej porównanie
-    końcowego i najlepszego checkpointu z `t2_krakow` przestaje dotyczyć tych samych biegów."""
+def test_k2_is_k1_plus_best_checkpoint():
+    """The repeat differs from `k1_*` ONLY in `save_best`."""
     for k1, k2 in (("k1_core", "k2_core"), ("k1_fail", "k2_fail")):
-        a = yaml.safe_load((CONFIGS / "suites" / f"{k1}.yml").read_text())
-        b = yaml.safe_load((CONFIGS / "suites" / f"{k2}.yml").read_text())
+        a, b = suite(k1), suite(k2)
         model_a = (a.get("overrides") or {}).get("model", {})
         model_b = dict(b["overrides"]["model"])
         assert model_b.pop("save_best") is True

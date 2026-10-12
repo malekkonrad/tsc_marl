@@ -1,76 +1,76 @@
-# T2 — Kraków (SUMO): replikacja architektury końcowej na TRZECIEJ sieci i DRUGIM symulatorze.
+# T2, Krakow (SUMO): replication of the final architecture on a THIRD network and a SECOND simulator.
 #
-# SKĄD. Dwie największe dziury pracy (`tsc_marl_research/kontrybucje.md`, „Dziury"):
-# dwie topologie i jeden symulator. Korytarz al. Trzech Wieszczów łata obie naraz,
-# a do tego jest siecią, której JiNan/HangZhou nie mają: 25 sygnalizacji, 1–7 wlotów,
-# 2–7 faz, zielone warunkowe `g`, klastry skrzyżowań (`data/raw_data/krakow_3w/README.md`).
-# Plan NIE wprowadza nic nowego — powtarza na Krakowie to, co stoi w pracy:
+# WHERE FROM. The two largest holes of the thesis (`tsc_marl_research/kontrybucje.md`,
+# "Holes"): two topologies and one simulator. The al. Trzech Wieszczow corridor patches both
+# at once, and it is a network JiNan/HangZhou are not: 25 signals, 1-7 approaches, 2-7
+# phases, permissive greens `g`, intersection clusters (`data/raw_data/krakow_3w/README.md`).
+# The plan introduces NOTHING new; it repeats on Krakow what stands in the thesis:
 #
-#   C4  wszystko, co czyta czujniki, przegrywa z FixedTime pod ciężkimi maskami
-#   C6  DR = druga dźwignia: płaski podatek na czystym, zysk pod maskami
-#   rozwiązanie: DR + bramka-reguła schodzi pod FixedTime przy 50% martwych detektorów
+#   C4  everything that reads the sensors loses to FixedTime under heavy masks
+#   C6  DR = the second lever: a flat tax on clean, a gain under masks
+#   solution: DR + rule gate goes below FixedTime with 50% dead detectors
 #
-# KOLUMNY (rodzice: suite'y `k1_core` i `k1_fail`, uczone na `mid`, 3 seedy):
-#   gatppo            rdzeń na czystym                         (k1_core, run_id BEZ sufiksu —
-#                     suite bez nadpisań liczy bieg referencyjny, `Suite.suffix`)
-#   gatppo_fail       rdzeń z awariami (DR)        vs gatppo   (k1_fail)
-#   gatppo_gate       rdzeń + bramka-reguła        vs gatppo   (k1_core)
-#   gatppo_fail_gate  DR + bramka-reguła   vs gatppo_fail      (k1_fail) ← rozwiązanie
-#   advancedmp, efficientmp   reguły ciśnieniowe (czytają TEN SAM popsuty stan, C4)
-#   fixedtime         WEBSTER per poziom popytu (`fixedTimeProgram` w configu sieci) —
-#                     to on jest też celem przełączenia bramki, nie `t_fixed: 30`
+# COLUMNS (parents: suites `k1_core` and `k1_fail`, trained on `mid`, 3 seeds):
+#   gatppo            core on clean                            (k1_core, run_id WITHOUT a suffix:
+#                     a suite without overrides computes the reference run, `Suite.suffix`)
+#   gatppo_fail       core with failures (DR)      vs gatppo   (k1_fail)
+#   gatppo_gate       core + rule gate             vs gatppo   (k1_core)
+#   gatppo_fail_gate  DR + rule gate       vs gatppo_fail      (k1_fail) <- the solution
+#   advancedmp, efficientmp   pressure rules (read THE SAME broken state, C4)
+#   fixedtime         WEBSTER per demand level (`fixedTimeProgram` in the network config);
+#                     it is also the gate's switch target, not `t_fixed: 30`
 #
-# SIECI: `mid` = ruch treningowy; `low` i `high` = ruch spoza treningu (ten sam graf,
-# ten sam wymiar obserwacji), jak warianty popytu JiNan w `t2_ood`. Rodzic zawsze z `mid`
-# (`parent` z nazwą sieci na sztywno).
+# NETWORKS: `mid` = training traffic; `low` and `high` = traffic outside training (the same
+# graph, the same observation size), like the JiNan demand variants in `t2_ood`. The parent
+# is always from `mid` (`parent` with the network name hard-coded).
 #
-# PRÓG BRAMKI: `runs/heads/rule_ref__sumo_krakow3w_<poziom>.json` (`tsc rulecal`) —
-# kwantyl 99,5% na czystym ruchu pod Advanced-MP, okno 12, udział zamrożonych liczony po
-# PRAWDZIWYCH ruchach (`StateBuilder.movement_mask`; Kraków dopycha 1–7 wlotów zerami).
-# Głowy niepewności na Krakowie nie ma — UW i bramka UQ są zamknięte (C5).
-# Progi i FAKTYCZNE fałszywe alarmy na czystym (budżet 0,5%): low 1,00 / 2,8% ·
-# mid 0,79 / 0,52% · high 0,79 / 0,63%. Na `low` budżet jest nie do dotrzymania (puste
-# skrzyżowania wyglądają na martwe) — przewidywany mały koszt bramki na `clean` przy `low`.
+# GATE THRESHOLD: `runs/heads/rule_ref__sumo_krakow3w_<level>.json` (`tsc rulecal`): the 99.5%
+# quantile on clean traffic under Advanced-MP, window 12, the frozen share computed over REAL
+# movements (`StateBuilder.movement_mask`; Krakow pads 1-7 approaches with zeros).
+# Krakow has no uncertainty head; UW and the UQ gate are closed (C5).
+# Thresholds and ACTUAL false alarms on clean (budget 0.5%): low 1.00 / 2.8%,
+# mid 0.79 / 0.52%, high 0.79 / 0.63%. On `low` the budget cannot be met (empty
+# intersections look dead); a small gate cost on `clean` at `low` is predicted.
 #
-# LOSOWANIA: 3 (nie 5 jak na CityFlow) — epizod SUMO jest ~5× droższy; 3 seedy × 3
-# losowania = 9 par na komórkę. Przy małych Δ raportować kierunek i licznik wygranych.
+# DRAWS: 3 (not 5 as on CityFlow): a SUMO episode is ~5x more expensive; 3 seeds x 3 draws =
+# 9 pairs per cell. With small deltas, report the direction and the win count.
 #
-# BASELINE'Y NA CZYSTYM (2026-10-09, ścieżka `tsc degrade`, ATT [s] / przepustowość):
+# BASELINES ON CLEAN (2026-10-09, `tsc degrade` path, ATT [s] / throughput):
 #                 low           mid            high
-#   Webster       297,9 / 1645  347,6 / 3972   390,5 / 4374
-#   Efficient-MP  282,6 / 1651  373,5 / 3846   477,2 / 3928
-#   Advanced-MP   279,8 / 1655  396,9 / 3676   481,5 / 3840
-#   t_fixed: 30   331,4 / 1618  390,2 / 3941   471,8 / 4111
-# Przy mid/high metody ciśnieniowe PRZEGRYWAJĄ z Websterem (−7…−23%, mniejsza
-# przepustowość) — na Krakowie adaptacja nie jest za darmo blisko nasycenia.
+#   Webster       297.9 / 1645  347.6 / 3972   390.5 / 4374
+#   Efficient-MP  282.6 / 1651  373.5 / 3846   477.2 / 3928
+#   Advanced-MP   279.8 / 1655  396.9 / 3676   481.5 / 3840
+#   t_fixed: 30   331.4 / 1618  390.2 / 3941   471.8 / 4111
+# At mid/high the pressure methods LOSE to Webster (-7...-23%, lower throughput); on Krakow
+# adaptation is not free close to saturation.
 #
-# HIPOTEZY ZAPISANE PRZED POMIAREM (na `mid`, tam leży trening):
-#   K0 (WARUNEK, czytać PIERWSZY): rdzeń na czystym `mid` vs Webster. Jeśli rdzeń
-#      przegrywa już na czystym, K1 jest trywialne, a K2–K4 trzeba czytać jako
-#      „która dźwignia zbliża politykę do Webstera", nie „która schodzi pod FixedTime".
-#      Wtedy wynik Krakowa do pracy brzmi: na sieci niejednorodnej blisko nasycenia
-#      dobrze zestrojony program stałoczasowy jest bazą, którą trudno pobić — co samo
-#      w sobie wzmacnia sens fallbacku do niego.
-#   K1 (C4): przy `mask0p5` i `mask*_intersection` rdzeń i obie reguły MP gorsze od
-#      FixedTime-Webster. Smoke 2026-10-09: Advanced-MP przy `mask0p25_intersection`
-#      846 s wobec 283 s na czystym (przepustowość 2750 → 1646) — kierunek już widać.
-#   K2 (C6): DR vs rdzeń — podatek na `clean` (+, mały), istotny zysk przy `mask0p5`
-#      i `mask0p5_intersection`.
-#   K3 (rozwiązanie): DR + bramka poniżej FixedTime-Webster przy `mask0p5`. NAJSŁABSZA
-#      z hipotez: Webster jest tu dużo mocniejszy niż `t_fixed: 30` na CityFlow
-#      (`mid` 347,6 s wobec 390,2 s dla `t_fixed: 30`), więc próg do pobicia jest wyżej.
-#   K4 (bramka): bramka-reguła istotnie lepsza od rdzenia przy maskach skrzyżowań;
-#      przy `drift` — koszt (fałszywe alarmy, jak w `t2_uw_rule`, +11 s JiNan).
-#   K5 (OOD, `low`/`high`): kierunek K1–K3 ten sam; na `high` (za kolanem nasycenia)
-#      polityka może przegrywać z Websterem już na czystym — wtedy to jest wynik
-#      o generalizacji poza ruch treningowy, nie o odporności.
-#   Odczyt: K1+K2+K4 → C4 i C6 replikują się na trzeciej sieci i drugim symulatorze.
-#   K3 obalona → „rozwiązanie schodzi pod FixedTime" zawęzić do FixedTime BEZ programu
-#   na porę dnia; to uczciwsze zdanie, a nie porażka.
+# HYPOTHESES RECORDED BEFORE MEASUREMENT (on `mid`, where training lies):
+#   K0 (CONDITION, read FIRST): the core on clean `mid` vs Webster. If the core loses already
+#      on clean, K1 is trivial, and K2-K4 must be read as "which lever brings the policy
+#      closer to Webster", not "which goes below FixedTime". Then Krakow's result for the
+#      thesis reads: on a heterogeneous network close to saturation a well-tuned fixed-time
+#      program is a baseline hard to beat, which itself strengthens the case for falling
+#      back to it.
+#   K1 (C4): at `mask0p5` and `mask*_intersection` the core and both MP rules worse than
+#      FixedTime-Webster. Smoke test 2026-10-09: Advanced-MP at `mask0p25_intersection`
+#      846 s against 283 s on clean (throughput 2750 -> 1646); the direction already shows.
+#   K2 (C6): DR vs the core: a tax on `clean` (+, small), a significant gain at `mask0p5`
+#      and `mask0p5_intersection`.
+#   K3 (solution): DR + gate below FixedTime-Webster at `mask0p5`. The WEAKEST hypothesis:
+#      Webster is much stronger here than `t_fixed: 30` on CityFlow (`mid` 347.6 s against
+#      390.2 s for `t_fixed: 30`), so the bar to beat is higher.
+#   K4 (gate): the rule gate significantly better than the core under intersection masks;
+#      under `drift` a cost (false alarms, as in `t2_uw_rule`, +11 s JiNan).
+#   K5 (OOD, `low`/`high`): the direction of K1-K3 the same; on `high` (past the saturation
+#      knee) the policy may lose to Webster already on clean; then it is a result about
+#      generalisation beyond training traffic, not about robustness.
+#   Reading: K1+K2+K4 -> C4 and C6 replicate on a third network and a second simulator.
+#   K3 rejected -> narrow "the solution goes below FixedTime" to FixedTime WITHOUT a
+#   time-of-day program; a more honest statement, not a failure.
 #
-# WYMAGA: suite'ów `k1_core` i `k1_fail` (glider, `world: sumo`) oraz
-#   tsc rulecal -n sumo_krakow3w_{low,mid,high}   (rule_ref — rsync z laptopa albo policzyć)
-#   .venv/bin/python data/raw_data/krakow_3w/build.py webster   (programy w repo)
+# REQUIRES: suites `k1_core` and `k1_fail` (GPU machine, `world: sumo`) and
+#   tsc rulecal -n sumo_krakow3w_{low,mid,high}   (rule_ref: rsync from the laptop or compute)
+#   .venv/bin/python data/raw_data/krakow_3w/build.py webster   (programs in the repo)
 name: t2_krakow
 mode: realistic
 draws: 3
@@ -84,19 +84,19 @@ controllers:
     parent: "{agent}__sumo_krakow3w_mid__s{seed}_y{yellow}"
   gatppo_fail:
     agent: gatppo
-    label: rdzeń z awariami (DR)
+    label: core with failures (DR)
     seeds: [0, 1, 2]
     parent: "{agent}__sumo_krakow3w_mid__s{seed}_y{yellow}__k1_fail"
     baseline: gatppo
   gatppo_gate:
     agent: gatppo
-    label: rdzeń + bramka-reguła
+    label: core + rule gate
     seeds: [0, 1, 2]
     parent: "{agent}__sumo_krakow3w_mid__s{seed}_y{yellow}"
     gate: {kind: rule, k_on: 3, k_off: 6}
   gatppo_fail_gate:
     agent: gatppo
-    label: DR + bramka-reguła
+    label: DR + rule gate
     seeds: [0, 1, 2]
     parent: "{agent}__sumo_krakow3w_mid__s{seed}_y{yellow}__k1_fail"
     gate: {kind: rule, k_on: 3, k_off: 6}

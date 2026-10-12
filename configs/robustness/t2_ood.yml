@@ -1,26 +1,27 @@
-# TEST GAŁĘZI EPISTEMIC dwupoziomowego fallbacku (epistemic↑ przy czystym wejściu →
-# MaxPressure). Bramka 2.0: na lżejszym ruchu model nie traci trafności, więc tej
-# sytuacji w danych nie było. Tu dwa pytania, patrz `analysis/ood.py`:
-#   1. czy zamrożona polityka PRZEGRYWA z MaxPressure na ruchu spoza treningu,
-#      zwłaszcza CIĘŻSZYM (realny plik HangZhou 5816: 6984 pojazdów vs 2983, ×2,3);
-#   2. czy rozbieżność 5 actorów rdzenia (`gatppo_ens`) rośnie tam MOCNIEJ niż na
-#      szumie detektorów — tylko wtedy odróżnia nowy ruch od awarii sensora.
+# TEST OF THE EPISTEMIC BRANCH of the two-level fallback (epistemic up on clean
+# input -> MaxPressure). Gate 2.0: on lighter traffic the model does not lose
+# accuracy, so this situation was absent from the data. Two questions here, see
+# `analysis/ood.py`:
+#   1. does the frozen policy LOSE to MaxPressure on traffic outside training,
+#      especially HEAVIER traffic (the real HangZhou 5816 file: 6984 vehicles vs 2983, x2.3);
+#   2. does the disagreement of 5 core actors (`gatppo_ens`) grow there MORE than under
+#      detector noise; only then does it tell new traffic from a sensor failure.
 #
-# Wagi ZAWSZE z sieci treningowej: `{base}` = nazwa sieci bez sufiksu wariantu ruchu.
-# Uruchamiać PO dograniu seedów 3–4 (noc.sh) — potrzebuje 5 seedów rdzenia i ACL.
+# Weights ALWAYS from the training network: `{base}` = network name without the traffic
+# variant suffix. Run AFTER seeds 3-4 are added (noc.sh): needs 5 seeds of the core and ACL.
 name: t2_ood
 mode: realistic
 draws: 3
-timeout: 14400   # ciężki ruch liczy się wolniej — epizod 5816 to kilka razy więcej pojazdów
+timeout: 14400   # heavy traffic computes slower: a 5816 episode has several times more vehicles
 
 networks:
-  - cityflow_jinan3x4_4ph          # ruch treningowy (JiNan korkuje się już przy ×1,1,
-  - cityflow_jinan3x4_4ph_d0p25    #   więc na JiNan tylko lżejszy i inny wzorzec)
+  - cityflow_jinan3x4_4ph          # training traffic (JiNan jams already at x1.1,
+  - cityflow_jinan3x4_4ph_d0p25    #   so on JiNan only lighter traffic and another pattern)
   - cityflow_jinan3x4_4ph_r2000
-  - cityflow_hangzhou4x4_4ph       # ruch treningowy
-  - cityflow_hangzhou4x4_4ph_r5816 # realny plik, ×2,3 pojazdów; płynny: Efficient-MP 428 s
-  # Sztuczne ×1,5 (`tsc demand`) ODPADA: zdublowane wpisy ruchu korkują CityFlow (epizod
-  # > 15 min zamiast ~15 s) — ten sam efekt co JiNan ×1,1. Trudny ruch = tylko realny plik.
+  - cityflow_hangzhou4x4_4ph       # training traffic
+  - cityflow_hangzhou4x4_4ph_r5816 # a real file, x2.3 vehicles; flowing: Efficient-MP 428 s
+  # An artificial x1.5 (`tsc demand`) is OUT: duplicated traffic entries jam CityFlow (an
+  # episode > 15 min instead of ~15 s), the same effect as JiNan x1.1. Hard traffic = real file only.
 
 controllers:
   gatppo:
@@ -31,11 +32,11 @@ controllers:
     parent: "{agent}__{base}__s{seed}_y{yellow}"
   gatppo_ens:
     agent: gatppo
-    ensemble: [0, 1, 2, 3, 4]      # decyduje seed 0, pozostałe głosują
+    ensemble: [0, 1, 2, 3, 4]      # seed 0 decides, the others vote
     parent: "{agent}__{base}__s{seed}_y{yellow}"
   efficientmp: {}
   advancedmp: {}
   fixedtime: {}
 
 scenarios:
-  - {kind: gauss, level: 2.0}      # punkt odniesienia: reakcja ensemble na awarię sensora
+  - {kind: gauss, level: 2.0}      # reference point: the ensemble's reaction to a sensor failure

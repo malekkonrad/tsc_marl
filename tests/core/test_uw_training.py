@@ -1,14 +1,10 @@
-"""Testy treningu polityki Z mechanizmem (Faza 3, §3).
+"""Training a policy WITH the UW mechanism.
 
-Cały ten plik istnieje dla JEDNEGO błędu: sklejenia log ρ w minibatchu. `tiled_log_rho`
-może zwrócić wektor o POPRAWNEJ DŁUGOŚCI i mylnym układzie — wtedy nic nie pada,
-asercja w `uw_attention._forward` przechodzi, PyG przepuszcza argument do `message`
-bez sprawdzenia, a trening po prostu uczy się innego sygnału, niż się wydaje. To jest
-pułapka nr 3 z docstringu `uw_attention.py`, tu uderzająca realnie.
-
-Dlatego kluczowy test nie porównuje kształtów, tylko WARTOŚCI: puszcza k kroków przez
-encoder pojedynczo i porównuje z jednym przebiegiem po sklejonym grafie. Gdyby układ
-był pomieszany, wyjścia się rozjadą; gdyby test sprawdzał samą długość — nie.
+This file exists for ONE bug: stacking log_rho in a minibatch. `tiled_log_rho`
+could return a vector of the RIGHT LENGTH and the wrong layout; then nothing
+fails, PyG passes the argument to `message` unchecked, and training learns
+another signal than it seems. So the key test compares VALUES: k steps through
+the encoder one by one against one pass over the stacked graph.
 """
 
 from __future__ import annotations
@@ -16,7 +12,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from tests.core.test_ppo import N_PHASES, OB_LENGTH, ROADNET
+from tsc_marl import paths
 from tsc_marl.core.graph import RoadNetGraph
 from tsc_marl.core.nets import ActorCritic, GATEncoder
 from tsc_marl.core.ppo import (
@@ -28,85 +24,85 @@ from tsc_marl.core.ppo import (
     tiled_log_rho,
 )
 
+ROADNET = paths.DATA / "raw_data" / "jinan_3x4" / "roadnet_3_4.json"
+OB_LENGTH = 24
+N_PHASES = 8
+
 
 @pytest.fixture(scope="module")
 def graph():
     if not ROADNET.is_file():
-        pytest.skip(f"brak roadnetu {ROADNET} (dane pobiera się osobno — patrz data/README.md)")
+        pytest.skip(f"missing roadnet {ROADNET} (data is fetched separately, see data/README.md)")
     return RoadNetGraph.from_roadnet(ROADNET)
 
 
-def losowe_log_rho(n_steps: int, n_edges: int, n_nodes: int, seed: int = 0) -> torch.Tensor:
-    """Wyraźnie UJEMNE i RÓŻNE na każdej pozycji — zero i stała są niewidoczne dla
-    softmaxu (niezmienniczość na stałą wspólną dla grupy), więc na nich test
-    przeszedłby także przy pomieszanym układzie."""
+def random_log_rho(n_steps: int, n_edges: int, n_nodes: int, seed: int = 0) -> torch.Tensor:
+    """Clearly NEGATIVE and DIFFERENT at every position: zeros or a constant are
+    invisible to softmax, so a scrambled layout would pass with them."""
     g = torch.Generator().manual_seed(seed)
     return -torch.rand(n_steps, n_edges + n_nodes, generator=g) * 5.0
 
 
-# ------------------------------------------------------- sklejanie log ρ w batchu
+# ------------------------------------------------------- log_rho stacking
 
 
-def test_tiled_log_rho_zgadza_sie_z_forwardem_per_krok(graph):
-    """JĄDRO CAŁEJ FAZY 3. k kroków sklejonych w jeden graf musi dać dokładnie to,
-    co k osobnych forwardów — także wtedy, gdy każdy krok ma INNE log ρ."""
+def test_tiled_log_rho_matches_per_step_forward(graph):
+    """k steps stacked into one graph give exactly what k separate forward passes
+    give, also when every step has a DIFFERENT log_rho."""
     torch.manual_seed(0)
     enc = GATEncoder(OB_LENGTH).eval()
     n, e, k = graph.n_nodes, graph.edge_index.shape[1], 4
 
     g = torch.Generator().manual_seed(1)
     x = torch.randn(k, n, OB_LENGTH, generator=g)
-    lr = losowe_log_rho(k, e, n)
+    lr = random_log_rho(k, e, n)
 
     with torch.no_grad():
-        osobno = torch.cat([enc(x[t], graph.edge_index, log_rho=lr[t]) for t in range(k)])
-        razem = enc(
+        separate = torch.cat([enc(x[t], graph.edge_index, log_rho=lr[t]) for t in range(k)])
+        together = enc(
             x.reshape(k * n, OB_LENGTH),
             tiled_edge_index(graph.edge_index, n, k),
             log_rho=tiled_log_rho(lr, e, n),
         )
-    assert torch.allclose(osobno, razem, atol=1e-5)
+    assert torch.allclose(separate, together, atol=1e-5)
 
 
-def test_naiwne_splaszczenie_ma_dobra_dlugosc_i_zly_wynik(graph):
-    """Dowód, że ten test w ogóle coś sprawdza: wariant, który kusi
-    (`log_rho.reshape(-1)`), przechodzi WSZYSTKIE asercje kształtu i liczy co innego.
-
-    Gdyby ten test zaczął padać, znaczyłoby to, że zły układ daje ten sam wynik —
-    czyli że pozostałe testy nie mają mocy rozróżniającej."""
+def test_naive_flattening_has_the_right_length_and_the_wrong_result(graph):
+    """Proof the test above has power: the tempting `log_rho.reshape(-1)` passes
+    every shape check and computes something else."""
     torch.manual_seed(0)
     enc = GATEncoder(OB_LENGTH).eval()
     n, e, k = graph.n_nodes, graph.edge_index.shape[1], 4
-    lr = losowe_log_rho(k, e, n)
+    lr = random_log_rho(k, e, n)
 
-    naiwne = lr.reshape(-1)
-    dobre = tiled_log_rho(lr, e, n)
-    assert naiwne.shape == dobre.shape  # ← dlatego nic tego nie łapie samo z siebie
-    assert not torch.equal(naiwne, dobre)
+    naive = lr.reshape(-1)
+    right = tiled_log_rho(lr, e, n)
+    assert naive.shape == right.shape  # which is why nothing catches it by itself
+    assert not torch.equal(naive, right)
 
     g = torch.Generator().manual_seed(1)
     x = torch.randn(k * n, OB_LENGTH, generator=g)
     ei = tiled_edge_index(graph.edge_index, n, k)
     with torch.no_grad():
-        assert not torch.allclose(enc(x, ei, log_rho=naiwne), enc(x, ei, log_rho=dobre), atol=1e-5)
+        assert not torch.allclose(enc(x, ei, log_rho=naive), enc(x, ei, log_rho=right), atol=1e-5)
 
 
-def test_tiled_log_rho_odrzuca_zly_ksztalt(graph):
+def test_tiled_log_rho_rejects_a_bad_shape(graph):
     n, e = graph.n_nodes, graph.edge_index.shape[1]
     with pytest.raises(ValueError, match="E\\+N"):
-        tiled_log_rho(torch.zeros(3, e), e, n)  # brak pętli własnych
+        tiled_log_rho(torch.zeros(3, e), e, n)  # no self-loops
     with pytest.raises(ValueError, match="E\\+N"):
-        tiled_log_rho(torch.zeros(e + n), e, n)  # jeden wymiar zamiast [k, E+N]
+        tiled_log_rho(torch.zeros(e + n), e, n)  # one dimension instead of [k, E+N]
 
 
-# --------------------------------------------------------------- bufor rolloutu
+# --------------------------------------------------------------- rollout buffer
 
 
-def bufor(graph, k: int, with_log_rho: bool) -> RolloutBuffer:
+def make_buffer(graph, k: int, with_log_rho: bool) -> RolloutBuffer:
     return RolloutBuffer(k, graph.n_nodes, OB_LENGTH, graph.edge_index, with_log_rho=with_log_rho)
 
 
-def wypelnij(buf: RolloutBuffer, lr: torch.Tensor | None, seed: int = 2) -> None:
+def fill(buf: RolloutBuffer, lr: torch.Tensor | None, seed: int = 2) -> None:
     g = torch.Generator().manual_seed(seed)
     n = buf.n_nodes
     for t in range(buf.capacity):
@@ -120,12 +116,12 @@ def wypelnij(buf: RolloutBuffer, lr: torch.Tensor | None, seed: int = 2) -> None
         )
 
 
-def test_bufor_wymaga_zgodnosci_z_with_log_rho(graph):
-    """Pomyłka w tę stronę jest CICHA: bieg bez mechanizmu, który miał go mieć,
-    kończy się liczbami nieodróżnialnymi od ramienia kontrolnego."""
+def test_buffer_requires_consistency_with_with_log_rho(graph):
+    """A silent mistake: a run meant to have the mechanism would end with numbers
+    indistinguishable from the control arm."""
     n, e = graph.n_nodes, graph.edge_index.shape[1]
     with pytest.raises(ValueError, match="with_log_rho"):
-        bufor(graph, 2, True).add(
+        make_buffer(graph, 2, True).add(
             torch.zeros(n, OB_LENGTH),
             torch.zeros(n, dtype=torch.long),
             torch.zeros(n),
@@ -133,7 +129,7 @@ def test_bufor_wymaga_zgodnosci_z_with_log_rho(graph):
             torch.zeros(n),
         )
     with pytest.raises(ValueError, match="with_log_rho"):
-        bufor(graph, 2, False).add(
+        make_buffer(graph, 2, False).add(
             torch.zeros(n, OB_LENGTH),
             torch.zeros(n, dtype=torch.long),
             torch.zeros(n),
@@ -142,46 +138,46 @@ def test_bufor_wymaga_zgodnosci_z_with_log_rho(graph):
             log_rho=torch.zeros(e + n),
         )
     with pytest.raises(ValueError, match="E \\+ N"):
-        bufor(graph, 2, True).add(
+        make_buffer(graph, 2, True).add(
             torch.zeros(n, OB_LENGTH),
             torch.zeros(n, dtype=torch.long),
             torch.zeros(n),
             torch.zeros(n),
             torch.zeros(n),
-            log_rho=torch.zeros(e),  # bez pętli własnych
+            log_rho=torch.zeros(e),  # no self-loops
         )
 
 
-def test_minibatch_niesie_log_rho_w_kolejnosci_sklejonego_grafu(graph):
-    """log ρ musi jechać przez tę samą permutację kroków co obserwacje — inaczej
-    krok `t` dostałby wiarygodność krawędzi z innego momentu epizodu."""
+def test_minibatch_carries_log_rho_in_stacked_graph_order(graph):
+    """log_rho follows the same step permutation as the observations; otherwise
+    step t would get edge reliability from another moment of the episode."""
     n, e, k = graph.n_nodes, graph.edge_index.shape[1], 6
-    lr = losowe_log_rho(k, e, n)
-    buf = bufor(graph, k, True)
-    wypelnij(buf, lr)
+    lr = random_log_rho(k, e, n)
+    buf = make_buffer(graph, k, True)
+    fill(buf, lr)
     buf.compute_returns(torch.zeros(n), PPOConfig())
 
-    widziane = 0
+    seen = 0
     for mb in buf.minibatches(2, torch.Generator().manual_seed(0)):
-        m = mb.x.shape[0] // n  # kroków w tym minibatchu
+        m = mb.x.shape[0] // n  # steps in this minibatch
         assert mb.log_rho is not None
         assert mb.log_rho.shape == (m * (e + n),)
-        # odtwarzamy, z których kroków powstał minibatch, po samych obserwacjach…
-        kroki = [
+        # recover the steps of the minibatch from the observations...
+        steps = [
             next(t for t in range(k) if torch.equal(buf.obs[t], mb.x[i * n : (i + 1) * n]))
             for i in range(m)
         ]
-        # …i żądamy, żeby log ρ dało się złożyć z DOKŁADNIE tych samych kroków
-        assert torch.equal(mb.log_rho, tiled_log_rho(lr[kroki], e, n))
-        widziane += m
-    assert widziane == k
+        # ...and require log_rho to be built from EXACTLY those steps
+        assert torch.equal(mb.log_rho, tiled_log_rho(lr[steps], e, n))
+        seen += m
+    assert seen == k
 
 
-def test_bufor_bez_mechanizmu_nie_niesie_log_rho(graph):
-    """None, nie zera. `log_rho=None` prowadzi w warstwie INNĄ ścieżką niż wektor
-    zer (choć wynik jest ten sam) i tylko ona jest bit w bit rdzeniem z Fazy 1."""
-    buf = bufor(graph, 3, False)
-    wypelnij(buf, None)
+def test_buffer_without_mechanism_carries_no_log_rho(graph):
+    """None, not zeros: `log_rho=None` takes a DIFFERENT path in the layer, the
+    only one bit-identical to the plain core."""
+    buf = make_buffer(graph, 3, False)
+    fill(buf, None)
     buf.compute_returns(torch.zeros(graph.n_nodes), PPOConfig())
     assert buf.log_rho is None
     assert all(mb.log_rho is None for mb in buf.minibatches(2))
@@ -190,80 +186,76 @@ def test_bufor_bez_mechanizmu_nie_niesie_log_rho(graph):
 # --------------------------------------------------------------- ActorCritic + PPO
 
 
-def test_act_i_evaluate_widza_ten_sam_rozklad(graph):
-    """Ratio w pierwszej epoce PPO musi wyjść 1.0 także z mechanizmem. Gdyby log ρ
-    trafiało tylko do jednej z tych ścieżek, update liczyłby gradient innej sieci
-    niż ta, która zbierała dane — bez żadnego błędu."""
+def test_act_and_evaluate_see_the_same_distribution(graph):
+    """The first-epoch ratio is 1 also with the mechanism; log_rho in only one
+    path would compute the gradient of another network than the one that acted."""
     torch.manual_seed(0)
     ac = ActorCritic(OB_LENGTH, N_PHASES).eval()
     n, e = graph.n_nodes, graph.edge_index.shape[1]
     x = torch.randn(n, OB_LENGTH, generator=torch.Generator().manual_seed(3))
-    lr = losowe_log_rho(1, e, n)[0]
+    lr = random_log_rho(1, e, n)[0]
 
     with torch.no_grad():
-        akcje, log_prob, _ = ac.act(x, graph.edge_index, deterministic=True, log_rho=lr)
-        znowu, _, _ = ac.evaluate(x, graph.edge_index, akcje, log_rho=lr)
-    assert torch.allclose(torch.exp(znowu - log_prob), torch.ones(n), atol=1e-6)
+        actions, log_prob, _ = ac.act(x, graph.edge_index, deterministic=True, log_rho=lr)
+        again, _, _ = ac.evaluate(x, graph.edge_index, actions, log_rho=lr)
+    assert torch.allclose(torch.exp(again - log_prob), torch.ones(n), atol=1e-6)
 
 
-def test_log_rho_naprawde_zmienia_polityke(graph):
-    """Bez tego wszystkie pozostałe testy przeszłyby też wtedy, gdyby argument był
-    po drodze gubiony (np. zjadany przez `**kwargs`)."""
+def test_log_rho_really_changes_the_policy(graph):
+    """Otherwise all other tests would pass with the argument lost on the way."""
     torch.manual_seed(0)
     ac = ActorCritic(OB_LENGTH, N_PHASES).eval()
     n, e = graph.n_nodes, graph.edge_index.shape[1]
     x = torch.randn(n, OB_LENGTH, generator=torch.Generator().manual_seed(4))
-    lr = losowe_log_rho(1, e, n)[0]
+    lr = random_log_rho(1, e, n)[0]
 
     with torch.no_grad():
-        bez = ac.distribution(x, graph.edge_index).logits
-        z = ac.distribution(x, graph.edge_index, log_rho=lr).logits
-        zera = ac.distribution(x, graph.edge_index, log_rho=torch.zeros(e + n)).logits
-    assert not torch.allclose(bez, z, atol=1e-5)
-    assert torch.equal(bez, zera), "log ρ = 0 musi być no-opem (A3a)"
+        without = ac.distribution(x, graph.edge_index).logits
+        with_lr = ac.distribution(x, graph.edge_index, log_rho=lr).logits
+        zeros = ac.distribution(x, graph.edge_index, log_rho=torch.zeros(e + n)).logits
+    assert not torch.allclose(without, with_lr, atol=1e-5)
+    assert torch.equal(without, zeros), "log_rho = 0 must be a no-op"
 
 
-def test_krytyk_nie_widzi_log_rho(graph):
-    """Decyzja z docstringu `Critic`: modulacja opisuje WDROŻENIE (padły czujniki),
-    a krytyk żyje tylko w treningu. Podanie mu wiarygodności byłoby wyciekiem od tej
-    gorszej strony CTDE — actor w inferencji tej informacji nie ma."""
+def test_critic_never_sees_log_rho(graph):
+    """The critic exists only in training; giving it reliability would use
+    information the actor lacks at deployment."""
     torch.manual_seed(0)
     ac = ActorCritic(OB_LENGTH, N_PHASES).eval()
     n, e = graph.n_nodes, graph.edge_index.shape[1]
     x = torch.randn(n, OB_LENGTH, generator=torch.Generator().manual_seed(5))
-    lr = losowe_log_rho(1, e, n)[0]
+    lr = random_log_rho(1, e, n)[0]
 
     with torch.no_grad():
-        _, _, v_bez = ac.act(x, graph.edge_index, deterministic=True)
-        _, _, v_z = ac.act(x, graph.edge_index, deterministic=True, log_rho=lr)
-    assert torch.equal(v_bez, v_z)
+        _, _, v_without = ac.act(x, graph.edge_index, deterministic=True)
+        _, _, v_with = ac.act(x, graph.edge_index, deterministic=True, log_rho=lr)
+    assert torch.equal(v_without, v_with)
 
 
-def test_update_z_mechanizmem_uczy_sie(graph):
-    """End-to-end: bufor z log ρ przechodzi przez pełny update i rusza politykę.
-    Nie sprawdza JAKOŚCI uczenia — sprawdza, że nic po drodze nie urywa gradientu."""
+def test_update_with_the_mechanism_learns(graph):
+    """End to end: a buffer with log_rho goes through a full update and moves the
+    policy (no broken gradient on the way)."""
     torch.manual_seed(0)
     n, e, k = graph.n_nodes, graph.edge_index.shape[1], 8
     ppo = PPO(ActorCritic(OB_LENGTH, N_PHASES), PPOConfig(epochs=2, n_minibatches=2))
-    lr = losowe_log_rho(k, e, n)
-    buf = bufor(graph, k, True)
+    lr = random_log_rho(k, e, n)
+    buf = make_buffer(graph, k, True)
 
     g = torch.Generator().manual_seed(7)
     x0 = torch.randn(n, OB_LENGTH, generator=g)
-    przed = ppo.ac.actor(x0, graph.edge_index, log_rho=lr[0]).detach().clone()
-    wypelnij(buf, lr)
+    before = ppo.ac.actor(x0, graph.edge_index, log_rho=lr[0]).detach().clone()
+    fill(buf, lr)
     buf.compute_returns(torch.zeros(n), ppo.config)
 
     stats = ppo.update(buf, torch.Generator().manual_seed(0))
     assert stats["n_minibatches"] > 0
     assert all(torch.isfinite(torch.tensor(v)) for v in stats.values())
-    po = ppo.ac.actor(x0, graph.edge_index, log_rho=lr[0]).detach()
-    assert not torch.allclose(przed, po), "update nie ruszył polityki — gradient się urwał?"
+    after = ppo.ac.actor(x0, graph.edge_index, log_rho=lr[0]).detach()
+    assert not torch.allclose(before, after), "the update did not move the policy"
 
 
-def test_batch_vector_i_log_rho_opisuja_te_same_grafy(graph):
-    """Sanity: `batch_vector` (krytyk) i `tiled_log_rho` (actor) muszą numerować
-    kroki tak samo, inaczej kontekst globalny opisywałby inny moment niż modulacja."""
+def test_batch_vector_and_log_rho_describe_the_same_graphs(graph):
+    """`batch_vector` (critic) and `tiled_log_rho` (actor) number steps the same way."""
     n, e, k = graph.n_nodes, graph.edge_index.shape[1], 3
     assert batch_vector(n, k).shape == (k * n,)
     assert tiled_log_rho(torch.zeros(k, e + n), e, n).shape == (k * (e + n),)

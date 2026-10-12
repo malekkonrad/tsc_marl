@@ -1,25 +1,22 @@
-"""Scenariusz SUMO korytarza al. Trzech Wieszczów (Kraków) budowany z OpenStreetMap.
+"""SUMO scenario of the al. Trzech Wieszczow corridor (Krakow), built from OpenStreetMap.
 
-Case study z gałęzi `cracow-case-study` — rozpoznanie krakowskiego ITS i plan
-w `tsc_marl_research/krakow-its.md`. Kroki (każdy idempotentny, domyślnie wszystkie):
+Steps (each idempotent, all by default):
 
-    osm      drogi + torowiska z Overpass API → `3w.osm`. Migawka jest WERSJONOWANA:
-             OSM zmienia się z tygodnia na tydzień, a scenariusz ma się odtwarzać.
-             Nowa migawka tylko na żądanie (`--refresh`).
-    net      netconvert → `3w.net.xml`: sam ruch samochodowy (tramwaje dopiero, gdy
-             priorytet wejdzie do scenariusza), sygnalizacje z tagów OSM, klastry
-             skrzyżowań złączone, programy stałoczasowe z heurystyki netconverta.
-    demand   randomTrips → `3w_{poziom}.rou.xml`: popyt SYNTETYCZNY (poziom 0 z notatki —
-             bez liczników ZDMK), wagi wg liczby pasów i prędkości, 3600 s jak w protokole.
-    webster  tlsCycleAdaptation (Webster) osobno dla KAŻDEGO poziomu popytu →
-             `3w_{poziom}.webster.json` {sygnalizacja: {stan sygnałów fazy: zielone [s]}}.
-             Odpowiednik krakowskiej praktyki „≥4 programy na pory dnia": każdy poziom
-             popytu to inna pora dnia, a FixedTime dostaje program pod TEN popyt, który
-             widzą wszystkie sterowniki (bez tego porównanie byłoby chochołem).
-    profile  tabela sygnalizacji (wloty, ruchy, fazy zielone) + bieg SUMO na programach
-             stałoczasowych dla każdego poziomu popytu. Nic nie zapisuje.
+    osm      roads + tram tracks from the Overpass API -> `3w.osm`. The snapshot is
+             VERSIONED: OSM changes weekly and the scenario must reproduce. A new
+             snapshot only on request (`--refresh`).
+    net      netconvert -> `3w.net.xml`: car traffic only, signals from OSM tags,
+             junction clusters joined, fixed-time programs from netconvert's heuristic.
+    demand   randomTrips -> `3w_{level}.rou.xml`: SYNTHETIC demand, weights by lane
+             count and speed, 3600 s as in the protocol.
+    webster  tlsCycleAdaptation (Webster) for EACH demand level separately ->
+             `3w_{level}.webster.json` {signal: {phase signal state: green [s]}}, like
+             Krakow's practice of time-of-day programs: FixedTime gets a program for
+             the demand all controllers see.
+    profile  a signal table (approaches, movements, green phases) + a SUMO run on the
+             fixed-time programs for every demand level. Writes nothing.
 
-Uruchomienie z korzenia repo:  .venv/bin/python data/raw_data/krakow_3w/build.py [kroki]
+Run from the repository root:  .venv/bin/python data/raw_data/krakow_3w/build.py [steps]
 """
 
 from __future__ import annotations
@@ -38,35 +35,35 @@ HERE = Path(__file__).resolve().parent
 OSM = HERE / "3w.osm"
 NET = HERE / "3w.net.xml"
 
-# (S, W, N, E): al. Krasińskiego / Mickiewicza / Słowackiego od Mostu Dębnickiego
-# po ul. Warszawską — Obszar 1 krakowskiego UTCS (MOTION, preferencja ruchu kołowego).
+# (S, W, N, E): al. Krasinskiego / Mickiewicza / Slowackiego from the Debnicki Bridge to
+# ul. Warszawska, Area 1 of Krakow's UTCS (MOTION, priority for road traffic).
 BBOX = (50.050, 19.912, 50.077, 19.948)
 HIGHWAYS = (
     "motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|service"
 )
 OVERPASS = "https://overpass-api.de/api/interpreter"
 
-# Okres między wyjazdami w randomTrips [s] — SKALIBROWANE 2026-10-09 sweepem popytu
-# (programy netconverta, 1 h ruchu, strata czasu / teleporty / kolejka na wjazd):
-#   1800 poj/h  100 s / 0           → low:  wyraźnie niedosycony
-#   4500 poj/h  141 s / 2           → mid:  tuż przed kolanem nasycenia
-#   5143 poj/h  230 s / 31 (0,6%)   → high: za kolanem, bez masowych teleportów
-#   5538 poj/h  302 s / 107 (1,9%), kolejka na wjazd 18 — teleporty zaczynają psuć ATT
-#   6000+ poj/h zakleszczenie: 239 → 5878 teleportów, ATT bez znaczenia
-# Warunek z Planu B notatki: poziomy od niedosyconego do przesyconego.
+# Period between departures in randomTrips [s], CALIBRATED on 2026-10-09 with a demand
+# sweep (netconvert programs, 1 h of traffic, time loss / teleports / insertion queue):
+#   1800 veh/h  100 s / 0           -> low:  clearly undersaturated
+#   4500 veh/h  141 s / 2           -> mid:  just before the saturation knee
+#   5143 veh/h  230 s / 31 (0.6%)   -> high: past the knee, without mass teleports
+#   5538 veh/h  302 s / 107 (1.9%), insertion queue 18: teleports start to spoil ATT
+#   6000+ veh/h gridlock: 239 -> 5878 teleports, ATT meaningless
 DEMAND_PERIOD = {"low": 2.0, "mid": 0.8, "high": 0.7}
-# Ruch ODŁOŻONY: ten sam poziom popytu, inny seed tras. Polityka uczy się na `mid`
-# (seed 0), a jej epizod testowy to dokładnie czysty `mid` z `tsc degrade` — więc
-# wybór najlepszego checkpointu po teście i porównanie na `mid` byłyby wyborem na
-# zbiorze pomiarowym. `mid_s1` jest zbiorem, którego trening nie widział (`t2_krakow_best`).
+# HELD-OUT traffic: the same demand level, another route seed. The policy trains on `mid`
+# (seed 0) and its test episode is exactly clean `mid` in `tsc degrade`, so choosing the
+# best checkpoint on `mid` would select on the measurement set (`t2_krakow_best`).
 DEMAND_HELDOUT = {"mid_s1": ("mid", 1)}
 
 
 def demand_levels() -> dict[str, tuple[float, int]]:
-    """{poziom: (okres randomTrips, seed tras)} — poziomy główne + odłożone."""
+    """{level: (randomTrips period, route seed)}: main levels + held-out ones."""
     out = {level: (period, SEED) for level, period in DEMAND_PERIOD.items()}
     out |= {name: (DEMAND_PERIOD[base], seed) for name, (base, seed) in DEMAND_HELDOUT.items()}
     return out
+
+
 DEMAND_END = 3600
 SEED = 0
 
@@ -93,14 +90,14 @@ NETCONVERT_OPTS = [
 def sumo_home() -> Path:
     if env := os.environ.get("SUMO_HOME"):
         return Path(env)
-    import sumo  # noqa: PLC0415 - SUMO z pipa, jak w reszcie repo
+    import sumo  # SUMO from pip, as in the rest of the repository
 
     return Path(sumo.__file__).parent
 
 
 def binary(name: str) -> str:
     os.environ.setdefault("SUMO_HOME", str(sumo_home()))
-    import sumolib  # noqa: PLC0415
+    import sumolib
 
     return sumolib.checkBinary(name)
 
@@ -112,7 +109,8 @@ def routes(level: str) -> Path:
 def step_osm(refresh: bool) -> None:
     if OSM.exists() and not refresh:
         print(
-            f"osm: jest {OSM.name} ({OSM.stat().st_size // 1024} KiB), pomijam (--refresh wymusza)"
+            f"osm: {OSM.name} exists ({OSM.stat().st_size // 1024} KiB), skipping "
+            "(--refresh forces a new one)"
         )
         return
     s, w, n, e = BBOX
@@ -124,14 +122,14 @@ def step_osm(refresh: bool) -> None:
     data = urllib.parse.urlencode({"data": query}).encode()
     with urllib.request.urlopen(OVERPASS, data=data, timeout=180) as resp:
         OSM.write_bytes(resp.read())
-    print(f"osm: zapisano {OSM.name} ({OSM.stat().st_size // 1024} KiB)")
+    print(f"osm: wrote {OSM.name} ({OSM.stat().st_size // 1024} KiB)")
 
 
 def step_net() -> None:
     typemap = sumo_home() / "data" / "typemap" / "osmNetconvert.typ.xml"
     cmd = [binary("netconvert"), "--osm-files", str(OSM), "--type-files", str(typemap)]
     subprocess.run([*cmd, *NETCONVERT_OPTS, "-o", str(NET)], check=True)
-    print(f"net: zapisano {NET.name}")
+    print(f"net: wrote {NET.name}")
 
 
 def step_demand() -> None:
@@ -164,15 +162,15 @@ def step_demand() -> None:
                 "--validate",
             ],
             check=True,
-            stderr=subprocess.DEVNULL,  # proj.db: sumolib nie potrzebuje projekcji
+            stderr=subprocess.DEVNULL,  # proj.db: sumolib needs no projection
         )
-        trips.unlink(missing_ok=True)  # pośredni plik — routes wystarczą do odtworzenia
-        print(f"demand: {level:6s} okres {period} s, seed {seed} → {routes(level).name}")
+        trips.unlink(missing_ok=True)  # intermediate file; the routes reproduce it
+        print(f"demand: {level:6s} period {period} s, seed {seed} -> {routes(level).name}")
 
 
-# Webster: strata czasu na fazę = przejście z protokołu (3 s żółtego + 2 s all-red,
-# `sumo_world` / `trainer.yellow_length`), nasycenie 1800 poj/h/pas (`-H 2`, wartość
-# podręcznikowa). Cykl w granicach domyślnych narzędzia.
+# Webster: lost time per phase = the protocol's transition (3 s yellow + 2 s all-red,
+# `sumo_world` / `trainer.yellow_length`), saturation 1800 veh/h/lane (`-H 2`, the
+# textbook value). Cycle within the tool's default bounds.
 WEBSTER_LOST_TIME = 5
 WEBSTER_SAT_HEADWAY = 2.0
 
@@ -182,10 +180,10 @@ def webster(level: str) -> Path:
 
 
 def step_webster() -> None:
-    import json  # noqa: PLC0415
-    import tempfile  # noqa: PLC0415
+    import json
+    import tempfile
 
-    import sumolib  # noqa: PLC0415
+    import sumolib
 
     tool = sumo_home() / "tools" / "tlsCycleAdaptation.py"
     for level in demand_levels():
@@ -214,10 +212,10 @@ def step_webster() -> None:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            # Klucz = STAN sygnałów, nie indeks: adapter odkrywa fazy zielone symulacją
-            # (`world_sumo.generate_valid_phase`: unikalne stany bez `y` i bez samych
-            # `r`/`s`), więc indeks fazy w programie nie musi być indeksem akcji.
-            # Ten sam filtr tu i tam — dopasowanie robi `FixedTimeController`.
+            # key = the signal STATE, not the index: the adapter discovers green phases
+            # by simulation (`world_sumo.generate_valid_phase`), so a program index need
+            # not be an action index; the same filter here and there, matched by
+            # `FixedTimeController`
             programs = {
                 tl.id: {
                     ph.state: float(ph.duration)
@@ -228,25 +226,25 @@ def step_webster() -> None:
                 for tl in sumolib.xml.parse(str(add), "tlLogic")
             }
         webster(level).write_text(json.dumps(programs, indent=1, sort_keys=True))
-        cykle = sorted(
+        cycles = sorted(
             int(sum(g.values()) + WEBSTER_LOST_TIME * len(g)) for g in programs.values() if g
         )
         print(
-            f"webster: {level:5s} {len(programs)} sygnalizacji, cykl (zielone + przejścia) "
-            f"min {cykle[0]} / mediana {cykle[len(cykle) // 2]} / max {cykle[-1]} s "
-            f"→ {webster(level).name}"
+            f"webster: {level:5s} {len(programs)} signals, cycle (greens + transitions) "
+            f"min {cycles[0]} / median {cycles[len(cycles) // 2]} / max {cycles[-1]} s "
+            f"-> {webster(level).name}"
         )
 
 
 def step_profile() -> None:
-    import sumolib  # noqa: PLC0415
+    import sumolib
 
     net = sumolib.net.readNet(str(NET), withPrograms=True)
     rows = []
     for tls in net.getTrafficLights():
         program = next(iter(tls.getPrograms().values()))
         greens = [ph for ph in program.getPhases() if "y" not in ph.state]
-        conns = tls.getConnections()  # (pas wjazdowy, pas wyjazdowy, linkIndex)
+        conns = tls.getConnections()  # (inbound lane, outbound lane, linkIndex)
         incoming = {c[0].getEdge().getID() for c in conns}
         names = sorted({net.getEdge(e).getName() for e in incoming} - {""})
         permissive = any("g" in ph.state for ph in greens)
@@ -254,13 +252,14 @@ def step_profile() -> None:
             (tls.getID(), len(incoming), len({c[2] for c in conns}), len(greens), permissive, names)
         )
 
-    print(f"sygnalizacje: {len(rows)}")
-    print("  wloty:        ", sorted(collections.Counter(r[1] for r in rows).items()))
-    print("  fazy zielone: ", sorted(collections.Counter(r[3] for r in rows).items()))
-    print(f"  z zielonym warunkowym 'g': {sum(r[4] for r in rows)}")
+    print(f"signals: {len(rows)}")
+    print("  approaches:   ", sorted(collections.Counter(r[1] for r in rows).items()))
+    print("  green phases: ", sorted(collections.Counter(r[3] for r in rows).items()))
+    print(f"  with permissive green 'g': {sum(r[4] for r in rows)}")
     for tid, n_in, n_links, n_green, perm, names in sorted(rows, key=lambda r: -r[2]):
         print(
-            f"  {tid[:34]:34s} wloty={n_in} ruchy={n_links:3d} fazy={n_green} g={int(perm)}"
+            f"  {tid[:34]:34s} approaches={n_in} moves={n_links:3d} phases={n_green} "
+            f"g={int(perm)}"
             f" | {', '.join(names)[:70]}"
         )
 
@@ -286,8 +285,8 @@ def step_profile() -> None:
             capture_output=True,
             text=True,
         ).stdout
-        # „Duration" występuje dwa razy: czas zegarowy SUMO na górze i średni czas
-        # przejazdu w bloku „Statistics" — liczby pojazdów bierzemy z góry, resztę z bloku
+        # "Duration" appears twice: SUMO's wall time at the top and the mean trip time in
+        # the "Statistics" block; vehicle counts come from the top, the rest from the block
         head, _, stats = out.partition("Statistics")
         found = {
             k: m.group(1)
@@ -295,7 +294,7 @@ def step_profile() -> None:
             if (m := re.search(rf"^\s*{k}: ([\d.]+)", stats if k in keys[4:] else head, re.M))
         }
         print(
-            f"SUMO {level:5s} (programy stałoczasowe): "
+            f"SUMO {level:5s} (fixed-time programs): "
             + ", ".join(f"{k}={v}" for k, v in found.items())
         )
 
@@ -303,12 +302,12 @@ def step_profile() -> None:
 def main(argv: list[str] | None = None) -> None:
     steps = ("osm", "net", "demand", "webster", "profile")
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    # bez `choices`: argparse 3.10 przy nargs="*" odrzuca wtedy także pustą listę
+    # no `choices`: with nargs="*" argparse 3.10 would reject the empty list too
     p.add_argument("steps", nargs="*", metavar="{" + ",".join(steps) + "}")
-    p.add_argument("--refresh", action="store_true", help="pobierz świeżą migawkę OSM")
+    p.add_argument("--refresh", action="store_true", help="fetch a fresh OSM snapshot")
     args = p.parse_args(argv)
     if unknown := set(args.steps) - set(steps):
-        p.error(f"nieznane kroki: {sorted(unknown)}, dozwolone: {steps}")
+        p.error(f"unknown steps: {sorted(unknown)}, allowed: {steps}")
     args.steps = args.steps or list(steps)
     if "osm" in args.steps:
         step_osm(args.refresh)

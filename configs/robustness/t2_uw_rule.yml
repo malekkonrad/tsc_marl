@@ -1,72 +1,74 @@
-# T2 dla UW-attention z WDRAŻALNYM sygnałem u i dla ZŁOŻENIA bramka + UW.
+# T2 for UW-attention with a DEPLOYABLE u signal and for the gate + UW COMPOSITION.
 #
-# SKĄD TEN PLAN. `t2_uw_src` (results/t2_uw_src.md) rozdzielił mechanizm od sygnału:
-# UW z głowy obserwacyjnej = zero na obu sieciach, wyrocznia modulacji (u = ułamek
-# martwych pasów wjazdowych z warstwy awarii) = Δ vs rdzeń −96 / −167 s (JiNan,
-# `mask0p25_int` / `mask0p5_int`), −54 / −114 s (HangZhou), −21 / −24 s przy `mask0p5`,
-# wszystko |t| ≥ 2,8. Wąskim gardłem była więc GŁOWA, nie idea. Ale bramka-reguła
-# z `t2_gate_real` już dziś schodzi niżej niż sufit UW (JiNan `mask0p25_int` ~353 s
-# wobec 414 s, porównanie nieparowane — inne losowania), więc pytania są dwa:
+# WHERE THIS PLAN COMES FROM. `t2_uw_src` (results/t2_uw_src.md) separated the mechanism from
+# the signal: UW from the observation head = zero on both networks, the modulation oracle
+# (u = fraction of dead inbound lanes from the failure layer) = delta vs the core -96 / -167 s
+# (JiNan, `mask0p25_int` / `mask0p5_int`), -54 / -114 s (HangZhou), -21 / -24 s at `mask0p5`,
+# all |t| >= 2.8. The bottleneck was thus the HEAD, not the idea. But the rule gate from
+# `t2_gate_real` already goes lower than the UW ceiling (JiNan `mask0p25_int` ~353 s vs
+# 414 s, an unpaired comparison with other draws), so there are two questions:
 #
-#   (1) Czy UW z sygnałem, który JUŻ działa jako bramka (licznik zamrożonych
-#       detektorów, `controllers.RuleUncertainty`), zbiera sufit wyroczni?
-#   (2) Czy UW DOKŁADA coś do bramki? To jest pytanie, od którego zależy, czy UW
-#       zostaje w pracy jako element architektury, czy jako wynik negatywny.
+#   (1) Does UW with a signal that ALREADY works as a gate (the frozen detector counter,
+#       `controllers.RuleUncertainty`) collect the oracle ceiling?
+#   (2) Does UW ADD anything to the gate? This question decides whether UW stays in the
+#       thesis as an architectural element or as a negative result.
 #
-# DLACZEGO (2) MOŻE DAĆ NIEZERO. Bramka przełącza AKCJĘ martwego węzła na FixedTime,
-# ale jego popsuta obserwacja dalej idzie przez `hidden_embedding` do sąsiadów jako
-# wiadomość GAT — bramka niczego tu nie wycina. UW działa dokładnie na tym kanale:
-# krawędź j→i dostaje u(j). Bramka naprawia WŁASNĄ decyzję martwego węzła, UW —
-# decyzje jego zdrowych sąsiadów. Te kanały są rozłączne z konstrukcji; czy ich
-# zyski się sumują, mówi dopiero pomiar.
+# WHY (2) MAY BE NONZERO. The gate switches the dead node's ACTION to FixedTime, but its
+# broken observation still flows through `hidden_embedding` to the neighbours as a GAT
+# message; the gate cuts nothing there. UW acts exactly on that channel: edge j->i gets
+# u(j). The gate fixes the dead node's OWN decision, UW the decisions of its healthy
+# neighbours. These channels are disjoint by construction; whether their gains add up
+# only measurement can tell.
 #
-# KOLUMNY (wszystkie z TEGO SAMEGO checkpointu, ten sam zestaw losowań, n = 5):
-#   gatppo                 rdzeń, odniesienie dla kolumn pojedynczych
-#   gatppo_uw_rule         UW, u z reguły                 vs rdzeń       → pytanie (1)
-#   gatppo_gate_rule       bramka-reguła (jak t2_gate_real, ale n=5 i te losowania)
-#   gatppo_gate_rule_uw    bramka-reguła + UW z reguły    vs gate_rule   → pytanie (2)
-#   gatppo_gate_oracle     wyrocznia bramki (0,75, jak t2_gate_real)
-#   gatppo_gate_oracle_uw  wyrocznia bramki + wyrocznia UW vs gate_oracle → sufit (2)
+# COLUMNS (all from THE SAME checkpoint, the same set of draws, n = 5):
+#   gatppo                 core, reference for single columns
+#   gatppo_uw_rule         UW, u from the rule              vs core         -> question (1)
+#   gatppo_gate_rule       rule gate (as t2_gate_real, but n=5 and these draws)
+#   gatppo_gate_rule_uw    rule gate + UW from the rule     vs gate_rule    -> question (2)
+#   gatppo_gate_oracle     gate oracle (0.75, as t2_gate_real)
+#   gatppo_gate_oracle_uw  gate oracle + UW oracle          vs gate_oracle  -> ceiling of (2)
 #   fixedtime
 #
-# u Z REGUŁY (`RuleUncertainty`): ułamek ruchów węzła zamrożonych przez całe okno,
-# TYLKO powyżej progu bramki (`gate_ref`: JiNan 0,25, HangZhou 0,875 — kwantyl 99,5%
-# na czystym oknie), poniżej zero. Bez progu modulacja strzelałaby na czystym: pusty
-# wlot raportuje zero i wygląda na zamrożony. Okno i próg są TE SAME co w bramce,
-# więc złożenie czyta jeden detektor, a nie dwa różnie nastrojone. Strona źródła
-# i τ = 0,25 jak w wyroczni — kolumny różni wyłącznie definicja u. Histerezy UW nie
-# ma: modulacja jest miękka i nie resetuje fazy, więc nie ma czego wygładzać.
+# u FROM THE RULE (`RuleUncertainty`): the fraction of a node's movements frozen over the
+# whole window, ONLY above the gate threshold (`gate_ref`: JiNan 0.25, HangZhou 0.875, the
+# 99.5% quantile on the clean window), zero below. Without the threshold the modulation
+# would fire on clean: an empty approach reports zero and looks frozen. The window and
+# threshold are THE SAME as in the gate, so the composition reads one detector, not two
+# tuned differently. Source side and tau = 0.25 as in the oracle: only the definition of u
+# separates the columns. UW has no hysteresis: the modulation is soft and does not reset
+# the phase, so there is nothing to smooth.
 #
-# HIPOTEZY ZAPISANE PRZED POMIAREM:
-#   R1 (no-op): `clean` i `gauss*` bez istotnej różnicy dla `gatppo_uw_rule` vs rdzeń
-#      — reguła przy gauss2 przekracza próg w 0% decyzji (zrzut BC, `t2_gate_real`).
-#   R2 (pytanie 1): przy `mask*_intersection` `gatppo_uw_rule` istotnie lepszy od
-#      rdzenia na obu sieciach i blisko wyroczni z `t2_uw_src` (martwe skrzyżowanie
-#      = wszystkie ruchy zero = ułamek 1,0, powyżej obu progów). Opóźnienie o okno
-#      (12 decyzji) kosztuje niewiele. Przy `mask0p5`: JiNan częściowo, HangZhou
-#      ~zero (próg 0,875 przy maskach pasowych milczy — tak samo milczała bramka).
-#   R3 (`hold`): ~zero. Wyrocznia UW była tam na zerze (−0,5 / −0,3 / +0,6 / −0,2),
-#      więc reguła nie ma czego zebrać, choć zamrożenie to jej kryterium.
-#   R4 (pytanie 2, ROZSTRZYGAJĄCA): `gatppo_gate_oracle_uw` vs `gatppo_gate_oracle`
-#      — sufit złożenia. Przewidywanie: mały zysk przy `mask*_intersection`, bo
-#      bramka zabiera już większość szkody (C4: odporność = nieczytanie zepsutych
-#      danych), a po przełączeniu zostaje tylko kanał wiadomości do sąsiadów.
-#      Bez przekonania co do znaku przy `mask0p5`.
-#   Odczyt:
-#   - R4 bez zysku → UW jest REDUNDANTNE wobec fallbacku nawet przy idealnym
-#     sygnale. C5 zamknięte: mechanizm ma dodatni sufit, ale zawiera się w tym, co
-#     daje bramka. Do pracy jako wynik negatywny z wyjaśnieniem, nie jako zero.
-#   - R4 z zyskiem, `gatppo_gate_rule_uw` vs `gatppo_gate_rule` też istotnie →
-#     UW wraca jako POZYTYWNY składnik architektury (komplementarny kanał,
-#     wdrażalny, bez treningu). Wtedy przepisać C5 i dopisać złożenie do C6.
-#   - R4 z zyskiem, wersja z regułą na zerze → sygnał reguły nie wystarcza do
-#     złożenia; future work.
+# HYPOTHESES RECORDED BEFORE MEASUREMENT:
+#   R1 (no-op): `clean` and `gauss*` without a significant difference for `gatppo_uw_rule` vs
+#      the core; the rule crosses its threshold at gauss2 in 0% of decisions (BC dataset,
+#      `t2_gate_real`).
+#   R2 (question 1): at `mask*_intersection` `gatppo_uw_rule` significantly better than the
+#      core on both networks and close to the oracle from `t2_uw_src` (a dead intersection
+#      = all movements zero = fraction 1.0, above both thresholds). The window delay
+#      (12 decisions) costs little. At `mask0p5`: JiNan partly, HangZhou ~zero (threshold
+#      0.875 stays silent under lane masks, as the gate did).
+#   R3 (`hold`): ~zero. The UW oracle was at zero there (-0.5 / -0.3 / +0.6 / -0.2), so the
+#      rule has nothing to collect, although freezing is its criterion.
+#   R4 (question 2, DECISIVE): `gatppo_gate_oracle_uw` vs `gatppo_gate_oracle`, the
+#      composition's ceiling. Prediction: a small gain at `mask*_intersection`, since the
+#      gate already removes most of the harm (C4: robustness = not reading broken data),
+#      and after switching only the message channel to the neighbours remains.
+#      No conviction about the sign at `mask0p5`.
+#   Reading:
+#   - R4 without a gain -> UW is REDUNDANT with the fallback even with a perfect signal.
+#     C5 closed: the mechanism has a positive ceiling, but it is contained in what the
+#     gate gives. Into the thesis as a negative result with an explanation, not as a zero.
+#   - R4 with a gain, and `gatppo_gate_rule_uw` vs `gatppo_gate_rule` also significant ->
+#     UW returns as a POSITIVE architectural component (a complementary channel,
+#     deployable, without training). Then rewrite C5 and add the composition to C6.
+#   - R4 with a gain, the rule version at zero -> the rule signal is not enough for the
+#     composition; future work.
 #
-# Diagnostyka: `gate_*` jak w `t2_gate_real`, `uw_spread`/`uw_active` jak w `t2_uw`
-# (złożenie raportuje obie — `GatedController.episode_stats` scala je z polityką).
+# Diagnostics: `gate_*` as in `t2_gate_real`, `uw_spread`/`uw_active` as in `t2_uw` (the
+# composition reports both; `GatedController.episode_stats` merges them with the policy's).
 #
-# WYMAGA: runs/heads/gate_ref__<sieć>.npz (są na laptopie i gliderze, te same co
-# w `t2_gate_real`). Głowy obserwacyjnej NIE wymaga.
+# REQUIRES: runs/heads/gate_ref__<network>.npz (on the laptop and the GPU machine, the same
+# as in `t2_gate_real`). Does NOT require the observation head.
 name: t2_uw_rule
 mode: realistic
 draws: 5

@@ -1,5 +1,5 @@
-# Ten sam zestaw w trybie papierów (yellow_length 0). Różnica między trybami jest
-# samodzielnym wynikiem pracy — patrz results/t1_w1_sweep.md.
+# The same set in paper mode (yellow_length 0). The difference between the modes
+# is a result of the thesis in itself, see results/t1_w1_sweep.md.
 entry: tsc
 mode: benchmark
 timeout: 3600

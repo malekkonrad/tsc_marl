@@ -1,36 +1,37 @@
-# SWEEP τ dla UW-attention — tania asekuracja przy wyniku negatywnym.
+# tau SWEEP for UW-attention: cheap insurance for a negative result.
 #
-# `results/t2_uw.md` orzekło, że modulacja jest wobec ATT neutralna przy τ = 0,25.
-# Ten plan zamyka jedyne tanie pytanie, jakie się na to nasuwa: „a może po prostu
-# źle dobrałeś τ". Nie jest próbą uratowania mechanizmu — jest dowodem, że wynik
-# nie zależy od jednej liczby.
+# `results/t2_uw.md` concluded that the modulation is neutral for ATT at tau = 0.25.
+# This plan closes the only cheap question that raises: "maybe you just picked tau
+# badly". It is not an attempt to rescue the mechanism, but proof that the result does
+# not depend on one number.
 #
-# τ przelicza NADMIAR niepewności na naty w logicie: log ρ = −relu(u − u_ref)/τ.
-# NIŻSZE τ = SILNIEJSZA modulacja. Dobrane 0,25 dawało przy `gauss4` średni rozstęp
-# log ρ w grupie softmaxu 6,12 nata (najlepszy i najgorszy sąsiad różnili się ~450×)
-# i ATT nie drgnęło. Ten plan idzie w stronę JESZCZE silniejszą:
+# tau converts the uncertainty EXCESS to nats in the logit: log rho = -relu(u - u_ref)/tau.
+# LOWER tau = STRONGER modulation. The chosen 0.25 gave a mean log rho spread within a
+# softmax group of 6.12 nats at `gauss4` (best and worst neighbour differed ~450x) and
+# ATT did not move. This plan goes towards EVEN stronger:
 #
-#   0,25 — wartość z `obs_head.DEFAULT_TAU`, kolumna kotwicząca (przeliczona w tym
-#          planie od nowa, żeby porównanie było wewnątrz jednego zestawu losowań);
-#   0,10 — 2,5× silniejsza;
-#   0,05 — 5× silniejsza, czyli przy `gauss4` rozstęp rzędu 30 natów: sąsiad uznany
-#          za niewiarygodnego jest wygaszony PRAKTYCZNIE CAŁKOWICIE.
+#   0.25 - the value of `obs_head.DEFAULT_TAU`, the anchoring column (recomputed in this
+#          plan, so the comparison stays within one set of draws);
+#   0.10 - 2.5x stronger;
+#   0.05 - 5x stronger, i.e. at `gauss4` a spread of ~30 nats: a neighbour judged
+#          unreliable is switched off PRACTICALLY COMPLETELY.
 #
-# HIPOTEZA ZAPISANA PRZED POMIAREM: żadne τ nie zmienia werdyktu, a przy 0,05 może
-# pojawić się SZKODA — bo mechanizm zacznie wygaszać sąsiadów na podstawie sygnału,
-# który przy maskach ma AUROC 0,65, a na HangZhou nie działa wcale. Jeśli tak wyjdzie,
-# jest to mocniejsza wersja wniosku: problemem nie jest siła modulacji, tylko jakość
-# sygnału, którym się moduluje.
+# HYPOTHESIS RECORDED BEFORE MEASUREMENT: no tau changes the verdict, and at 0.05 HARM
+# may appear, since the mechanism starts switching neighbours off based on a signal
+# with AUROC 0.65 under masks that does not work at all on HangZhou. If so, it is a
+# stronger version of the conclusion: the problem is not the strength of the
+# modulation but the quality of the signal it modulates with.
 #
-# Kolumny liczą się z TEGO SAMEGO checkpointu co rdzeń (modulacja bezparametrowa),
-# więc różnice są parowane. τ wchodzi do odcisku biegu (`MECHANISM_KEYS`) — bez tego
-# trzy kolumny miałyby ten sam odcisk i dwie zostałyby pominięte jako „jest wynik".
+# The columns are computed from THE SAME checkpoint as the core (the modulation has no
+# parameters), so differences are paired. tau enters the run fingerprint
+# (`MECHANISM_KEYS`); without it three columns would share a fingerprint and two would
+# be skipped as "has a result".
 #
-# ZAKRES: JiNan, 3 seedy. HangZhou pominięte świadomie — tam głowa nie wykrywa masek
-# (`uw_spread` przy maskach PONIŻEJ poziomu z czystego), więc sweep siły modulacji
-# mierzyłby tam skalowanie szumu.
+# SCOPE: JiNan, 3 seeds. HangZhou left out deliberately: there the head does not detect
+# masks (`uw_spread` under masks BELOW the clean level), so a sweep of modulation
+# strength would measure noise scaling there.
 #
-# WYMAGA: runs/heads/{obs_head,u_ref}__cityflow_jinan3x4_4ph.*
+# REQUIRES: runs/heads/{obs_head,u_ref}__cityflow_jinan3x4_4ph.*
 name: t2_uw_tau
 mode: realistic
 draws: 5

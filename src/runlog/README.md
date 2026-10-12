@@ -1,32 +1,32 @@
 # runlog
 
-Przechowywanie i odpytywanie wyników eksperymentów. Niezależne od dziedziny —
-nie wie nic o symulatorach, uczeniu maszynowym ani o projekcie, w którym stoi.
-Zależności: stdlib (zapis) + `pandas` i `pyyaml` (odczyt, importowane leniwie).
+Storing and querying experiment results. Domain-independent: it knows nothing
+about simulators, machine learning or the project it lives in. Dependencies: the
+standard library (writing) plus `pandas` and `pyyaml` (reading, imported lazily).
 
-## Po co
+## Why
 
-Typowy pipeline badawczy zapisuje wyniki do jednego CSV i odsyła w nim do plików
-konfiguracyjnych, które potem się zmieniają. Skutki są zawsze te same: nie da się
-odtworzyć wiersza, dwa eksperymenty dzielą jeden katalog, a przerwany bieg wygląda
-jak policzony. `runlog` podnosi te trzy rzeczy do rangi niezmienników.
+A typical research pipeline writes results to one CSV that points to config
+files, which later change. The consequences are always the same: a row cannot be
+reproduced, two experiments share a directory, and an interrupted run looks
+finished. `runlog` turns these three things into invariants.
 
-## Model danych
+## Data model
 
-Jeden bieg = jeden katalog. **System plików jest bazą danych**, indeks jest wyliczany
-przez skan — nie ma centralnego pliku, więc równoległe biegi w osobnych procesach
-nie walczą o zapis i nie potrzebują blokad.
+One run = one directory. **The file system is the database**; the index is
+computed by scanning, there is no central file, so parallel runs in separate
+processes do not fight over writes and need no locks.
 
 ```
 runs/<experiment>/<run_id>/
-    meta.json            # params, params_hash, proweniencja, status, czasy
-    config.resolved.yml  # snapshot WEJŚCIA po scaleniu i nadpisaniach
-    metrics.csv          # step,split,metric,value  (format długi)
-    result.json          # skalary końcowe
-    engine/              # artefakty obcych narzędzi (checkpointy, logi)
+    meta.json            # params, params_hash, provenance, status, times
+    config.resolved.yml  # snapshot of the INPUT after merging and overrides
+    metrics.csv          # step,split,metric,value  (long format)
+    result.json          # final scalars
+    engine/              # artefacts of external tools (checkpoints, logs)
 ```
 
-## Użycie
+## Usage
 
 ```python
 from runlog import Experiment
@@ -41,42 +41,44 @@ if not exp.is_done(run_id, params):
             run.log(step=e, split="train", att=..., loss=...)
         run.result(att=..., att_last10=...)
 
-exp.results()  # DataFrame do tabel
-exp.metrics()  # DataFrame długi do wykresów
+exp.results()  # DataFrame for tables
+exp.metrics()  # long DataFrame for plots
 exp.aggregate(by=["agent"], over="seed", metrics=["att"])  # mean/std/n
 ```
 
-`start()` zwraca context managera: wyjście bez wyjątku daje status `ok`, wyjątek —
-`failed` z tracebackiem w `meta.json`, `KeyboardInterrupt` — `timeout`. Wyjątek nie
-jest połykany; status to zapis faktu, nie obsługa błędu.
+`start()` returns a context manager: leaving it normally gives status `ok`, an
+exception gives `failed` with the traceback in `meta.json`, `KeyboardInterrupt`
+gives `timeout`. The exception is not swallowed; the status records a fact, it
+does not handle the error.
 
-## Decyzje projektowe
+## Design decisions
 
-**Kolizje są błędem, nie nadpisaniem.** Ten sam `run_id` z innym `params_hash`
-rzuca `RunIdCollision`. Status `ok` lub `running` rzuca `RunExists` (`running` też,
-bo może to być żywy proces). Status `failed`/`timeout` pozwala wznowić.
-`replace=True` obchodzi to świadomie.
+**Collisions are errors, not overwrites.** The same `run_id` with another
+`params_hash` raises `RunIdCollision`. Status `ok` or `running` raises
+`RunExists` (`running` too, since it may be a live process), unless the run is an
+orphan: written on this machine by a process that no longer exists. Status
+`failed`/`timeout` allows resuming. `replace=True` bypasses this deliberately.
 
-**Format metryk długi**, nie szeroki. Różne metody logują różne metryki (DQN ma
-`q_loss`, PPO ma `entropy` i `kl`); szeroki CSV wymagałby znajomości kolumn z góry
-i psuł sklejanie biegów. Do podglądu: `df.pivot_table(...)`.
+**Long metric format**, not wide. Methods log different metrics (DQN has
+`q_loss`, PPO has `entropy` and `kl`); a wide CSV would need the columns up front
+and break concatenating runs. For a quick look: `df.pivot_table(...)`.
 
-**`n` w agregacji liczy unikalne wartości `over`**, nie wiersze — powtórzony bieg
-tego samego seeda nie udaje większej próby.
+**`n` in aggregation counts unique values of `over`**, not rows, so a repeated
+run of the same seed does not pose as a larger sample.
 
-**Zapis atomowy** (`tempfile` + `os.replace`) i metryki flushowane po każdym kroku:
-proces zabity w trakcie nie zostawia obciętego JSON-a, a historia sprzed awarii
-przeżywa i da się z niej zdiagnozować, gdzie bieg się wywalił.
+**Atomic writes** (`tempfile` + `os.replace`) and metrics flushed after every
+step: a killed process leaves no truncated JSON, and the history before the
+crash survives for diagnosis.
 
-**Odczyt jest tolerancyjny.** Uszkodzony `meta.json` daje bieg o statusie `unknown`,
-a nie wyjątek w środku skanu po stu katalogach.
+**Tolerant reading.** A damaged `meta.json` gives a run with status `unknown`,
+not an exception in the middle of a scan over a hundred directories.
 
-**Proweniencja jest obowiązkowa, nie opcjonalna**: SHA + gałąź + flaga `dirty` dla
-wielu repozytoriów naraz (repo, submoduły), plus `argv`, wersja Pythona, host
-i whitelista zmiennych środowiskowych. Whitelista, nie całe `os.environ` — to
-byłby wyciek sekretów i szum.
+**Provenance is mandatory**: SHA, branch and `dirty` flag of several repositories
+at once (main repository, submodules), plus `argv`, Python version, host and an
+allow-list of environment variables. An allow-list, not the whole `os.environ`,
+which would leak secrets and add noise.
 
-## Czego tu nie ma
+## What is not here
 
-Uruchamiania biegów, kolejkowania, wykresów, serwera. `runlog` przechowuje
-i odpytuje; odpalanie siatki eksperymentów jest zadaniem wołającego.
+Launching runs, queueing, plotting, a server. `runlog` stores and queries;
+launching a grid of experiments is the caller's job.

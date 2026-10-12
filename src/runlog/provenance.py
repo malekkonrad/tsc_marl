@@ -1,9 +1,8 @@
-"""Skąd wziął się ten wynik — zbierane automatycznie przy starcie biegu.
+"""Where a result came from, collected automatically when a run starts.
 
-Proweniencja jest obywatelem pierwszej kategorii, a nie polem opcjonalnym:
-wiersz wyniku, który odsyła do zmiennych plików, nie jest odtwarzalny. Stąd
-`dirty` przy każdym repozytorium — bieg policzony na niezacommitowanym drzewie
-jest nadal wynikiem, ale musi się do tego przyznać.
+Provenance is mandatory, not optional: a result row pointing at mutable files is
+not reproducible. Hence `dirty` for every repository: a run computed on an
+uncommitted tree is still a result, but it must say so.
 """
 
 from __future__ import annotations
@@ -15,8 +14,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Zmienne, które REALNIE zmieniają wynik. Whitelista, nie całe środowisko —
-# zrzucanie os.environ do metadanych to wyciek sekretów i szum.
+# Variables that REALLY change results. An allow-list, not the whole environment:
+# dumping os.environ into metadata would leak secrets and add noise.
 DEFAULT_ENV_KEYS = ("PYTHONHASHSEED", "CUDA_VISIBLE_DEVICES", "OMP_NUM_THREADS")
 
 
@@ -34,9 +33,9 @@ def _git(repo: Path, *args: str) -> str | None:
 
 
 def git_provenance(repos: dict[str, Path] | None = None) -> dict[str, Any]:
-    """SHA + gałąź + flaga `dirty` dla wielu repozytoriów naraz (repo główne,
-    submoduły, katalog danych). Brak gita albo brak repo → wpis z samym `None`,
-    bez wyjątku: proweniencja nie może wywrócić biegu."""
+    """SHA, branch and `dirty` flag for several repositories (main repo, submodules,
+    data). No git or no repo gives `None` entries, never an exception: provenance
+    must not break a run."""
     out = {}
     for name, path in (repos or {}).items():
         sha = _git(Path(path), "rev-parse", "--short", "HEAD")

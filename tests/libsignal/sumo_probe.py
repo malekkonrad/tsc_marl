@@ -1,7 +1,7 @@
-"""Sonda świata SUMO dla `test_sumo_world.py` — osobny proces, bo Registry LibSignala
-jest globalny (patrz docstring testu). Ostatnia linia stdout to JSON z wynikami.
+"""SUMO world probe for `test_sumo_world.py`, a separate process because LibSignal's
+Registry is global. The last stdout line is a JSON with the results.
 
-Uruchomienie ręczne z korzenia repo:
+Manual run from the repository root:
     .venv/bin/python tests/libsignal/sumo_probe.py sumo_krakow3w_mid
 """
 
@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import sys
 
-DECISIONS = 20  # 300 s ruchu — mechanika, nie zbieżność
+DECISIONS = 20  # 300 s of traffic: mechanics, not convergence
 
 
 def main(network: str) -> dict:
@@ -25,8 +25,8 @@ def main(network: str) -> dict:
     from tsc_marl.core.loop import CoreTrainer, LoopConfig
     from tsc_marl.libsignal import session
     from tsc_marl.libsignal.bridge import sim_configs_untouched
+    from tsc_marl.libsignal.experiment import parse_args
     from tsc_marl.libsignal.sumo_world import SERVING, serving_lanelinks
-    from tsc_marl.runner.train import parse_args
 
     session.register_engine_components()
     args = parse_args(["-a", "gatppo", "-w", "sumo", "-n", network])
@@ -43,7 +43,7 @@ def main(network: str) -> dict:
         env, features = core.env, core.env.features
         ordered = env.graph.order_intersections(world)
 
-        # zielone warunkowe: ile lanelinków dokłada `g` względem upstreamowego G/s
+        # permissive green: how many lanelinks `g` adds over upstream's G/s
         upstream = SERVING - {"g"}
         permissive_links = 0
         for inter in world.intersections:
@@ -77,9 +77,8 @@ def main(network: str) -> dict:
             assert np.isfinite(rewards).all()
         metrics = env.metrics()
 
-        # Przejście PO starcie epizodu — tam upstream przełączał już bez niego. Faza
-        # przejściowa LibSignala nie zapala `y`, tylko gasi sygnały na `r`, więc
-        # rozpoznajemy ją po indeksie w programie: zielone mają 0..len(phases)-1.
+        # a transition AFTER the episode start, where upstream switched without one; the
+        # transition phase is recognised by its program index (greens are 0..len-1)
         inter = next(i for i in world.intersections if i.yellow_dict)
         a, b = (int(p) for p in next(iter(inter.yellow_dict)).split("_"))
         transition_seen = False

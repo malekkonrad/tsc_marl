@@ -1,7 +1,7 @@
-# Ablacja 1.6 — po co GNN: actor bez sąsiadów (MLP tej samej głębokości,
-# parameter sharing jak w MPLight). Krytyk zostaje GAT — pytamy o DECYZJĘ.
+# Ablation 1.6: why a GNN: an actor without neighbours (an MLP of the same depth,
+# parameter sharing as in MPLight). The critic stays GAT: the question is about the DECISION.
 #
-# GPU (entry: core) — do liczenia na gliderze. Sufiks run_id = nazwa pliku.
+# GPU (entry: core), to be computed on the GPU machine. run_id suffix = file name.
 entry: core
 mode: realistic
 timeout: 86400
@@ -9,7 +9,7 @@ ngpu: "0"
 
 grid:
   network: [cityflow_jinan3x4_4ph, cityflow_hangzhou4x4_4ph]
-  seed: [0, 1, 2, 3, 4]   # 3–4 dograne pod Fazę 3 (protokół: 5 seedów w robustness)
+  seed: [0, 1, 2, 3, 4]   # 3-4 added for Phase 3 (protocol: 5 seeds in robustness)
 
 overrides:
   model: {encoder: none}

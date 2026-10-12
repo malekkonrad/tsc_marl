@@ -217,23 +217,19 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# ── projekt ──────────────────────────────────────────────────────────────────
-# Wyniki uruchomień: checkpointy (.pt), logi, replaye.
+# --- project ------------------------------------------------------------------
+# Run outputs: checkpoints (.pt), logs, replays.
 runs/
 
-# LibSignal nadpisuje configs/sim/*.cfg w trakcie biegu (świeże ścieżki logów replaya).
-# Nie ignorujemy ich — są potrzebne — ale tsc_marl.libsignal.restore_sim_configs()
-# cofa to zabrudzenie po każdym runie.
+# LibSignal rewrites configs/sim/*.cfg during a run (fresh replay log paths). They are
+# not ignored, since they are needed; tsc_marl.libsignal.sim_configs_untouched()
+# restores them after every run.
 
-# Duże sieci upstreamowe, gdyby ktoś je skopiował lokalnie; wersjonujemy tylko
-# jinan_3x4 i hangzhou_4x4_advanced (9,4 MB), których faktycznie używamy,
-# oraz case study Krakowa (gałąź cracow-case-study, budowane przez build.py).
+# Large upstream networks, in case someone copies them locally; only the networks used
+# in the thesis are versioned: jinan_3x4, hangzhou_4x4_advanced and the Krakow case
+# study (built by build.py).
 data/output_data/
 data/raw_data/*
 !data/raw_data/jinan_3x4/
 !data/raw_data/hangzhou_4x4_advanced/
 !data/raw_data/krakow_3w/
-
-# Apptainer / docker save
-*.sif
-*.tar

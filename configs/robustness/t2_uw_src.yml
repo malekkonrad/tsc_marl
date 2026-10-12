@@ -1,78 +1,79 @@
-# T2 dla UW-attention po stronie ŹRÓDŁA krawędzi — korekta mapowania z `t2_uw`.
+# T2 for UW-attention on the edge SOURCE side: a correction of the mapping in `t2_uw`.
 #
-# CO POPRAWIAMY. `t2_uw` liczył u krawędzi j→i z ruchów CELU i, których droga
-# wjazdowa zaczyna się w j (`obs_head.edge_uncertainty`, side="target"). Attention na
-# tej krawędzi waży jednak `hidden_embedding(x_j)` — reprezentację z odczytów ŹRÓDŁA j.
-# Wiarygodność wiadomości zależy więc od czujników j, a nie od pasów drogi j→i.
-# Najostrzej widać to przy martwym skrzyżowaniu j (`unit: intersection`, właściciel
-# pasa = skrzyżowanie, do którego pas dojeżdża): droga j→i należy do zdrowego i, więc
-# sąsiedzi nadal w pełni ufają śmieciom z j, a w samym j cała grupa softmaxu dostaje
-# równą karę i modulacja jest tożsamościowa. Hipoteza A3b z `t2_uw.yml` („intersection
-# ma wyjść na zero") była skutkiem tego mapowania, a nie własnością zadania.
+# WHAT WE FIX. `t2_uw` computed u of edge j->i from the movements of the TARGET i whose
+# approach road starts at j (`obs_head.edge_uncertainty`, side="target"). Attention on that
+# edge, however, weighs `hidden_embedding(x_j)`, a representation of the SOURCE j's readings.
+# The reliability of the message therefore depends on j's sensors, not on the lanes of road
+# j->i. It shows most sharply for a dead intersection j (`unit: intersection`, lane owner =
+# the intersection the lane leads to): road j->i belongs to the healthy i, so the neighbours
+# still fully trust j's garbage, while in j itself the whole softmax group gets an equal
+# penalty and the modulation is the identity. Hypothesis A3b of `t2_uw.yml` ("intersection
+# should come out zero") was a consequence of this mapping, not a property of the task.
 #
-# Kolumny: rdzeń · UW po stronie celu (powtórka `t2_uw` W TYM SAMYM zestawie losowań) ·
-# UW po stronie źródła · wyrocznia modulacji (niżej) · FixedTime. Wszystkie cztery
-# uczone kolumny liczą się z TEGO SAMEGO checkpointu i tym samym τ; `gatppo_uw` i
-# `gatppo_uw_src` mają też tę samą głowę (odcisk bez zmian) — różni je wyłącznie
-# strona krawędzi, więc porównanie jest parowane.
+# Columns: core, UW on the target side (a repeat of `t2_uw` ON THE SAME set of draws),
+# UW on the source side, the modulation oracle (below), FixedTime. All four learned columns
+# are computed from THE SAME checkpoint with the same tau; `gatppo_uw` and `gatppo_uw_src`
+# also share the head (fingerprint unchanged), so only the edge side separates them and
+# the comparison is paired.
 #
-# τ = 0,25 ZOSTAJE świadomie, choć dobrano je regułą „rozstęp przy gauss2 = ln 10"
-# na stronie celu. Przeliczone na zrzucie BC (ogon, JiNan) po stronie źródła daje przy
-# gauss2 rozstęp 2,43 wobec 2,30 — ta sama skala, więc reguła nie wymaga innego τ,
-# a jedna liczba mniej to jedno źródło różnicy mniej.
+# tau = 0.25 STAYS deliberately, although it was chosen by the rule "spread at gauss2 =
+# ln 10" on the target side. Recomputed on the BC dataset (tail, JiNan) on the source side
+# it gives a gauss2 spread of 2.43 against 2.30, the same scale, so the rule needs no other
+# tau, and one number fewer is one source of difference fewer.
 #
-# SPRAWDZENIE PRZED POMIAREM (zrzut BC z Advanced-MP, ogon epizodu, τ = 0,25):
+# CHECK BEFORE MEASUREMENT (BC dataset from Advanced-MP, episode tail, tau = 0.25):
 #
-#   sieć      scenariusz              rozstęp tgt  rozstęp src  trafienie tgt  trafienie src
-#   JiNan     clean                      0,38         0,15           —              —
-#   JiNan     mask0p25                   0,69         0,47         0,505          0,529
-#   JiNan     mask0p25_intersection      0,49         0,27         0,496          0,539
-#   HangZhou  mask0p25                   0,30         0,05           —              —
-#   HangZhou  mask0p25_intersection      0,22         0,03         0,496          0,499
+#   network   scenario                spread tgt   spread src   hit tgt   hit src
+#   JiNan     clean                      0.38         0.15          -         -
+#   JiNan     mask0p25                   0.69         0.47        0.505     0.529
+#   JiNan     mask0p25_intersection      0.49         0.27        0.496     0.539
+#   HangZhou  mask0p25                   0.30         0.05          -         -
+#   HangZhou  mask0p25_intersection      0.22         0.03        0.496     0.499
 #
-#   „trafienie" = AUROC kary krawędzi (−log ρ) względem tego, czy ŹRÓDŁO krawędzi ma
-#   > 25% zepsutych ruchów. 0,5 = kara nie ma związku z tym, czyja wiadomość jest zła.
-#   (skrypt jednorazowy, nie w repo; do powtórzenia na `EDGE_SIDES` i `group_spread`)
+#   "hit" = AUROC of the edge penalty (-log rho) against whether the edge SOURCE has
+#   > 25% broken movements. 0.5 = the penalty is unrelated to whose message is bad.
+#   (a one-off script, not in the repo; to repeat with `EDGE_SIDES` and `group_spread`)
 #
-# HIPOTEZY ZAPISANE PRZED POMIAREM:
-#   H1 (no-op na czystym, A3a): `clean` bez istotnej różnicy vs rdzeń — po stronie
-#      źródła modulacja jest na czystym jeszcze cichsza (0,15 vs 0,38).
-#   H2 (główna, raczej NEGATYWNA): strona źródła poprawia TRAFIENIE, ale tylko
-#      nieznacznie (0,54 vs 0,50), bo wąskim gardłem jest sama głowa — u ruchu słabo
-#      śledzi martwe detektory (AUROC 0,651 na niewidzianych maskach, `gate_2_2.md`).
-#      Przewidywanie: JiNan `mask*_intersection` co najwyżej mały zysk wobec
-#      `gatppo_uw`, bez przekroczenia |t| ≥ 2,8; lane-maski i gauss — zero.
-#   H3 (HangZhou): zero we wszystkich scenariuszach maskowych, bo po stronie źródła
-#      głowa jest tam przy maskach niema (rozstęp 0,03–0,05, poniżej czystego).
-#      To rozdziela dwie przyczyny zera z `faza3-po-t2.md` §1: jeśli HangZhou zostaje
-#      na zerze, a JiNan się rusza, zawiodło mapowanie; jeśli obie na zerze — głowa.
-#   Wynik zgodny z H2+H3 zamyka C5 przy POPRAWNEJ semantyce krawędzi i przenosi
-#   ciężar wyjaśnienia na jakość sygnału. Wynik sprzeczny (istotny zysk przy
-#   intersection) = C5 do przepisania: mechanizm działał, tylko na złej krawędzi.
+# HYPOTHESES RECORDED BEFORE MEASUREMENT:
+#   H1 (no-op on clean, A3a): `clean` without a significant difference vs the core; on the
+#      source side the modulation is even quieter on clean (0.15 vs 0.38).
+#   H2 (main, rather NEGATIVE): the source side improves the HIT, but only slightly
+#      (0.54 vs 0.50), because the bottleneck is the head itself: a movement's u tracks dead
+#      detectors poorly (AUROC 0.651 on unseen masks, `gate_2_2.md`).
+#      Prediction: JiNan `mask*_intersection` at most a small gain over `gatppo_uw`, without
+#      crossing |t| >= 2.8; lane masks and gauss zero.
+#   H3 (HangZhou): zero in all mask scenarios, since on the source side the head is mute
+#      there under masks (spread 0.03-0.05, below clean).
+#      This separates the two causes of the zero in `faza3-po-t2.md` section 1: if HangZhou
+#      stays at zero while JiNan moves, the mapping failed; if both stay at zero, the head.
+#   A result consistent with H2+H3 closes C5 under the CORRECT edge semantics and shifts the
+#   weight of the explanation onto signal quality. A contradicting result (a significant
+#   gain at intersection) = C5 to rewrite: the mechanism worked, only on the wrong edge.
 #
-# WYROCZNIA MODULACJI (`gatppo_uw_oracle`, dopisana 2026-09-23, też przed pomiarem).
-# Ta sama modulacja po stronie źródła, ale u = ułamek MARTWYCH pasów wjazdowych
-# węzła wprost z warstwy awarii (`controllers.OracleUncertainty`, definicja jak
-# `OracleGate`), log ρ = −u/τ bez `u_ref` (na czystym u ≡ 0). Rola jak wyroczni
-# bramki w `t2_gate`: SUFIT mechanizmu, nie sterownik do wdrożenia. τ = 0,25 →
-# całkowicie martwy węzeł −4 naty (~55× mniejsza waga).
-#   H4 (rozstrzygająca): wyrocznia daje istotny zysk (|t| ≥ 2,8) przy
-#      `mask*_intersection` na obu sieciach — tam wiadomość martwego węzła jest
-#      w całości śmieciem, a zdrowi sąsiedzi są pod ręką (C3: GNN wart tam do 355 s).
-#      Przy gauss i drift wyrocznia jest z definicji NIEMA (brak martwych pasów) —
-#      to nie jest wynik, tylko granica tej wyroczni; nie czytać tych wierszy.
-#   Odczyt: H4 obalona → ważenie sąsiadów niepewnością nie pomaga nawet przy
-#   idealnym sygnale, C5 zamknięte bez zastrzeżeń. H4 potwierdzona, a
-#   `gatppo_uw_src` na zerze → wąskim gardłem jest głowa, mechanizm żyje
-#   (future work: głowa uczona na etykiecie „martwy" na przebiegach polityki).
+# MODULATION ORACLE (`gatppo_uw_oracle`, added 2026-09-23, also before measurement).
+# The same source-side modulation, but u = the fraction of the node's DEAD inbound lanes
+# taken directly from the failure layer (`controllers.OracleUncertainty`, defined like
+# `OracleGate`), log rho = -u/tau without `u_ref` (u = 0 on clean). Its role is that of the
+# gate oracle in `t2_gate`: the mechanism's CEILING, not a deployable controller.
+# tau = 0.25 -> a completely dead node -4 nats (~55x less weight).
+#   H4 (decisive): the oracle gives a significant gain (|t| >= 2.8) at
+#      `mask*_intersection` on both networks: there the dead node's message is entirely
+#      garbage and healthy neighbours are at hand (C3: the GNN is worth up to 355 s there).
+#      Under gauss and drift the oracle is MUTE by definition (no dead lanes); that is not a
+#      result but the limit of this oracle; do not read those rows.
+#   Reading: H4 rejected -> weighting neighbours by uncertainty does not help even with a
+#   perfect signal, C5 closed without reservations. H4 confirmed while `gatppo_uw_src` is at
+#   zero -> the head is the bottleneck, the mechanism lives (future work: a head trained on
+#   a "dead" label on policy rollouts).
 #
-# Diagnostyka w wierszach jak w `t2_uw`: `uw_spread`, `uw_active`.
+# Diagnostics in the rows as in `t2_uw`: `uw_spread`, `uw_active`.
 #
-# WYMAGA (oprócz głowy i `u_ref` po stronie celu, jak `t2_uw`):
-#   runs/heads/u_ref__<sieć>__source.npz — dla ISTNIEJĄCEJ głowy, bez przeuczania:
-#     tsc obshead -n <sieć> --reference source
-#   Policzone na laptopie 2026-09-23; głowy na laptopie i gliderze mają ten sam odcisk
-#   (82cbe169… JiNan, e562946a… HangZhou), więc wystarczy rsync samych plików `__source`.
+# REQUIRES (besides the head and the target-side `u_ref`, as `t2_uw`):
+#   runs/heads/u_ref__<network>__source.npz, for an EXISTING head, without retraining:
+#     tsc obshead -n <network> --reference source
+#   Computed on the laptop on 2026-09-23; the heads on the laptop and the GPU machine share
+#   the fingerprint (82cbe169... JiNan, e562946a... HangZhou), so rsync of the `__source`
+#   files alone is enough.
 name: t2_uw_src
 mode: realistic
 draws: 5

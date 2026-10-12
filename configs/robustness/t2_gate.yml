@@ -1,48 +1,47 @@
-# T2 dla BRAMKI FALLBACKU — wersja minimalna, z bramką-WYROCZNIĄ.
+# T2 for the FALLBACK GATE: the minimal version, with an ORACLE gate.
 #
-# Pytanie tego planu: ile da się ugrać przy IDEALNEJ detekcji. Wyrocznia czyta prawdę
-# z warstwy awarii (`sensors.broken`), więc nie jest sterownikiem do wdrożenia — jest
-# GÓRNYM OGRANICZENIEM dla bramek realnych (reguła z Kroku 8, UQ z Kroku 9). Jeśli tu
-# nie ma zysku, żaden detektor go nie wyczaruje i nie ma po co go budować.
+# The question of this plan: how much can be gained with PERFECT detection. The oracle
+# reads the truth from the failure layer (`sensors.broken`), so it is not a deployable
+# controller but an UPPER BOUND for real gates (the rule from Step 8, UQ from Step 9). If
+# there is no gain here, no detector can conjure one and there is no point building it.
 #
-# DLACZEGO FIXEDTIME, a nie MaxPressure: pod ciężkimi maskami wszystko, co czyta
-# detektory, jest gorsze od FixedTime (results/t2_nomech.md, JiNan mask0p5: rdzeń 743,
-# Efficient-MP 648, Advanced-MP 750, FixedTime 507). Odporność bierze się tu z
-# NIECZYTANIA zepsutych danych. MaxPressure zostaje dla poziomu epistemic.
+# WHY FIXEDTIME and not MaxPressure: under heavy masks everything that reads the detectors
+# is worse than FixedTime (results/t2_nomech.md, JiNan mask0p5: core 743, Efficient-MP 648,
+# Advanced-MP 750, FixedTime 507). Robustness here comes from NOT READING broken data.
+# MaxPressure stays for the epistemic level.
 #
-# DLACZEGO PER WĘZEŁ: `mask0p25_intersection` to 25% skrzyżowań martwych i 75%
-# zdrowych; globalnie rdzeń (510,0) i FixedTime (507,0) idą łeb w łeb, więc średnia
-# ukrywa katastrofę na jednej czwartej sieci.
+# WHY PER NODE: `mask0p25_intersection` is 25% of intersections dead and 75% healthy;
+# globally the core (510.0) and FixedTime (507.0) are neck and neck, so the mean hides a
+# disaster on a quarter of the network.
 #
-# SWEEP PROGU (Krok 8): cztery kolumny różniące się WYŁĄCZNIE progiem. Krzywa zapasu
-# — „ile da się ugrać przy jakim stopniu oślepienia" — jest wynikiem sama w sobie i to
-# ona, a nie wybrany punkt, idzie do rozdziału 4. Próg do Kroku 9 wybiera się REGUŁĄ
-# zapisaną tutaj, przed pomiarem: największy próg, przy którym strata na maskach
-# < 0,5 mieści się w szumie. Inaczej byłoby to strojenie na zbiorze, na którym
-# potem raportujemy wynik — to samo, czego unikaliśmy przy τ i u_ref.
+# THRESHOLD SWEEP (Step 8): four columns differing ONLY in the threshold. The headroom
+# curve, "how much can be gained at which degree of blinding", is a result in itself, and
+# it, not a chosen point, goes into chapter 4. The threshold for Step 9 is chosen by a RULE
+# recorded here, before measurement: the largest threshold at which the loss under masks
+# < 0.5 stays within noise. Otherwise it would be tuning on the set we later report on,
+# the same thing avoided for tau and u_ref.
 #
-# `threshold: 1.00` to wariant maksymalnie zachowawczy (przełącz dopiero przy pełnym
-# oślepieniu): przy `unit: intersection` nadal strzela, przy maskach pasowych prawie
-# nigdy — czyli rozdziela te dwa reżimy czysto.
+# `threshold: 1.00` is the most conservative variant (switch only when fully blinded): it
+# still fires with `unit: intersection` and almost never under lane masks, so it separates
+# the two regimes cleanly.
 #
-# OCZEKIWANIA ZAPISANE PRZED POMIAREM: `gate_share` maleje monotonicznie z progiem;
-# przy 1,00 i maskach pasowych ≈ 0; na `clean` zero dla każdego progu (jeśli nie, to
-# błąd powłoki, nie progu).
+# EXPECTATIONS RECORDED BEFORE MEASUREMENT: `gate_share` decreases monotonically with the
+# threshold; at 1.00 and lane masks ~0; on `clean` zero for every threshold (if not, it is a
+# bug in the wrapper, not the threshold).
 #
-# ZAKRES: JiNan, 3 seedy, cztery scenariusze masek + `clean` (doklejany automatycznie).
-# Pełny plan na obu sieciach dopiero wtedy, gdy wyrocznia pokaże, że jest o co grać.
-# `mask0p75` jest tu celowo — tam przepaść jest największa (917 wobec 507), więc jeśli
-# NAWET TAM wyrocznia nie dogoni FixedTime, problem leży gdzie indziej niż w momencie
-# przełączenia i trzeba się zatrzymać.
+# SCOPE: JiNan, 3 seeds, four mask scenarios + `clean` (prepended automatically). The full
+# plan on both networks only once the oracle shows there is something to win. `mask0p75` is
+# here on purpose: the gap is largest there (917 vs 507), so if the oracle does not catch
+# FixedTime EVEN THERE, the problem lies elsewhere than in the switching moment and we must stop.
 #
-# WARUNEK ZALICZENIA, zapisany PRZED pomiarem (dwustronny!):
-#   * `clean`     — ATT bramkowanego ≈ ATT rdzenia (bramka nie ma prawa strzelić),
-#   * maski ≥ 0,5 — ATT zbliżone do FixedTime,
-#   * `mask0p25`  — NIE GORZEJ niż rdzeń (tam rdzeń bije FixedTime: 426 vs 507).
-# Fałszywe przełączenie na czystym kosztuje 70% (296 vs 507), więc środkowy zakres
-# jest trudniejszy niż skrajności i to on zdecyduje o publikowalności.
+# PASS CONDITION, recorded BEFORE measurement (two-sided!):
+#   * `clean`      - gated ATT ~ core ATT (the gate has no right to fire),
+#   * masks >= 0.5 - ATT close to FixedTime,
+#   * `mask0p25`   - NOT WORSE than the core (there the core beats FixedTime: 426 vs 507).
+# A false switch on clean costs 70% (296 vs 507), so the middle range is harder than the
+# extremes and it will decide publishability.
 #
-# Diagnostyka w wierszach: `gate_share` i `gate_switches` — patrz `analysis/degradation.py`.
+# Diagnostics in the rows: `gate_share` and `gate_switches`, see `analysis/degradation.py`.
 name: t2_gate
 mode: realistic
 draws: 5
@@ -52,10 +51,10 @@ networks: [cityflow_jinan3x4_4ph]
 
 controllers:
   gatppo: {seeds: [0, 1, 2]}
-  # `threshold` = ułamek PASÓW WJAZDOWYCH węzła w awarii, od którego oddaje
-  # sterowanie regule (porównanie nieostre). Wchodzi do odcisku biegu
-  # (`MECHANISM_KEYS`), więc każda kolumna liczy się osobno, a zmiana progu
-  # unieważnia wynik zamiast go po cichu odziedziczyć.
+  # `threshold` = the fraction of a node's INBOUND LANES in failure from which it hands
+  # control to the rule (inclusive comparison). It enters the run fingerprint
+  # (`MECHANISM_KEYS`), so every column is computed separately, and changing the threshold
+  # invalidates the result instead of silently inheriting it.
   gatppo_gate_t0p25:
     agent: gatppo
     seeds: [0, 1, 2]
@@ -75,8 +74,8 @@ controllers:
   fixedtime: {}
 
 scenarios:
-  # `mask0p1` to najczulsza sonda na fałszywe przełączenia: rdzeń bije tam FixedTime
-  # zdecydowanie (354 vs 507), więc każde zbędne oddanie sterowania widać od razu.
+  # `mask0p1` is the most sensitive probe for false switches: the core beats FixedTime
+  # decisively there (354 vs 507), so every needless handover shows at once.
   - {kind: mask, level: 0.1}
   - {kind: mask, level: 0.25}
   - {kind: mask, level: 0.25, unit: intersection}

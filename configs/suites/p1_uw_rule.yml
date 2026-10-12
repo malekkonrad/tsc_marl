@@ -1,46 +1,46 @@
-# Ramię 3b (Faza 3, po `t2_uw_rule`): rdzeń trenowany Z AWARIAMI i Z UW-attention,
-# którego u pochodzi z LICZNIKA ZAMROŻONYCH DETEKTORÓW, po stronie ŹRÓDŁA krawędzi.
+# Arm 3b (Phase 3, after `t2_uw_rule`): the core trained WITH FAILURES and WITH
+# UW-attention whose u comes from the FROZEN DETECTOR COUNTER, on the edge SOURCE side.
 #
-# Dlaczego jest potrzebne, skoro `p1_uw` już było. `p1_uw` uczyło się z głowy
-# obserwacyjnej po stronie CELU — z sygnałem, o którym dziś wiadomo, że karał w dużej
-# części nie te krawędzie (`results/t2_uw_src.md`) i trafiał w zepsute źródło z AUROC
-# ~0,5. Zero tamtego ramienia (`t2_train_uw`) nie mówi więc nic o tym, czy polityka
-# NAUCZYŁABY SIĘ korzystać z modulacji, gdyby sygnał był dobry. Sygnał z reguły jest
-# dobry: doklejony do gotowej polityki zbiera 45–73% sufitu wyroczni (`t2_uw_rule`).
+# Why it is needed when `p1_uw` already exists. `p1_uw` learned from the observation
+# head on the TARGET side, with a signal now known to have penalised largely the wrong
+# edges (`results/t2_uw_src.md`) and to hit the broken source with AUROC ~0.5. That
+# arm's zero (`t2_train_uw`) therefore says nothing about whether the policy WOULD
+# LEARN to use the modulation if the signal were good. The rule signal is good: bolted
+# onto a finished policy it collects 45-73% of the oracle ceiling (`t2_uw_rule`).
 #
-# Pytanie: czy polityka uczona Z TYM sygnałem wyciąga z niego więcej niż polityka,
-# której doklejono go dopiero w ewaluacji — w szczególności czy uczy się kanału
-# KRAWĘDZI (ochrona sąsiadów przed wiadomością martwego węzła), który na zamrożonej
-# polityce jest wart ~0 i przez który UW jest redundantne wobec bramki. Odpowiada
-# plan `configs/robustness/t2_train_uw_rule.yml`.
+# Question: does a policy trained WITH this signal get more out of it than a policy
+# that only gets it at evaluation; in particular, does it learn the EDGE channel
+# (protecting neighbours from a dead node's message), which is worth ~0 on a frozen
+# policy and makes UW redundant with the gate. Answered by plan
+# `configs/robustness/t2_train_uw_rule.yml`.
 #
-# ⚠ BLOK `failure_mix` MUSI BYĆ IDENTYCZNY Z `p1_fail.yml` (kontrola, ramię 2) —
-# skopiowany co do znaku. Jedyną różnicą między tymi suite'ami jest klucz `uw`.
-# Pilnuje tego `tests/robustness/test_training.py`.
+# WARNING: the `failure_mix` BLOCK MUST BE IDENTICAL TO `p1_fail.yml` (the control,
+# arm 2), copied character for character. The only difference between these suites is
+# the `uw` key. Guarded by `tests/robustness/test_training.py`.
 #
-# Sygnał budowany przez `robustness.training.uw_signal` — tę samą funkcję, przez którą
-# `tsc degrade` buduje go w ewaluacji, z tymi samymi oknem i progiem bramki-reguły
-# (`runs/heads/gate_ref__<sieć>.npz`), więc polityka uczy się na DOKŁADNIE tym
-# sygnale, którym potem jest mierzona. Rozgrzewka okna (12 decyzji bez modulacji na
-# starcie epizodu) jest częścią sygnału także w treningu.
+# The signal is built by `robustness.training.uw_signal`, the same function `tsc
+# degrade` uses at evaluation, with the same window and threshold as the rule gate
+# (`runs/heads/gate_ref__<network>.npz`), so the policy learns on EXACTLY the signal it
+# is later measured with. The window warm-up (12 decisions without modulation at
+# episode start) is part of the signal in training too.
 #
-# ⚠ SYGNAŁ ZALEŻY OD POLITYKI (zmierzone 2026-10-08 przed biegiem, JiNan, czysty ruch,
-# jeden epizod): FixedTime → `uw_active` 5,5%; nienauczona polityka (argmax z losowych
-# wag, ani jednej zmiany fazy) → 87,2%. Polityka, która głodzi wloty, zapycha je do
-# pojemności, odczyty STOJĄ, a reguła nie odróżnia zatoru od martwego detektora
-# (`obs_head.suspicious_movements`). W pierwszych epizodach treningu modulacja będzie
-# więc w dużej części fałszywa i ma opadać razem z nauką polityki.
-# WARUNEK WAŻNOŚCI, sprawdzany PRZED czytaniem `t2_train_uw_rule`: `uw_active` epizodów
-# testowych (czystych) w `runs/t1/gatppo__*__p1_uw_rule/metrics.csv`, `split=test`,
-# w ostatnich 10 epizodach ≤ 5% (poziom FixedTime; wytrenowany rdzeń w `t2_uw_rule`:
-# 1,2%). Jeśli zostaje wyżej, polityka przez trening widziała szum, a nie awarie —
-# wynik ramienia jest wtedy NIEWAŻNY, nie zerowy (ta sama pułapka co w `p1_uw`).
+# WARNING: THE SIGNAL DEPENDS ON THE POLICY (measured 2026-10-08 before the run, JiNan,
+# clean traffic, one episode): FixedTime -> `uw_active` 5.5%; an untrained policy
+# (argmax of random weights, not a single phase change) -> 87.2%. A policy that starves
+# approaches fills them to capacity, readings STAND STILL, and the rule cannot tell a
+# jam from a dead detector (`obs_head.suspicious_movements`). In the first training
+# episodes the modulation will thus be largely false and should fall as the policy learns.
+# VALIDITY CONDITION, checked BEFORE reading `t2_train_uw_rule`: `uw_active` of the
+# (clean) test episodes in `runs/t1/gatppo__*__p1_uw_rule/metrics.csv`, `split=test`,
+# over the last 10 episodes <= 5% (the FixedTime level; the trained core in `t2_uw_rule`:
+# 1.2%). If it stays higher, the policy saw noise during training, not failures, and
+# the arm's result is INVALID, not zero (the same trap as in `p1_uw`).
 #
-# WYMAGA: runs/heads/gate_ref__<sieć>.npz i obs_head__<sieć>.pt (odcisk progu) dla obu
-# sieci — są na gliderze.
+# REQUIRES: runs/heads/gate_ref__<network>.npz and obs_head__<network>.pt (threshold
+# fingerprint) for both networks; they are on the GPU machine.
 #
-# GPU (entry: core), ~25 min/bieg na gliderze. Sufiks run_id = nazwa pliku:
-# `gatppo__<sieć>__s<seed>_y5__p1_uw_rule`.
+# GPU (entry: core), ~25 min per run on the GPU machine. run_id suffix = file name:
+# `gatppo__<network>__s<seed>_y5__p1_uw_rule`.
 entry: core
 mode: realistic
 timeout: 86400
@@ -52,41 +52,41 @@ grid:
 
 overrides:
   model:
-    # τ, strona i źródło jak w kolumnie `gatppo_uw_rule` planu `t2_uw_rule`.
+    # tau, side and source as in the `gatppo_uw_rule` column of plan `t2_uw_rule`.
     uw: {tau: 0.25, side: source, u: rule}
-    # Scenariusz losowany NA EPIZOD ze strumienia (seed mixu, numer epizodu) —
-    # niezależnego od `--seed` polityki, żeby oba ramiona widziały ten sam
-    # harmonogram awarii (patrz `robustness/training.py`). KTÓRE detektory padną,
-    # wybiera już `SensorModel` z (spec.seed, episode), więc dwa epizody z tym
-    # samym scenariuszem psują inne pasy.
+    # The scenario is drawn PER EPISODE from a stream (mix seed, episode number)
+    # independent of the policy's `--seed`, so both arms see the same failure
+    # schedule (see `robustness/training.py`). WHICH detectors fail is then chosen
+    # by `SensorModel` from (spec.seed, episode), so two episodes with the same
+    # scenario break different lanes.
     failure_mix:
       seed: 0
       scenarios:
-        # 1/3 epizodów czystych. Nie ostrożność, tylko warunek A3a: polityka ma
-        # zostać porównywalna z rdzeniem na czystym ruchu, a kolumna `clean` w T2
-        # jest odniesieniem dla wszystkich degradacji.
+        # 1/3 of episodes clean. Not caution but condition A3a: the policy must stay
+        # comparable with the core on clean traffic, and the `clean` column in T2
+        # is the reference for every degradation.
         - {weight: 4, kind: none}
-        # szum pomiarowy — poziom OBSERWOWALNY, `uw_spread` na T2: 0,74 / 2,21
+        # measurement noise, the OBSERVABLE level; `uw_spread` in T2: 0.74 / 2.21
         - {weight: 1, kind: gauss, level: 1.0}
         - {weight: 1, kind: gauss, level: 2.0}
-        # martwe detektory ze śladem (`zero`) — poziom WNIOSKOWALNY, tu leży
-        # większość zysku fallbacku i tu mechanizm ma największą szansę
+        # dead detectors with a trace (`zero`), the INFERABLE level; most of the
+        # fallback gain lies here, and the mechanism has its best chance here
         - {weight: 2, kind: mask, level: 0.25}
         - {weight: 1, kind: mask, level: 0.5}
-        # całe skrzyżowanie bez czujników: wszystkie krawędzie wchodzące równie
-        # niepewne, softmax na wspólną stałą niezmienniczy — scenariusz, w którym
-        # mechanizm Z DEFINICJI nie ma czego różnicować. Zostaje w mieszance, żeby
-        # polityka nie uczyła się, że „awaria ⇒ zawsze da się wybrać sąsiada".
+        # a whole intersection without sensors: all inbound edges equally uncertain,
+        # softmax is invariant to a shared constant, a scenario in which the
+        # mechanism BY DEFINITION has nothing to differentiate. It stays in the mix so
+        # the policy does not learn that "failure => a neighbour can always be chosen".
         - {weight: 1, kind: mask, level: 0.25, unit: intersection}
-        # martwe BEZ śladu: zamrożony odczyt zamiast zera. `onset: 60` jest
-        # konieczne — detektor martwy od pierwszej decyzji nie ma czego trzymać
-        # i `hold` degeneruje się do `zero` (patrz `domain/sensors.py`).
+        # dead WITHOUT a trace: a frozen reading instead of zero. `onset: 60` is
+        # necessary: a detector dead from the first decision has nothing to hold
+        # and `hold` degenerates to `zero` (see `domain/sensors.py`).
         - {weight: 1, kind: mask, level: 0.25, substitution: hold, onset: 60}
-        # rozkalibrowanie — poziom NIEOBSERWOWALNY; głowa go nie wykrywa
-        # (AUROC 0,536), więc jest tu jako test, czy nie szkodzi
+        # miscalibration, the UNOBSERVABLE level; the head does not detect it
+        # (AUROC 0.536), so it is here as a test that it does no harm
         - {weight: 1, kind: drift, level: 0.3}
     #
-    # CZEGO W MIESZANCE NIE MA I DLACZEGO: `mask 0.75` i `gauss 4.0`. Przy tych
-    # poziomach WSZYSTKO, co czyta czujniki, przegrywa z FixedTime o 45% — to jest
-    # dziedzina bramki fallbacku (§2 notatki), nie ważenia sąsiadów. O
-    # publikowalności decyduje zakres środkowy i on jest tu przeważony.
+    # WHAT THE MIX LEAVES OUT AND WHY: `mask 0.75` and `gauss 4.0`. At these levels
+    # EVERYTHING that reads the sensors loses to FixedTime by 45%; that is the
+    # domain of the fallback gate (section 2 of the note), not of neighbour
+    # weighting. Publishability is decided by the middle range, weighted up here.

@@ -1,1 +1,1 @@
-"""Traffic-signal domain — formulas from the literature, framework-free."""
+"""Traffic-signal domain: formulas from the literature, framework-free."""

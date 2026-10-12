@@ -1,11 +1,12 @@
-# T1 — metody uczone w TRYBIE BENCHMARK (yellow=0), czyli tak, jak liczą papiery.
+# T1: learned methods in BENCHMARK MODE (yellow=0), the way the papers compute them.
 #
-# Zamyka ostatnie otwarte zdanie bramki Fazy 0: czy pipeline odtwarza literaturę
-# także dla metod UCZONYCH. Jedyny dotąd bieg Advanced-CoLighta w tym trybie to
-# `sanity60` (60 epizodów, 8 faz) — za mało, żeby stanąć obok 245,73 (JiNan-1)
-# i 270,45 (HangZhou-1) z papieru. CoLight obok, bo ma w literaturze 272,06.
+# Closes the last open statement of the Phase 0 gate: does the pipeline reproduce
+# the literature for LEARNED methods too. The only Advanced-CoLight run in this
+# mode so far is `sanity60` (60 episodes, 8 phases), too little to stand next to
+# 245.73 (JiNan-1) and 270.45 (HangZhou-1) from the paper. CoLight alongside,
+# since the literature reports 272.06 for it.
 #
-# CPU z tego samego powodu co t1_learned.yml.
+# CPU for the same reason as t1_learned.yml.
 entry: tsc
 mode: benchmark
 timeout: 86400

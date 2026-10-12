@@ -1,28 +1,28 @@
-# ŚLAD BRAMKI DO RYSUNKU — plan istniejący WYŁĄCZNIE po to, żeby wyprodukować
-# `gate_trace.csv` pod figurę wyjaśniającą (Faza 4, explainability).
+# GATE TRACE FOR A FIGURE: a plan existing ONLY to produce `gate_trace.csv` for the
+# explanatory figure (Phase 4, explainability).
 #
-# ⚠ NIE CYTOWAĆ Z TEGO PLANU ŻADNEGO ATT. Jeden seed i jedno losowanie awarii na
-# scenariusz — to jest materiał na rysunek, nie pomiar. Liczby do pracy pochodzą
-# z `t2_gate_real` (3 seedy × 5 losowań) i tylko z niego.
+# WARNING: DO NOT CITE ANY ATT FROM THIS PLAN. One seed and one failure draw per
+# scenario: figure material, not a measurement. Numbers for the thesis come from
+# `t2_gate_real` (3 seeds x 5 draws) and only from it.
 #
-# PO CO OSOBNY PLAN, a nie `--trace` na `t2_gate_real`: ślad to ~240 decyzji × N węzłów
-# × scenariusze × losowania. Na pełnym planie to dane, których nikt nie zamawiał,
-# a przeliczenie `t2_gate_real` z `--replace` podmieniłoby wyniki cytowane w §2b.
-# Osobny `run_id` (`__t2_trace`) nie dotyka niczego policzonego.
+# WHY A SEPARATE PLAN rather than `--trace` on `t2_gate_real`: the trace is ~240
+# decisions x N nodes x scenarios x draws. On the full plan that is data nobody asked
+# for, and recomputing `t2_gate_real` with `--replace` would replace the results cited
+# in section 2b. A separate `run_id` (`__t2_trace`) touches nothing computed.
 #
-# URUCHOMIENIE (flaga jest CLI, nie kluczem planu — patrz `GatedController.trace`):
+# RUN (the flag is CLI, not a plan key, see `GatedController.trace`):
 #     tsc degrade run t2_trace --trace -j 4
 #
-# SCENARIUSZE dobrane tak, żeby rysunek pokazywał TRZY różne zachowania bramki:
-#   clean                  — prawie nie strzela (gate_share 1,6%): tło „brak awarii"
-#   gauss2                 — NIE STRZELA ANI RAZU (§8.3): dowód, że szum nie zamraża
-#                            odczytu; na rysunku pusty pasek, i to jest treść
-#   mask0p25_intersection   — precyzja 0,89: czyste przejęcie CAŁYCH skrzyżowań,
-#                            najczytelniejszy przypadek „dlaczego TEN węzeł"
-#   mask0p5                — precyzja 0,73 przy udziale 57%: przypadek rozmyty,
-#                            gdzie widać histerezę i wynik tuż pod progiem
-#   mask0p25_hold_t60      — awaria OD 60. DECYZJI: na rysunku widać OPÓŹNIENIE
-#                            detekcji (okno 12 musi wypełnić się zamrożonymi odczytami)
+# SCENARIOS chosen so the figure shows THREE different gate behaviours:
+#   clean                  - almost never fires (gate_share 1.6%): the "no failure" background
+#   gauss2                 - DOES NOT FIRE ONCE (section 8.3): proof that noise does not freeze
+#                            a reading; an empty bar in the figure, and that is the content
+#   mask0p25_intersection  - precision 0.89: a clean takeover of WHOLE intersections,
+#                            the clearest case of "why THIS node"
+#   mask0p5                - precision 0.73 at a 57% share: a blurred case showing
+#                            hysteresis and scores just below the threshold
+#   mask0p25_hold_t60      - failure FROM DECISION 60: the figure shows the detection
+#                            DELAY (the 12-step window must fill with frozen readings)
 name: t2_trace
 mode: realistic
 draws: 1

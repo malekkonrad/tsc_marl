@@ -1,19 +1,19 @@
-# Punkt odniesienia GATE-a Fazy 1: Advanced-CoLight na tych samych sieciach
-# i seedach co rdzeń. Bez tego „w granicach kilku procent" nie ma do czego się
-# odnieść na NASZYM protokole (liczby z papieru są dla yellow=0).
+# Reference point of the Phase 1 GATE: Advanced-CoLight on the same networks and
+# seeds as the core. Without it "within a few percent" has nothing to refer to
+# under OUR protocol (the paper's numbers are for yellow=0).
 entry: tsc
 mode: realistic
 timeout: 86400
 
-# CPU ŚWIADOMIE, a nie z zapomnienia. Advanced-CoLight dziedziczy po
-# `agent/colight.py` z submodułu, a tamten kod nie ma ANI JEDNEGO `.cuda()`
-# ani `torch.device` — model i tensory powstają na urządzeniu domyślnym, czyli
-# CPU. `ngpu: "0"` nic by tu nie zmieniło, tylko sugerowało nieprawdę.
-# Przeniesienie tej połówki GATE-a na GPU wymaga patcha w submodule (i zmieni
-# arytmetykę baseline'u) — patrz README, „Relacja do LibSignala".
+# CPU DELIBERATELY, not by oversight. Advanced-CoLight inherits from
+# `agent/colight.py` in the submodule, and that code has NOT A SINGLE `.cuda()`
+# or `torch.device`: model and tensors are created on the default device, the CPU.
+# `ngpu: "0"` would change nothing here and only suggest otherwise. Moving this
+# half of the GATE to a GPU needs a submodule patch (and changes the baseline's
+# arithmetic), see README, "Relation to LibSignal".
 ngpu: "-1"
 
 grid:
   agent: [advancedcolight]
   network: [cityflow_jinan3x4_4ph, cityflow_hangzhou4x4_4ph]
-  seed: [0, 1, 2, 3, 4]   # 3–4 dograne pod Fazę 3 (protokół: 5 seedów w robustness)
+  seed: [0, 1, 2, 3, 4]   # 3-4 added for Phase 3 (protocol: 5 seeds in robustness)

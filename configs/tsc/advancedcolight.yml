@@ -1,17 +1,17 @@
 includes:
-  - configs/tsc/colight.yml            # architektura GAT i poprawki stabilności — bez zmian
-  - configs/tsc/thesis_protocol.yml    # zamrożony protokół — musi być OSTATNI
+  - configs/tsc/colight.yml            # GAT architecture and stability fixes, unchanged
+  - configs/tsc/thesis_protocol.yml    # frozen protocol, must be LAST
 
 model:
   name: advancedcolight
-  # OBS_LENGTH=167 z referencyjnej implementacji (≈ V_max·Δt = 165 m z Def. 8).
-  # WSPÓLNE okno dla kolejki (pressure) i pojazdów jadących (demand) — tak samo
-  # jak w advancedmp.yml, żeby obie metody widziały ten sam wycinek pasa.
+  # OBS_LENGTH=167 from the reference implementation (~ V_max * dt = 165 m, Def. 8).
+  # A SHARED window for the queue (pressure) and moving vehicles (demand), as in
+  # advancedmp.yml, so both methods see the same stretch of lane.
   obs_length: 167
-  # Skręty w prawo mają zielone w KAŻDEJ fazie → nie są ruchami sterowanymi
-  # i nie wchodzą do ATS (inaczej wektor stanu ma 12 ruchów zamiast 8).
+  # Right turns have green in EVERY phase -> they are not controlled movements
+  # and do not enter ATS (otherwise the state vector has 12 movements instead of 8).
   drop_always_green: true
-  # UWAGA: ATS NIE jest normalizowane. `vehicle_max` dzieli obserwację w CoLightcie,
-  # ale przy vehicle_max=1 to no-op, a dla pressure — które jest RÓŻNICĄ i bywa
-  # ujemne — dzielenie przez "maksymalną liczbę pojazdów na pasie" nie ma
-  # interpretacji. Stan idzie do sieci surowy, jak w papierze.
+  # NOTE: ATS is NOT normalised. `vehicle_max` divides the observation in CoLight,
+  # but with vehicle_max=1 it is a no-op, and for pressure (a DIFFERENCE that can be
+  # negative) dividing by "the maximum number of vehicles on a lane" has no
+  # interpretation. The state enters the network raw, as in the paper.

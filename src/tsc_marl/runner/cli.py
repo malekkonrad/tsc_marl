@@ -1,13 +1,12 @@
-"""Jedno wejście do projektu: `tsc <komenda>`.
+"""The single entry point of the project: `tsc <command>`.
 
-Warstwa cienka z założenia — komendy tylko rozdzielają ruch, cała logika siedzi
-w `train.py`, `train_core.py`, `evaluate.py`, `suite.py` i `analysis/report.py`. Dzięki temu
-testy, `suite` i podprocesy wołają te same funkcje, a nie CLI.
+Thin on purpose: commands only dispatch, all logic lives in `train.py`,
+`train_core.py`, `evaluate.py`, `suite.py`, `degrade.py` and `analysis/`, so tests,
+suites and subprocesses call the same functions rather than the CLI.
 
-`train`, `core` i `eval` przepuszczają argumenty BEZ ZMIAN do argparse'owych
-parserów tamtych modułów (`--help` też — obsłuży go argparse). Powtórzenie
-piętnastu flag w typerze byłoby dokładnie tym rozjazdem, który dopiero co
-usunęliśmy z sekwencji interfejsów.
+`train`, `core` and `eval` pass their arguments UNCHANGED to those modules'
+argparse parsers (`--help` included): repeating fifteen flags here would be one
+more copy to drift apart.
 """
 
 from __future__ import annotations
@@ -20,17 +19,16 @@ import typer
 app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
-    # Bez tego rich opakowuje KAŻDY wyjątek w ramkę z kodem źródłowym. Nasze błędy
-    # dziedzinowe (RunExists, RunIdCollision, SystemExit z suite'a) są komunikatami
-    # dla człowieka, a nie awarią — ramka z traceback tylko je zakrywa.
+    # Without this rich wraps EVERY exception in a source frame; our domain errors
+    # (RunExists, RunIdCollision, SystemExit from a suite) are messages for a human.
     pretty_exceptions_enable=False,
-    help="Sterowanie sygnalizacją świetlną — treningi, siatki eksperymentów, raporty.",
+    help="Traffic signal control: training, experiment grids, reports.",
 )
-suite_app = typer.Typer(no_args_is_help=True, help="Deklaratywne siatki biegów (configs/suites).")
+suite_app = typer.Typer(no_args_is_help=True, help="Declarative run grids (configs/suites).")
 app.add_typer(suite_app, name="suite")
 
-# Argumenty lecą do argparse'a docelowego modułu — łącznie z `--help`, dlatego
-# `help_option_names` jest puste (inaczej click przechwyciłby je u siebie).
+# Arguments go to the target module's argparse, `--help` included, hence the empty
+# `help_option_names` (click would otherwise intercept it).
 PASSTHROUGH = {
     "allow_extra_args": True,
     "ignore_unknown_options": True,
@@ -39,17 +37,13 @@ PASSTHROUGH = {
 
 
 def ensure_hashseed() -> None:
-    """Zrestartuj interpreter z PYTHONHASHSEED=0, jeśli go nie ma.
+    """Restart the interpreter with PYTHONHASHSEED=0 if it is not set.
 
-    PYTHONHASHSEED działa TYLKO ustawiony przed startem interpretera — z Pythona
-    nie da się go „ustawić wstecz", a bez niego `world_sumo` jest
-    niedeterministyczny (te same argumenty, inny wynik). To jest jedyny powód,
-    dla którego istniały `scripts/*.sh`; tutaj załatwia to jedno `execv`.
-
-    `sys.orig_argv` odtwarza wywołanie dokładnie, więc działa tak samo dla
-    `tsc ...` i dla `python -m tsc_marl ...`. Strażnik na wejściu wyklucza pętlę,
-    a podprocesy `suite` dostają zmienną z `libsignal.child_env()` — dla nich to
-    no-op.
+    PYTHONHASHSEED works ONLY when set before the interpreter starts, and without
+    it SUMO is nondeterministic (same arguments, another result). `sys.orig_argv`
+    reproduces the call exactly, for `tsc ...` and `python -m tsc_marl ...` alike;
+    the guard prevents a loop, and suite subprocesses get the variable from
+    `libsignal.child_env()`.
     """
     if os.environ.get("PYTHONHASHSEED") == "0" or not getattr(sys, "orig_argv", None):
         return
@@ -58,16 +52,16 @@ def ensure_hashseed() -> None:
 
 
 @app.callback()
-def _przed_komenda() -> None:
+def _before_command() -> None:
     ensure_hashseed()
 
 
-# ------------------------------------------------------------------ pojedyncze biegi
+# ------------------------------------------------------------------ single runs
 
 
 @app.command(context_settings=PASSTHROUGH)
 def train(ctx: typer.Context) -> None:
-    """Trening/pomiar agenta LibSignala (`tsc train -a colight -n ... --seed 0`)."""
+    """Train or measure a LibSignal agent (`tsc train -a colight -n ... --seed 0`)."""
     from tsc_marl.runner import train as train_module
 
     train_module.main(ctx.args)
@@ -75,13 +69,13 @@ def train(ctx: typer.Context) -> None:
 
 @app.command()
 def prototype(
-    network: str = typer.Option("cityflow_jinan3x4_4ph", "-n", help="sieć bazowa zrzutu"),
-    mode: str = typer.Option("edl", help="'edl' albo 'softmax'"),
-    epochs: int = typer.Option(150, help="epoki uczenia głowy"),
-    hop: bool = typer.Option(False, help="1-hop zamiast 0-hop (druga iteracja 2.0)"),
-    ensemble: int = typer.Option(5, help="członkowie deep ensemble (wzorzec epistemic); 0 = bez"),
+    network: str = typer.Option("cityflow_jinan3x4_4ph", "-n", help="base network of the dataset"),
+    mode: str = typer.Option("edl", help="'edl' or 'softmax'"),
+    epochs: int = typer.Option(150, help="head training epochs"),
+    hop: bool = typer.Option(False, help="1-hop instead of 0-hop"),
+    ensemble: int = typer.Option(5, help="deep ensemble members (epistemic reference); 0 = none"),
 ) -> None:
-    """Bramka prototypu 2.0 (uczenie + tabela + kryteria) -> results/gate_2_0.md."""
+    """Decision-uncertainty prototype gate (training, table, criteria) -> results/gate_2_0.md."""
     from tsc_marl.uncertainty import prototype as module
 
     cfg = module.TrainConfig(mode=mode, epochs=epochs, hop=hop, ensemble=ensemble)
@@ -90,23 +84,23 @@ def prototype(
 
 @app.command()
 def obshead(
-    network: str = typer.Option("cityflow_jinan3x4_4ph", "-n", help="sieć bazowa zrzutu"),
-    window: int = typer.Option(4, help="ile ostatnich odczytów widzi głowa"),
-    neighbors: bool = typer.Option(True, help="dołóż średnią odczytów sąsiadów upstream"),
-    epochs: int = typer.Option(60, help="epoki uczenia głowy"),
-    persistence: bool = typer.Option(False, help="dołóż cechy trwałości odczytu (utknięcie)"),
+    network: str = typer.Option("cityflow_jinan3x4_4ph", "-n", help="base network of the dataset"),
+    window: int = typer.Option(4, help="how many recent readings the head sees"),
+    neighbors: bool = typer.Option(True, help="add the mean of upstream neighbours' readings"),
+    epochs: int = typer.Option(60, help="head training epochs"),
+    persistence: bool = typer.Option(False, help="add reading persistence features (stuck)"),
     mask_variants: bool = typer.Option(
-        False, help="porównaj warianty na martwych detektorach -> results/gate_2_2_masks.md"
+        False, help="compare variants on dead detectors -> results/gate_2_2_masks.md"
     ),
     save: bool = typer.Option(
-        False, help="ucz SAMĄ głowę (bez bramki) i zapisz artefakt -> runs/heads/"
+        False, help="train the head ONLY (no gate) and save the artefacts -> runs/heads/"
     ),
     reference: str | None = typer.Option(
         None,
-        help="policz SAMO u_ref (target|source) dla ISTNIEJĄCEJ głowy, bez przeuczania",
+        help="compute ONLY u_ref (target|source) for an EXISTING head, without retraining",
     ),
 ) -> None:
-    """Bramka prototypu 2.2 — głowa obserwacyjna (per ruch → krawędź) -> results/gate_2_2.md."""
+    """Observation head gate (per movement -> edge) -> results/gate_2_2.md."""
     from tsc_marl.uncertainty import obs_head as module
 
     if reference is not None:
@@ -128,11 +122,11 @@ def obshead(
 
 @app.command()
 def rulecal(
-    network: str = typer.Option(..., "-n", help="sieć (np. sumo_krakow3w_mid)"),
-    episodes: int = typer.Option(3, help="ile czystych epizodów pod ekspertem"),
-    expert: str = typer.Option("advancedmp", help="sterownik, pod którym mierzymy czysty ruch"),
+    network: str = typer.Option(..., "-n", help="network (e.g. sumo_krakow3w_mid)"),
+    episodes: int = typer.Option(3, help="clean episodes under the expert"),
+    expert: str = typer.Option("advancedmp", help="controller driving the clean traffic"),
 ) -> None:
-    """Próg SAMEJ bramki-reguły (bez głowy) -> runs/heads/rule_ref__<sieć>.json."""
+    """Rule-gate threshold ALONE (no head) -> runs/heads/rule_ref__<network>.json."""
     from tsc_marl.robustness import rule_ref
 
     path = rule_ref.calibrate(network, episodes=episodes, expert=expert)
@@ -142,10 +136,10 @@ def rulecal(
 
 @app.command()
 def demand(
-    network: str = typer.Option("cityflow_jinan3x4_4ph", "-n", help="sieć bazowa"),
-    factors: str = typer.Option("0.5,1.5", help="mnożniki natężenia, po przecinku"),
+    network: str = typer.Option("cityflow_jinan3x4_4ph", "-n", help="base network"),
+    factors: str = typer.Option("0.5,1.5", help="demand factors, comma-separated"),
 ) -> None:
-    """Warianty popytu (scenariusz OOD dla epistemic) -> configs/sim/<sieć>_d*.cfg."""
+    """Demand variants (OOD scenario) -> configs/sim/<network>_d*.cfg."""
     from tsc_marl.domain import demand as module
 
     for f in [float(x) for x in factors.split(",")]:
@@ -155,12 +149,12 @@ def demand(
 
 @app.command()
 def dataset(
-    network: str = typer.Option("cityflow_jinan3x4_4ph", "-n", help="sieć"),
-    expert: str = typer.Option("advancedmp", "-a", help="ekspert do behavior cloningu"),
-    episodes: int = typer.Option(3, help="liczba epizodów (różnią się LOSOWANIEM AWARII)"),
-    replace: bool = typer.Option(False, help="nadpisz istniejący bieg"),
+    network: str = typer.Option("cityflow_jinan3x4_4ph", "-n", help="network"),
+    expert: str = typer.Option("advancedmp", "-a", help="behaviour cloning expert"),
+    episodes: int = typer.Option(3, help="episodes (they differ in the FAILURE DRAW)"),
+    replace: bool = typer.Option(False, help="overwrite an existing run"),
 ) -> None:
-    """Zbiór (stan -> akcja eksperta) dla prototypu 2.0 -> runs/bc/."""
+    """Dataset (state -> expert action) for the uncertainty heads -> runs/bc/."""
     from tsc_marl.uncertainty import dataset as module
 
     print(module.build(network, expert=expert, episodes=episodes, replace=replace))
@@ -168,9 +162,9 @@ def dataset(
 
 @app.command()
 def severity(
-    network: str = typer.Option("cityflow_jinan3x4_4ph", help="sieć, na której mierzymy"),
+    network: str = typer.Option("cityflow_jinan3x4_4ph", help="network to measure on"),
 ) -> None:
-    """Przelicznik dotkliwości awarii sensora -> results/sensor_severity.md."""
+    """Sensor failure severity converter -> results/sensor_severity.md."""
     from tsc_marl.analysis import severity as module
 
     print(module.main(network))
@@ -178,7 +172,7 @@ def severity(
 
 @app.command(context_settings=PASSTHROUGH)
 def core(ctx: typer.Context) -> None:
-    """Rdzeń Fazy 1 — GAT + PPO + CTDE, własna pętla (`tsc core -n ... --seed 0`)."""
+    """The core: GAT + PPO + CTDE with its own loop (`tsc core -n ... --seed 0`)."""
     from tsc_marl.runner import train_core
 
     train_core.main(ctx.args)
@@ -186,106 +180,106 @@ def core(ctx: typer.Context) -> None:
 
 @app.command("eval", context_settings=PASSTHROUGH)
 def evaluate_(ctx: typer.Context) -> None:
-    """Ewaluacja zamrożonej polityki z checkpointu (`tsc eval --load-run ...`)."""
+    """Evaluate a frozen policy from a checkpoint (`tsc eval --load-run ...`)."""
     from tsc_marl.runner import evaluate
 
     evaluate.main(ctx.args)
 
 
-# ------------------------------------------------------------------------- siatki
+# ------------------------------------------------------------------------- suites
 
 
 @suite_app.command("run")
 def suite_run(
-    nazwa: str = typer.Argument(..., help="nazwa albo ścieżka pliku z configs/suites/"),
-    replace: bool = typer.Option(False, "--replace", help="policz ponownie także gotowe punkty"),
-    jobs: int = typer.Option(1, "--jobs", "-j", help="ile punktów liczyć naraz (podprocesy)"),
-    stagger: float = typer.Option(15.0, help="sekundy między startami równoległych punktów"),
+    name: str = typer.Argument(..., help="name or path of a file in configs/suites/"),
+    replace: bool = typer.Option(False, "--replace", help="recompute finished points too"),
+    jobs: int = typer.Option(1, "--jobs", "-j", help="points computed at once (subprocesses)"),
+    stagger: float = typer.Option(15.0, help="seconds between starts of parallel points"),
 ) -> None:
-    """Policz wszystkie punkty siatki (pomija te, które mają aktualny wynik)."""
+    """Compute every grid point (skipping those with a current result)."""
     from tsc_marl.runner import suite
 
-    licznik = suite.run(suite.load(nazwa), replace=replace, jobs=jobs, stagger=stagger)
-    if licznik.get("failed") or licznik.get("timeout"):
+    counts = suite.run(suite.load(name), replace=replace, jobs=jobs, stagger=stagger)
+    if counts.get("failed") or counts.get("timeout"):
         raise typer.Exit(1)
 
 
 @suite_app.command("status")
 def suite_status(
-    nazwa: str = typer.Argument(..., help="nazwa albo ścieżka pliku z configs/suites/"),
+    name: str = typer.Argument(..., help="name or path of a file in configs/suites/"),
 ) -> None:
-    """Stan każdego punktu siatki — także tych jeszcze niepoliczonych."""
+    """State of every grid point, including those not computed yet."""
     from tsc_marl.runner import suite
 
-    wiersze = suite.status(suite.load(nazwa))
-    print(f"{'run_id':52s} {'status':9s} {'aktualny':9s} att_last10")
-    for w in wiersze:
-        att = f"{w['att_last10']:.1f}" if w["att_last10"] is not None else "—"
-        print(f"{w['run_id']:52s} {w['status']:9s} {str(w['aktualny']):9s} {att}")
-    brakuje = sum(1 for w in wiersze if not w["aktualny"])
-    print(f"\n{len(wiersze) - brakuje}/{len(wiersze)} punktów ma aktualny wynik.")
+    rows = suite.status(suite.load(name))
+    print(f"{'run_id':52s} {'status':9s} {'current':9s} att_last10")
+    for r in rows:
+        att = f"{r['att_last10']:.1f}" if r["att_last10"] is not None else "-"
+        print(f"{r['run_id']:52s} {r['status']:9s} {str(r['current']):9s} {att}")
+    missing = sum(1 for r in rows if not r["current"])
+    print(f"\n{len(rows) - missing}/{len(rows)} points have a current result.")
 
 
 @suite_app.command("list")
 def suite_list() -> None:
-    """Wypisz dostępne suite'y."""
+    """List the available suites."""
     from tsc_marl.runner import suite
 
     for path in sorted(suite.SUITES.glob("*.yml")):
         s = suite.load(path)
-        print(f"  {s.name:16s} {s.module:20s} yellow={s.yellow}  {len(s.points())} punktów")
+        print(f"  {s.name:16s} {s.module:20s} yellow={s.yellow}  {len(s.points())} points")
 
 
-# ------------------------------------------------------------------- awarie (T2)
+# ------------------------------------------------------------------- failures
 
 degrade_app = typer.Typer(
-    no_args_is_help=True, help="Zamrożone sterowniki pod awarią sensorów (configs/robustness)."
+    no_args_is_help=True, help="Frozen controllers under sensor failure (configs/robustness)."
 )
 app.add_typer(degrade_app, name="degrade")
 
 
 @degrade_app.command("run")
 def degrade_run(
-    plan: str = typer.Argument(..., help="nazwa albo ścieżka pliku z configs/robustness/"),
-    jobs: int = typer.Option(1, "--jobs", "-j", help="ile punktów liczyć naraz"),
-    replace: bool = typer.Option(False, "--replace", help="policz ponownie także gotowe"),
-    stagger: float = typer.Option(15.0, help="sekundy między startami podprocesów"),
+    plan: str = typer.Argument(..., help="name or path of a file in configs/robustness/"),
+    jobs: int = typer.Option(1, "--jobs", "-j", help="points computed at once"),
+    replace: bool = typer.Option(False, "--replace", help="recompute finished points too"),
+    stagger: float = typer.Option(15.0, help="seconds between subprocess starts"),
     trace: bool = typer.Option(
         False,
         "--trace",
-        help="zapisz ślad bramki per (decyzja, węzeł) do gate_trace.csv — do wyjaśniania "
-        "pojedynczych przełączeń; NIE zmienia decyzji ani odcisku biegu",
+        help="write a per (decision, node) gate trace to gate_trace.csv, to explain "
+        "single switches; changes neither decisions nor the run fingerprint",
     ),
 ) -> None:
-    """Policz brakujące punkty planu (sterownik × sieć × seed, wszystkie scenariusze)."""
+    """Compute the missing plan points (controller x network x seed, all scenarios)."""
     from tsc_marl.robustness.degrade import load_plan
     from tsc_marl.runner import degrade
 
-    licznik = degrade.run_plan(
+    counts = degrade.run_plan(
         load_plan(plan), jobs=jobs, replace=replace, stagger=stagger, trace=trace
     )
-    if licznik.get("failed") or licznik.get("timeout"):
+    if counts.get("failed") or counts.get("timeout"):
         raise typer.Exit(1)
 
 
 @degrade_app.command("status")
 def degrade_status(plan: str = typer.Argument(...)) -> None:
-    """Stan punktów planu — także tych, którym brakuje checkpointu rodzica."""
+    """State of the plan points, including those whose parent checkpoint is missing."""
     from tsc_marl.robustness.degrade import load_plan
     from tsc_marl.runner import degrade
 
-    for w in degrade.status(load_plan(plan)):
-        att = f"{w['att_clean']:.1f}" if w["att_clean"] is not None else "—"
-        # marker TYLKO dla biegu, który istnieje, ale ma inne parametry — brakujący
-        # policzy się sam, bez `--replace`, i mylące byłoby sugerowanie inaczej
-        przestarzaly = w["status"] != "brak" and not w["aktualny"]
-        aktualny = "  NIEAKTUALNY (--replace)" if przestarzaly else ""
-        print(f"{w['run_id']:64s} {w['status']:8s} {att:>7s}  ← {w['rodzic']}{aktualny}")
+    for r in degrade.status(load_plan(plan)):
+        att = f"{r['att_clean']:.1f}" if r["att_clean"] is not None else "-"
+        # marker ONLY for a run that exists with other parameters; a missing one is
+        # computed without `--replace`
+        stale = r["status"] != "missing" and not r["current"]
+        note = "  STALE (--replace)" if stale else ""
+        print(f"{r['run_id']:64s} {r['status']:8s} {att:>7s}  <- {r['parent']}{note}")
 
 
 @degrade_app.command("ood")
 def degrade_ood(plan: str = typer.Argument("t2_ood")) -> None:
-    """Test gałęzi epistemic: polityka vs MaxPressure na nowym ruchu + rozbieżność ensemble."""
+    """Epistemic branch test: policy vs max-pressure on new traffic + ensemble disagreement."""
     from tsc_marl import libsignal
     from tsc_marl.analysis import ood
     from tsc_marl.robustness.degrade import load_plan
@@ -296,19 +290,19 @@ def degrade_ood(plan: str = typer.Argument("t2_ood")) -> None:
 
 @degrade_app.command("report")
 def degrade_report(plan: str = typer.Argument("t2_nomech")) -> None:
-    """Tabela i krzywe degradacji z policzonych biegów -> results/<plan>.md."""
+    """Degradation table and curves from computed runs -> results/<plan>.md."""
     from tsc_marl.analysis import degradation
     from tsc_marl.robustness.degrade import load_plan
 
     print(degradation.main(load_plan(plan)))
 
 
-# ------------------------------------------------------------------------ raporty
+# ------------------------------------------------------------------------ reports
 
 
 @app.command()
 def table() -> None:
-    """Przelicz tabele T1 i GATE Fazy 1 z zapisanych biegów do `results/` (nic nie uruchamia)."""
+    """Rebuild the baseline and core tables from stored runs into `results/` (runs nothing)."""
     from tsc_marl import libsignal
     from tsc_marl.analysis import report
     from tsc_marl.libsignal import experiment
@@ -319,19 +313,19 @@ def table() -> None:
 
 @app.command()
 def runs() -> None:
-    """Wypisz policzone biegi — status, parametry, ATT."""
+    """List computed runs: status, parameters, ATT."""
     import pandas as pd
 
     from tsc_marl.libsignal import experiment
 
     pd.set_option("display.width", 200)
     df = experiment.experiment().results()
-    print("Brak biegów w runs/." if df.empty else df.to_string(index=False))
+    print("No runs in runs/." if df.empty else df.to_string(index=False))
 
 
 @app.command(context_settings=PASSTHROUGH)
 def plot(ctx: typer.Context) -> None:
-    """Krzywe uczenia z runs/ → runs/plots/ (działa też dla biegu w toku)."""
+    """Learning curves from runs/ -> runs/plots/ (also for a run in progress)."""
     from tsc_marl.analysis import plot as plot_module
 
     plot_module.main(ctx.args)
@@ -339,7 +333,7 @@ def plot(ctx: typer.Context) -> None:
 
 @app.command()
 def doctor() -> None:
-    """Sprawdź środowisko: submoduł, SUMO_HOME, wersje, PYTHONHASHSEED."""
+    """Check the environment: submodule, SUMO_HOME, versions, PYTHONHASHSEED."""
     from tsc_marl import libsignal, paths
 
     libsignal.check_ready()
@@ -348,12 +342,12 @@ def doctor() -> None:
     print(f"LibSignal:       {paths.LIBSIGNAL}")
     print(f"SUMO_HOME:       {os.environ.get('SUMO_HOME')}")
     print(f"PYTHONHASHSEED:  {os.environ.get('PYTHONHASHSEED')}")
-    for modul in ("torch", "cityflow", "torch_geometric"):
+    for module in ("torch", "cityflow", "torch_geometric"):
         try:
-            m = __import__(modul)
-            print(f"{modul + ':':16s} {getattr(m, '__version__', 'ok')}")
+            m = __import__(module)
+            print(f"{module + ':':16s} {getattr(m, '__version__', 'ok')}")
         except ImportError as e:
-            print(f"{modul + ':':16s} BRAK ({e})")
+            print(f"{module + ':':16s} MISSING ({e})")
 
 
 if __name__ == "__main__":

@@ -1,18 +1,21 @@
+"""UW-attention layer (`core.uw_attention`)."""
+
 import pytest
 import torch
 from agent.colight import MultiHeadAttModel
 
-from tests.core.test_ppo import ROADNET
+from tsc_marl import paths
 from tsc_marl.core.graph import RoadNetGraph
 from tsc_marl.core.uw_attention import UncertaintyWeightedAttention
 
+ROADNET = paths.DATA / "raw_data" / "jinan_3x4" / "roadnet_3_4.json"
 D, DV, D_OUT, NV = 128, 16, 128, 5
 
 
 @pytest.fixture(scope="module")
 def graph():
     if not ROADNET.is_file():
-        pytest.skip()
+        pytest.skip(f"missing roadnet {ROADNET}")
     return RoadNetGraph.from_roadnet(ROADNET)
 
 
@@ -30,123 +33,90 @@ def make_pair(seed: int = 0):
 
 
 def test_no_op(graph):
-    """Przy log ρ = 0 warstwa musi liczyć DOKŁADNIE to samo co oryginał.
-
-    Bez tego testu każda późniejsza różnica w T2 jest niemożliwa do przypisania:
-    nie wiadomo, czy to zasługa modulacji, czy skutek tego, że przepisując
-    `message` coś się po drodze zgubiło.
-    """
+    """With log_rho = 0 the layer computes EXACTLY what the original does;
+    otherwise no later difference could be attributed to the modulation."""
     orig, uw = make_pair()
     x = observations(graph)
     ei = graph.edge_index
 
     expected = orig(x, ei)
-    assert torch.equal(uw(x, ei), expected)  # ścieżka log_rho=None
+    assert torch.equal(uw(x, ei), expected)  # log_rho=None path
 
-    n_edges = ei.shape[1] + graph.n_nodes  # E + N, po pętlach
+    n_edges = ei.shape[1] + graph.n_nodes  # E + N, after self-loops
     assert torch.equal(uw(x, ei, log_rho=torch.zeros(n_edges)), expected)
 
 
-# Dlaczego −1e9, a nie −inf i nie −50. `exp(-1e9 - max_i)` podpływa w float32 do
-# DOKŁADNEGO zera, więc α_ij = 0/norm = 0 co do bitu, wkład krawędzi to zera i
-# suma agregacji się nie rusza — stąd `torch.equal` zamiast tolerancji.
-# −50 dałoby ~1e−22, czyli niezerowy wkład i słabszy test na `allclose`.
-# −inf dałoby NaN w dniu, w którym WSZYSTKIE krawędzie wchodzące do i będą
-# wygaszone: `max_i` grupy to wtedy −inf, a `-inf - (-inf)` to NaN.
+# Why -1e9, not -inf or -50: in float32 exp(-1e9 - max_i) is EXACTLY zero, so the
+# edge contributes nothing and `torch.equal` works. -50 gives ~1e-22 (a weaker
+# test); -inf gives NaN once ALL edges into i are suppressed (-inf - (-inf)).
 SUPPRESS = -1e9
 
 
-def test_wygaszenie_odcina_wklad_sasiada(graph):
-    """Bardzo ujemne log ρ na j→i → wyjście węzła i przestaje zależeć od x_j.
-
-    To jest właściwość, dla której cała modyfikacja powstała: w oryginale
-    `e_ij ≥ 0`, więc `exp(e_ij) ≥ 1` i sąsiada nie da się wyzerować, tylko
-    rozcieńczyć. Jeśli ten test przechodzi, log ρ faktycznie schodzi poniżej zera.
-
-    Dwie asercje kontrolne nie są ozdobą: bez nich test jest zielony również
-    wtedy, gdy patrzę na wiersz, który na x_j nigdy nie wisiał (pomylony kierunek
-    krawędzi — `edge_index[0]` to ŹRÓDŁO), albo gdy podmieniona obserwacja wcale
-    się nie różni od oryginalnej.
-    """
+def test_suppression_cuts_the_neighbour_off(graph):
+    """A very negative log_rho on j->i makes node i's output independent of x_j:
+    the property the modification exists for (in the original exp(e_ij) >= 1, so a
+    neighbour can only be diluted). The two control asserts make sure the test is
+    not green for a row that never depended on x_j, or for an unchanged x_j."""
     _, uw = make_pair()
     ei = graph.edge_index
     n_edges = ei.shape[1] + graph.n_nodes
 
-    # Krawędź wybrana przez POZYCJĘ w edge_index, bo to jej pozycja indeksuje
-    # log_rho; parę (źródło, cel) odczytuję z niej, a nie odwrotnie.
+    # The edge is chosen by its POSITION in edge_index, which indexes log_rho.
     e = 3
     j, i = ei[:, e].tolist()
     assert [tuple(col) for col in ei.t().tolist()].count((j, i)) == 1, (
-        "para (j, i) powtarza się w edge_index — wygaszenie jednej kolumny "
-        "nie odcina wtedy całego kanału z x_j do i"
+        "(j, i) repeats in edge_index; suppressing one column would not cut x_j off"
     )
 
     x = observations(graph)
-    x_zmienione = x.clone()
-    x_zmienione[j] = observations(graph, seed=2)[j]
+    x_changed = x.clone()
+    x_changed[j] = observations(graph, seed=2)[j]
 
     log_rho = torch.zeros(n_edges)
     log_rho[e] = SUPPRESS
 
-    wygaszone = uw(x, ei, log_rho=log_rho)
-    wygaszone_po = uw(x_zmienione, ei, log_rho=log_rho)
-    assert torch.equal(wygaszone[i], wygaszone_po[i])
+    suppressed = uw(x, ei, log_rho=log_rho)
+    suppressed_after = uw(x_changed, ei, log_rho=log_rho)
+    assert torch.equal(suppressed[i], suppressed_after[i])
 
-    # Kontrola 1: x_zmienione naprawdę jest inne — wiersz samego j musi drgnąć.
-    assert not torch.equal(wygaszone, wygaszone_po)
+    # Control 1: x_changed really differs, so row j itself must move.
+    assert not torch.equal(suppressed, suppressed_after)
 
-    # Kontrola 2: bez wygaszenia ten sam wiersz i REAGUJE na x_j. Inaczej
-    # równość wyżej nic nie dowodzi.
-    zera = torch.zeros(n_edges)
-    assert not torch.equal(uw(x, ei, log_rho=zera)[i], uw(x_zmienione, ei, log_rho=zera)[i])
+    # Control 2: without suppression row i DOES react to x_j.
+    zeros = torch.zeros(n_edges)
+    assert not torch.equal(uw(x, ei, log_rho=zeros)[i], uw(x_changed, ei, log_rho=zeros)[i])
 
 
-def test_niezmienniczosc_na_wspolna_stala(graph):
-    """Stała dodana do log ρ WSZYSTKICH krawędzi wchodzących do i → wyjście i stoi.
-
-    To jest Załącznik A3b, zapisany jako test, a nie jako zdanie w tekście:
-    softmax normalizuje w grupie, więc attention widzi wyłącznie WZGLĘDNĄ
-    wiarygodność sąsiadów. „Wszyscy sąsiedzi i są tak samo niewiarygodni" jest
-    dla tej warstwy nieodróżnialne od „wszyscy są wiarygodni" — dlatego samo
-    UW-attention nie wystarczy i potrzebny jest osobny fallback.
-
-    Stąd też hipoteza z Kroku 5: modulacja pomaga przy JEDNYM zepsutym sąsiedzie,
-    a nie pomaga przy martwym całym skrzyżowaniu.
-
-    `allclose`, nie `equal`: `(e + c) - (max + c)` to nie to samo co `e - max`
-    co do bitu. Niezmienniczość jest matematyczna, arytmetyka float32 nie.
-    """
+def test_invariance_to_a_common_constant(graph):
+    """A constant added to log_rho of ALL edges into i leaves i's output unchanged:
+    softmax sees only RELATIVE reliability, so "all neighbours equally unreliable"
+    is indistinguishable from "all reliable" for this layer. `allclose`, because
+    float32 arithmetic is not exactly invariant."""
     _, uw = make_pair()
     ei = graph.edge_index
     n_edges = ei.shape[1] + graph.n_nodes
 
     i = int(ei[1, 3])
-    # Grupa softmaxu węzła i: krawędzie j→i ORAZ pętla własna i→i, która po
-    # `add_self_loops` leży na pozycji E + i. Pominięcie pętli to dokładnie ten
-    # błąd, przez który kontrakt warstwy brzmi [E + N], a nie [E].
-    wchodzace = torch.cat([(ei[1] == i).nonzero().flatten(), torch.tensor([ei.shape[1] + i])])
+    # i's softmax group: edges j->i AND the self-loop i->i at position E + i, which
+    # is why the layer's contract is [E + N], not [E].
+    incoming = torch.cat([(ei[1] == i).nonzero().flatten(), torch.tensor([ei.shape[1] + i])])
 
     x = observations(graph)
-    odniesienie = uw(x, ei, log_rho=torch.zeros(n_edges))
+    reference = uw(x, ei, log_rho=torch.zeros(n_edges))
 
     log_rho = torch.zeros(n_edges)
-    log_rho[wchodzace] = -3.7
-    assert torch.allclose(uw(x, ei, log_rho=log_rho)[i], odniesienie[i], atol=1e-6)
+    log_rho[incoming] = -3.7
+    assert torch.allclose(uw(x, ei, log_rho=log_rho)[i], reference[i], atol=1e-6)
 
-    # Kontrola: gdyby warstwa log ρ po prostu IGNOROWAŁA (np. argument nie dotarł
-    # do `message`), asercja wyżej też byłaby zielona. Ta sama stała na WSZYSTKICH
-    # krawędziach oprócz pętli własnej łamie grupę i wiersz i musi drgnąć.
+    # Control: a layer that IGNORED log_rho would also pass above. The constant on
+    # all edges but the self-loop breaks the group, so row i must move.
     log_rho[ei.shape[1] + i] = 0.0
-    assert not torch.allclose(uw(x, ei, log_rho=log_rho)[i], odniesienie[i], atol=1e-6)
+    assert not torch.allclose(uw(x, ei, log_rho=log_rho)[i], reference[i], atol=1e-6)
 
 
-def test_klucze_state_dict_jak_w_oryginale():
-    """Checkpointy GATE ładują się do nowej warstwy bez tłumaczenia nazw.
-
-    Warstwa nie ma prawa dołożyć ani jednego parametru: log ρ przychodzi z
-    zewnątrz, więc modulacja jest bezparametrowa i wytrenowane wagi zostają
-    wymienne w obie strony.
-    """
+def test_state_dict_keys_match_the_original():
+    """The layer adds no parameter (log_rho comes from outside), so trained
+    weights load both ways without renaming."""
     orig, uw = make_pair()
     assert uw.state_dict().keys() == orig.state_dict().keys()
-    orig.load_state_dict(uw.state_dict())  # strict=True — w drugą stronę też
+    orig.load_state_dict(uw.state_dict())  # strict=True, the other way too

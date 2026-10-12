@@ -1,24 +1,20 @@
-"""Postawienie procesu LibSignala pod zarejestrowanym biegiem `runlog`.
+"""Setting up a LibSignal process under a registered `runlog` run.
 
-Jedyne miejsce w repo, które zna KOLEJNOŚĆ wywołań `common.interface.*`. Ta
-kolejność jest wrażliwa i już raz kosztowała cichy błąd: `root_dir` ustawiony po
-`Logger_path_Interface` był ignorowany, przez co `att_last10` przyjmowało wartość
-`att` (27% różnicy na Advanced-CoLighcie). Dopóki sekwencja stała w trzech
-kopiach (`runner/train.py`, `runner/train_core.py`, `runner/evaluate.py`), każda
-poprawka musiała trafić w trzy miejsca — a `evaluate.py` zdążył się już rozjechać.
+The only place that knows the ORDER of `common.interface.*` calls. The order is
+sensitive and has already caused a silent bug (a `root_dir` set after
+`Logger_path_Interface` was ignored, so `att_last10` took the value of `att`).
+One canonical sequence serves every entry point.
 
-Szew jest tu, gdzie wejścia naprawdę się różnią: sesja kończy się w stanie
-„Registry zapełnione, świat jeszcze NIE zbudowany". `runner/train.py` oddaje budowę
-świata `BaseTrainerowi`, `runner/train_core.py` stawia go sam, `evaluate.py` dostaje go od
-runnera — więc świat nie może powstawać tutaj, bo wróciłby `if` w środku
-sekwencji.
+The seam is where entry points really differ: a session ends with "Registry
+filled, world NOT built yet". `runner/train.py` leaves the world to LibSignal's
+trainer, `runner/train_core.py` builds it itself, `evaluate.py` gets it from the
+runner.
 
     with session(args) as s:
-        ...  # s.run, s.config, s.logger — Registry gotowe
+        ...  # s.run, s.config, s.logger, Registry ready
 
-Ciało `with` leci POD otwartym biegiem: pad przy stawianiu świata ma dać status
-`failed`, a nie zostawić katalog na wieki w `running` (co blokuje ponowne
-uruchomienie przez `RunExists`).
+The `with` body runs UNDER the open run: a failure while building the world gives
+status `failed` instead of leaving the directory `running` forever.
 """
 
 from __future__ import annotations
@@ -32,13 +28,13 @@ from typing import Any
 from tsc_marl import libsignal
 from tsc_marl.seeding import set_global_seed
 
-# Kolejność, w jakiej `run.py` LibSignala zapełnia Registry. Trzymana jako dane,
-# żeby dała się sprawdzić testem — komentarz nie chroni przed niczym.
+# The order in which LibSignal's `run.py` fills the Registry, kept as data so a
+# test can check it.
 INTERFACE_ORDER = (
     "Command_Setting_Interface",
     "Logger_param_Interface",
     "World_param_Interface",
-    "Graph_World_Interface",  # tylko gdy model.graphic — patrz build_interfaces
+    "Graph_World_Interface",  # only with model.graphic, see build_interfaces
     "Logger_path_Interface",
     "Trainer_param_Interface",
     "ModelAgent_param_Interface",
@@ -47,31 +43,25 @@ INTERFACE_ORDER = (
 
 @dataclass
 class Session:
-    """Co wejście dostaje od sesji. `args` niesiemy dalej, bo `experiment.ingest`
-    i `engine_log_dir` odtwarzają z niego ścieżki logów silnika."""
+    """What an entry point gets from the session; `args` is kept because
+    `experiment.engine_log_dir` rebuilds engine log paths from it."""
 
-    run: Any  # runlog.Run — bieg już otwarty
+    run: Any  # runlog.Run, already open
     config: dict[str, Any]
     logger: logging.Logger
     args: Any
-    device: Any = "cpu"  # torch.device — rozwiązane z `--ngpu`, patrz `torch_device`
+    device: Any = "cpu"  # torch.device resolved from `--ngpu`, see `torch_device`
 
 
 def torch_device(ngpu: str):
-    """`--ngpu` → `torch.device`. JEDYNE miejsce, które tłumaczy jedno na drugie.
+    """`--ngpu` -> `torch.device`, the ONLY translation between the two.
 
-    Pułapka, dla której ta funkcja istnieje osobno: `session()` ustawia
-    `CUDA_VISIBLE_DEVICES=<ngpu>` PRZED pierwszym dotknięciem CUDA przez torcha.
-    Po tym remapowaniu wybrana karta jest dla torcha ZAWSZE indeksem 0 — więc
-    `--ngpu 2` daje `cuda:0`, a nie `cuda:2`. Zbudowanie `cuda:2` wywaliłoby się
-    na „invalid device ordinal", bo torch widzi wtedy dokładnie jedną kartę.
-
-    Brak karty przy jawnie zażądanym GPU NIE jest błędem twardym (bieg na CPU
-    policzy się poprawnie, tylko wolniej), ale musi być głośny: cicha degradacja
-    30-godzinnej siatki do CPU to najgorszy możliwy wariant. Ostrzeżenie wypisuje
-    `session()`, gdy ma już logger biegu.
+    `session()` sets `CUDA_VISIBLE_DEVICES=<ngpu>` before torch touches CUDA, after
+    which the chosen card is ALWAYS index 0 for torch: `--ngpu 2` gives `cuda:0`.
+    A missing card with a requested GPU is not a hard error (the run is correct on
+    the CPU, only slower), but it must be loud; `session()` logs the warning.
     """
-    import torch  # noqa: PLC0415 - ciężki import, tylko gdy naprawdę potrzebny
+    import torch  # heavy, imported only when needed
 
     if str(ngpu) == "-1" or not torch.cuda.is_available():
         return torch.device("cpu")
@@ -79,27 +69,21 @@ def torch_device(ngpu: str):
 
 
 def register_engine_components() -> None:
-    """Importy WYŁĄCZNIE dla efektu ubocznego: dekoratory zapełniają Registry,
-    z którego korzystają interfejsy. Bez `task` i `trainer` `Registry.mapping[...]`
-    leci KeyError. Musi być PO `libsignal.bootstrap()` — wcześniej submodułu nie
-    ma na sys.path."""
+    """Imports for their side effect only: decorators fill the Registry the
+    interfaces use. Must run AFTER `libsignal.bootstrap()`."""
     import agent  # noqa: F401
     import dataset  # noqa: F401
     import task  # noqa: F401
     import trainer  # noqa: F401
 
-    import tsc_marl.libsignal.agents  # noqa: F401 - rejestruje NASZYCH agentów
-    import tsc_marl.libsignal.sumo_world  # noqa: F401 - nadpisuje 'sumo' w world_mapping
+    import tsc_marl.libsignal.agents  # noqa: F401 - registers OUR agents
+    import tsc_marl.libsignal.sumo_world  # noqa: F401 - replaces 'sumo' in world_mapping
 
 
 def build_interfaces(config: dict[str, Any]) -> list[str]:
-    """Zapełnia Registry w kolejności z `INTERFACE_ORDER`. Zwraca nazwy REALNIE
-    wywołanych interfejsów, żeby test mógł przypiąć kolejność.
-
-    `Graph_World_Interface` warunkowo — tak jak w `run.py`. Rdzeń nie potrzebuje
-    tu wyjątku: `configs/tsc/gatppo.yml` ma `graphic: True`, a `require_graph=True`
-    w `session()` pilnuje, żeby to zostało prawdą.
-    """
+    """Fill the Registry in `INTERFACE_ORDER`; returns the interfaces REALLY called,
+    so a test can pin the order. `Graph_World_Interface` is conditional, as in
+    `run.py`; the core declares `graphic: True` and `session()` checks it."""
     from common import interface
     from common.registry import Registry
 
@@ -121,8 +105,8 @@ def build_interfaces(config: dict[str, Any]) -> list[str]:
         )
         interface.Graph_World_Interface(roadnet)
         if config["command"]["world"] == "sumo":
-            # graf LibSignala na sieci z OSM ma 1 krawędź na 25 węzłów (Kraków) —
-            # podmieniamy go dla WSZYSTKICH agentów grafowych, patrz `sumo_world.build_graph`
+            # LibSignal's graph of an OSM network has 1 edge for 25 nodes (Krakow);
+            # replaced for ALL graph agents, see `sumo_world.build_graph`
             from tsc_marl.libsignal.sumo_world import build_graph
 
             interface.Graph_World_Interface.graph = build_graph(roadnet)
@@ -130,7 +114,7 @@ def build_interfaces(config: dict[str, Any]) -> list[str]:
 
     interface.Logger_path_Interface(config)
     called.append("Logger_path_Interface")
-    # katalog musi istnieć, zanim cokolwiek zacznie do niego pisać
+    # the directory must exist before anything writes to it
     os.makedirs(Registry.mapping["logger_mapping"]["path"].path, exist_ok=True)
     interface.Trainer_param_Interface(config)
     called.append("Trainer_param_Interface")
@@ -141,8 +125,8 @@ def build_interfaces(config: dict[str, Any]) -> list[str]:
 
 
 def merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
-    """Rekurencyjne scalenie nadpisań w config (in place). Płytkie `update`
-    skasowałoby całą sekcję `model` przy nadpisaniu jednego pola."""
+    """Recursive in-place merge of overrides; a shallow `update` would replace the
+    whole `model` section when overriding one field."""
     for key, value in patch.items():
         if isinstance(value, dict) and isinstance(base.get(key), dict):
             merge(base[key], value)
@@ -152,27 +136,20 @@ def merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
 
 
 def resolve(args, config_patch: dict[str, Any] | None = None) -> tuple[dict[str, Any], str]:
-    """Config po WSZYSTKICH nadpisaniach + sufiks `run_id`.
+    """Config after ALL overrides, plus the `run_id` suffix.
 
-    Wspólne dla procesu liczącego (`session`) i dla planowania siatki
-    (`suite.plan`). Gdyby liczyły config osobno, `skip-if-done` rozjechałby się
-    po cichu: runner uznałby punkt za policzony, choć dziecko policzyłoby go
-    z innymi hiperparametrami.
-
-    Kolejność nadpisań: config agenta → `overrides` suite'a → `config_patch`
-    wołającego. Ostatni wygrywa, bo `evaluate.py` musi wymusić `train_model:
-    False` niezależnie od tego, co deklaruje suite.
+    Shared by the computing process (`session`) and suite planning (`suite.plan`);
+    separate computations would let skip-if-done drift silently. Override order:
+    agent config -> suite `overrides` -> the caller's `config_patch`; the last wins,
+    because `evaluate.py` must force `train_model: False` whatever the suite says.
     """
     from tsc_marl.libsignal import experiment
 
     config = experiment.resolve_config(args)
     suffix = ""
     if getattr(args, "suite", None):
-        from tsc_marl.runner import suite as suite_module
-
-        loaded = suite_module.load(args.suite)
-        merge(config, loaded.overrides)
-        suffix = loaded.suffix
+        overrides, suffix = experiment.suite_overrides(args.suite)
+        merge(config, overrides)
     if config_patch:
         merge(config, config_patch)
     return config, suffix
@@ -189,17 +166,14 @@ def session(
     require_graph: bool = False,
     log_level: int | None = None,
 ):
-    """Bootstrap → seed → config → rejestracja biegu → interfejsy → logger.
+    """Bootstrap -> seed -> config -> run registration -> interfaces -> logger.
 
-    `config_patch` jest nakładany PRZED `build_params` i to nie jest szczegół:
-    `train_model`/`test_model` (ewaluacja) i nadpisania z suite'a siedzą w sekcji
-    `model`, która wchodzi do `config_hash`. Nałożone później zmieniałyby
-    zachowanie biegu, nie zmieniając jego odcisku — czyli `skip-if-done`
-    pomijałby bieg z innymi hiperparametrami. To ta sama klasa błędu co `root_dir`.
+    `config_patch` is applied BEFORE `build_params`: `train_model`/`test_model` and
+    suite overrides live in the `model` section, part of the fingerprint; applied
+    later they would change behaviour without changing the fingerprint.
     """
     libsignal.bootstrap()
-    # jedna ścieżka do GPU dla treningu I ewaluacji: polityka ma być testowana na
-    # tym samym urządzeniu, na którym powstała
+    # one path to the GPU for training AND evaluation
     os.environ["CUDA_VISIBLE_DEVICES"] = args.ngpu
     set_global_seed(args.seed)
 
@@ -212,12 +186,12 @@ def session(
 
     if require_graph and not config["model"].get("graphic", False):
         raise SystemExit(
-            f"config agenta '{args.agent}' nie ma `graphic: True`, a to wejście wymaga grafu "
-            "(Graph_World_Interface). Dopisz `graphic: True` w configs/tsc/."
+            f"agent config '{args.agent}' lacks `graphic: True`, and this entry needs the "
+            "graph (Graph_World_Interface). Add `graphic: True` in configs/tsc/."
         )
 
-    # rejestracja PRZED interfejsami: `root_dir` musi być ustawiony, zanim
-    # LibSignal policzy sobie ścieżki wyjściowe w Logger_path_Interface
+    # register BEFORE the interfaces: `root_dir` must be set before LibSignal
+    # computes its output paths in Logger_path_Interface
     exp = experiment.experiment()
     params = experiment.build_params(args, config) | dict(params_extra or {})
     rid = (
@@ -230,9 +204,9 @@ def session(
     if replace is None:
         replace = getattr(args, "replace", False)
     run = exp.start(rid, params, config=config, repos=experiment.repos(), replace=replace)
-    # artefakty silnika (checkpointy, logi, replaye) lądują WEWNĄTRZ katalogu biegu,
-    # dzięki czemu „jeden bieg = jeden katalog" jest prawdą, a data/ zostaje katalogiem
-    # wejściowym. Działa dzięki patchowi get_output_file_path w submodule.
+    # engine artefacts (checkpoints, logs, replays) go INSIDE the run directory, so
+    # "one run = one directory" holds and data/ stays input-only (thanks to the
+    # get_output_file_path patch in the submodule)
     config["logger"]["root_dir"] = str(run.engine_dir)
 
     if log_level is None:
@@ -244,17 +218,15 @@ def session(
         device = torch_device(args.ngpu)
         if args.ngpu != "-1" and device.type == "cpu":
             logger.warning(
-                f"--ngpu {args.ngpu} zażądane, ale torch nie widzi CUDA — bieg leci na CPU. "
-                "Na maszynie z kartą sprawdź `make setup-gpu` (torch z indeksu cu121)."
+                f"--ngpu {args.ngpu} requested, but torch sees no CUDA; running on the CPU. "
+                "On a GPU machine check `make setup-gpu` (torch from the cu121 index)."
             )
         yield Session(run=run, config=config, logger=logger, args=args, device=device)
 
 
 def world_kind(network: str) -> str:
-    """`sumo` dla sieci SUMO (`configs/sim/sumo_*.cfg`, Kraków), `cityflow` dla reszty.
-
-    Po nazwie, bo tak nazwane są configi — a `standalone_world` (ewaluacja T2, zrzuty
-    BC, kalibracja progu) nie dostaje flagi `-w` z linii poleceń jak trening."""
+    """`sumo` for SUMO networks (`configs/sim/sumo_*.cfg`), `cityflow` otherwise; by
+    name, because `standalone_world` gets no `-w` flag."""
     return "sumo" if network.startswith("sumo_") else "cityflow"
 
 
@@ -266,20 +238,13 @@ def standalone_world(
     config_patch: dict[str, Any] | None = None,
     n_agents: int | None = None,
 ):
-    """Świat LibSignala + agenci POZA pętlą treningową — diagnostyka i zrzuty danych.
+    """A LibSignal world and agents OUTSIDE the training loop (evaluation,
+    diagnostics, datasets). No `runlog` run is opened here; a caller that wants
+    provenance opens one. Everything runs under `sim_configs_untouched`, since
+    `build_config` writes replay paths into `configs/sim/*.cfg`.
 
-    `session()` kończy się w stanie „Registry zapełnione, świat NIE zbudowany",
-    bo każde wejście stawia go inaczej; tutaj stawiamy go sami. Bieg `runlog`
-    NIE jest tu zakładany: pomiar przelicznika albo zrzut zbioru to nie to samo
-    co bieg eksperymentu, a wołający, który chce proweniencji, otwiera bieg sam.
-
-    Wszystko idzie pod `sim_configs_untouched`, bo `build_config` DOPISUJE do
-    `configs/sim/*.cfg` ścieżki logów replaya ze znacznikiem czasu — bez tego
-    samo policzenie diagnostyki brudzi wersjonowany config.
-
-    -> (world, agents, config). `n_agents` domyślnie po jednym na skrzyżowanie
-    (tak zbudowane są metody MP-owe); modele współdzielone, jak Advanced-CoLight,
-    biorą `n_agents=1`.
+    -> (world, agents, config). `n_agents` defaults to one per intersection (the
+    max-pressure methods); shared models such as Advanced-CoLight take `n_agents=1`.
     """
     libsignal.bootstrap()
     register_engine_components()
@@ -287,7 +252,7 @@ def standalone_world(
     from common.registry import Registry
 
     from tsc_marl import paths
-    from tsc_marl.runner.train import parse_args
+    from tsc_marl.libsignal.experiment import parse_args
 
     kind = world_kind(network)
     args = parse_args(["-a", agent, "-w", kind, "-n", network])
@@ -298,8 +263,8 @@ def standalone_world(
         cfg = paths.CONFIGS / "sim" / f"{network}.cfg"
         thread = config["trainer"].get("thread", 4)
         if kind == "sumo":
-            # adapter `sumo_world` (zarejestrowany przez `register_engine_components`),
-            # nie upstreamowy `world_sumo` — ta sama ścieżka co `tsc core -w sumo`
+            # the `sumo_world` adapter (registered above), not upstream `world_sumo`:
+            # the same path as `tsc core -w sumo`
             world = Registry.mapping["world_mapping"]["sumo"](str(cfg), thread, interface="libsumo")
         else:
             from world.world_cityflow import World

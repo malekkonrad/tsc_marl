@@ -1,8 +1,9 @@
-"""Testy sterownika-ensemble i planu z wagami z sieci treningowej (test gałęzi epistemic).
+"""Ensemble controller and plans with weights from the training network.
 
-Dwie ciche awarie do złapania: (1) MI liczone odwrotnie albo po złej osi — ensemble
-zgodnych actorów musi dawać ZERO; (2) szablon rodzica sięgający po wagi z sieci
-EWALUACJI zamiast treningowej — `{base}` musi zdjąć sufiks wariantu ruchu.
+Two silent failures to catch: (1) MI computed the wrong way round or over the
+wrong axis (agreeing actors must give ZERO); (2) a parent template taking the
+weights from the EVALUATION network instead of the training one (`{base}` must
+strip the traffic-variant suffix).
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from tsc_marl.robustness import degrade as d
 
 
 class Fixed(nn.Module):
-    """Actor o stałych logitach niezależnych od wejścia."""
+    """Actor with constant logits independent of the input."""
 
     def __init__(self, logits):
         super().__init__()
@@ -33,7 +34,7 @@ EI = torch.zeros((2, 0), dtype=torch.long)
 OBS = np.zeros((3, 4), np.float32)
 
 
-def test_zgodne_actory_daja_zerowa_rozbieznosc():
+def test_agreeing_actors_give_zero_disagreement():
     ens = c.EnsembleController([Fixed([2.0, 0.0]), Fixed([2.0, 0.0])], EI)
     actions = ens.act(OBS)
     stats = ens.episode_stats()
@@ -42,16 +43,16 @@ def test_zgodne_actory_daja_zerowa_rozbieznosc():
     assert stats["ens_disagree"] == 0.0
 
 
-def test_rozne_actory_daja_rozbieznosc_a_decyduje_pierwszy():
+def test_different_actors_disagree_and_the_first_decides():
     ens = c.EnsembleController([Fixed([3.0, 0.0]), Fixed([0.0, 3.0]), Fixed([0.0, 3.0])], EI)
     actions = ens.act(OBS)
     stats = ens.episode_stats()
-    assert actions.tolist() == [0, 0, 0], "decyduje pierwszy actor, nie większość"
+    assert actions.tolist() == [0, 0, 0], "the first actor decides, not the majority"
     assert stats["ens_mi"] > 0.1
-    assert stats["ens_disagree"] == pytest.approx(1.0)  # obaj pozostali wybraliby inaczej
+    assert stats["ens_disagree"] == pytest.approx(1.0)  # both others would choose differently
 
 
-def test_statystyki_resetuja_sie_na_epizod():
+def test_stats_reset_per_episode():
     ens = c.EnsembleController([Fixed([3.0, 0.0]), Fixed([0.0, 3.0])], EI)
     ens.act(OBS)
     ens.reset_stats()
@@ -68,11 +69,11 @@ def test_statystyki_resetuja_sie_na_epizod():
         ("cityflow_hangzhou4x4", "cityflow_hangzhou4x4"),
     ],
 )
-def test_base_zdejmuje_tylko_sufiks_ruchu(network, base):
+def test_base_strips_only_the_traffic_suffix(network, base):
     assert d.base_network(network) == base
 
 
-def test_plan_ensemble_jeden_punkt_i_pieciu_rodzicow(tmp_path):
+def test_ensemble_plan_one_unit_five_parents(tmp_path):
     p = tmp_path / "ood.yml"
     p.write_text(
         textwrap.dedent(
@@ -96,8 +97,8 @@ def test_plan_ensemble_jeden_punkt_i_pieciu_rodzicow(tmp_path):
     assert plan.kind("gatppo_ens") == "ensemble" and plan.kind("gatppo") == "policy"
 
 
-def test_ensemble_tylko_z_actorow_rdzenia(tmp_path):
-    p = tmp_path / "zly.yml"
+def test_ensemble_only_from_core_actors(tmp_path):
+    p = tmp_path / "bad.yml"
     p.write_text("networks: [x]\ncontrollers:\n  e: {agent: efficientmp, ensemble: [0, 1]}\n")
     with pytest.raises(SystemExit, match="ensemble"):
         d.load_plan(p)

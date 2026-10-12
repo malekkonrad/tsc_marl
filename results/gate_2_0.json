@@ -33,7 +33,7 @@
   "b_epistemic_gain_ood": 0.035561926662921906,
   "b_epistemic_gain_noise": 0.010937847197055817,
   "b_ood_groups": {
-   "popyt \u00d7": {
+   "demand x": {
     "edl_total": 0.20652490854263306,
     "edl_total_dec": 0.16043621301651,
     "edl_epistemic": 0.035561926662921906,
@@ -41,7 +41,7 @@
     "ens_epistemic": -0.010636180639266968,
     "ens_epistemic_dec": -0.019321143627166748
    },
-   "wzorzec": {
+   "pattern": {
     "edl_total": 0.13101661205291748,
     "edl_total_dec": 0.10853570699691772,
     "edl_epistemic": 0.026055268943309784,
@@ -49,7 +49,7 @@
     "ens_epistemic": -0.010639369487762451,
     "ens_epistemic_dec": -0.012483447790145874
    },
-   "topologia": {
+   "topology": {
     "edl_total": 0.15839409828186035,
     "edl_total_dec": 0.14635562896728516,
     "edl_epistemic": 0.026449240744113922,
@@ -82,7 +82,7 @@
   {
    "dataset": "",
    "scenario": "clean",
-   "trenowany": true,
+   "trained": true,
    "acc": 0.75,
    "ece": 0.11118636280298233,
    "edl_total": 0.5704600811004639,
@@ -102,7 +102,7 @@
   {
    "dataset": "",
    "scenario": "drift0p2",
-   "trenowany": false,
+   "trained": false,
    "acc": 0.7176511954992968,
    "ece": 0.13859012722969055,
    "edl_total": 0.5637997984886169,
@@ -122,7 +122,7 @@
   {
    "dataset": "",
    "scenario": "drift0p3",
-   "trenowany": false,
+   "trained": false,
    "acc": 0.6874120956399438,
    "ece": 0.17914405465126038,
    "edl_total": 0.5572443008422852,
@@ -142,7 +142,7 @@
   {
    "dataset": "",
    "scenario": "gauss1",
-   "trenowany": true,
+   "trained": true,
    "acc": 0.6047819971870605,
    "ece": 0.20413142442703247,
    "edl_total": 0.6223158836364746,
@@ -162,7 +162,7 @@
   {
    "dataset": "",
    "scenario": "gauss2",
-   "trenowany": true,
+   "trained": true,
    "acc": 0.48628691983122363,
    "ece": 0.30498671531677246,
    "edl_total": 0.6208540201187134,
@@ -182,7 +182,7 @@
   {
    "dataset": "",
    "scenario": "gauss3p5",
-   "trenowany": false,
+   "trained": false,
    "acc": 0.41279887482419125,
    "ece": 0.3644375801086426,
    "edl_total": 0.5949254035949707,
@@ -202,7 +202,7 @@
   {
    "dataset": "",
    "scenario": "gauss4",
-   "trenowany": false,
+   "trained": false,
    "acc": 0.3990857946554149,
    "ece": 0.38803789019584656,
    "edl_total": 0.5800074934959412,
@@ -222,7 +222,7 @@
   {
    "dataset": "",
    "scenario": "mask0p25",
-   "trenowany": true,
+   "trained": true,
    "acc": 0.6638537271448663,
    "ece": 0.17045757174491882,
    "edl_total": 0.5879103541374207,
@@ -242,7 +242,7 @@
   {
    "dataset": "",
    "scenario": "mask0p25_intersection",
-   "trenowany": false,
+   "trained": false,
    "acc": 0.6216596343178622,
    "ece": 0.17634618282318115,
    "edl_total": 0.640845537185669,
@@ -262,7 +262,7 @@
   {
    "dataset": "",
    "scenario": "mask0p5",
-   "trenowany": false,
+   "trained": false,
    "acc": 0.5506329113924051,
    "ece": 0.25587698817253113,
    "edl_total": 0.6123553514480591,
@@ -282,7 +282,7 @@
   {
    "dataset": "",
    "scenario": "urand3p5",
-   "trenowany": false,
+   "trained": false,
    "acc": 0.4859353023909986,
    "ece": 0.30412131547927856,
    "edl_total": 0.6309908628463745,
@@ -302,7 +302,7 @@
   {
    "dataset": "d0p75",
    "scenario": "clean",
-   "trenowany": false,
+   "trained": false,
    "acc": 0.7352320675105485,
    "ece": 0.08874795585870743,
    "edl_total": 0.614577054977417,
@@ -322,7 +322,7 @@
   {
    "dataset": "d0p5",
    "scenario": "clean",
-   "trenowany": false,
+   "trained": false,
    "acc": 0.70042194092827,
    "ece": 0.11366560310125351,
    "edl_total": 0.7175735235214233,
@@ -342,7 +342,7 @@
   {
    "dataset": "d0p25",
    "scenario": "clean",
-   "trenowany": false,
+   "trained": false,
    "acc": 0.689873417721519,
    "ece": 0.13289162516593933,
    "edl_total": 0.7769849896430969,
@@ -362,7 +362,7 @@
   {
    "dataset": "r2000",
    "scenario": "clean",
-   "trenowany": false,
+   "trained": false,
    "acc": 0.7183544303797469,
    "ece": 0.11168090999126434,
    "edl_total": 0.7014766931533813,
@@ -382,7 +382,7 @@
   {
    "dataset": "r2500",
    "scenario": "clean",
-   "trenowany": false,
+   "trained": false,
    "acc": 0.729957805907173,
    "ece": 0.09595941752195358,
    "edl_total": 0.616138756275177,
@@ -402,7 +402,7 @@
   {
    "dataset": "hz",
    "scenario": "clean",
-   "trenowany": false,
+   "trained": false,
    "acc": 0.7318037974683544,
    "ece": 0.12237661331892014,
    "edl_total": 0.7288541793823242,

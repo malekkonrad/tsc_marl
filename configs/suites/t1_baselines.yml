@@ -1,8 +1,8 @@
-# T1 — punkt odniesienia pracy: metody bez uczenia i bez treningu.
-# Bez `overrides`, więc trafia w te same run_id co uruchomienia ręczne i widzi
-# wyniki policzone wcześniej jako gotowe (nie przelicza ich od nowa).
+# T1: the thesis reference point, methods without learning or training.
+# No `overrides`, so it hits the same run_ids as manual runs and sees results
+# computed earlier as done (it does not recompute them).
 entry: tsc
-mode: realistic          # yellow_length 5 — protokół pracy
+mode: realistic          # yellow_length 5, the thesis protocol
 timeout: 3600
 
 grid:

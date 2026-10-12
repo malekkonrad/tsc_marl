@@ -1,29 +1,29 @@
-# ZAMROŻONY PROTOKÓŁ EKSPERYMENTALNY (praca inż. — BGAT/PPO/CTDE)
+# FROZEN EXPERIMENTAL PROTOCOL (engineering thesis, GAT/PPO/CTDE)
 #
-# Jeden config współdzielony przez WSZYSTKIE metody. Powód: Wu 2021 — przy
-# niespójnym protokole rankingi metod się odwracają. Wartości wg linii
-# Advanced-CoLight / Efficient-MP, żeby liczby były porównywalne z papierami.
+# One config shared by ALL methods. Reason: Wu 2021, with an inconsistent protocol
+# method rankings flip. Values follow the Advanced-CoLight / Efficient-MP line, so
+# the numbers are comparable with the papers.
 #
-# UWAGA: ten plik ma być OSTATNIM elementem `includes:` w configu agenta,
-# a sam config agenta NIE MOŻE nadpisywać tych pól (direct config wygrywa
-# nad include'ami — patrz utils/logger.py:load_config).
+# NOTE: this file must be the LAST element of `includes:` in an agent config, and the
+# agent config itself MUST NOT override these fields (a direct config wins over
+# includes, see utils/logger.py:load_config).
 #
-# Domyślne wartości LibSignal, które świadomie zmieniamy:
-#   action_interval: 10 (base) / 20 (magd, maddpg_v2) → 15
-#   saveReplay: True → False (replaye puchną; włączać ręcznie do zrzutów)
+# LibSignal defaults changed on purpose:
+#   action_interval: 10 (base) / 20 (magd, maddpg_v2) -> 15
+#   saveReplay: True -> False (replays grow large; enable by hand for recordings)
 
 trainer:
-  # Δt = min action duration = 15 s (Advanced-CoLight, Efficient-MP)
+  # dt = min action duration = 15 s (Advanced-CoLight, Efficient-MP)
   action_interval: 15
-  # 5 s przejścia = yellow 3 s + all-red 2 s. LibSignal/CityFlow modeluje to
-  # jednym parametrem (jedna faza przejściowa), więc 3+2 zapisujemy jako 5 —
-  # sumarycznie zgodne z protokołem i z całą linią CoLight/Advanced.
+  # 5 s of transition = yellow 3 s + all-red 2 s. LibSignal/CityFlow models this with
+  # one parameter (one transition phase), so 3+2 is written as 5, consistent in sum
+  # with the protocol and the whole CoLight/Advanced line.
   yellow_length: 5
-  # epizod = 60 min
+  # episode = 60 min
   steps: 3600
   test_steps: 3600
-  # thread_num CityFlow. Zweryfikowane: przy 4 wątkach CityFlow daje wyniki
-  # bit-identyczne między uruchomieniami, więc zostaje 4 (szybciej).
+  # CityFlow thread_num. Verified: with 4 threads CityFlow gives bit-identical
+  # results across runs, so it stays at 4 (faster).
   thread: 4
 
 world:

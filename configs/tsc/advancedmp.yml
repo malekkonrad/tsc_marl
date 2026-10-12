@@ -1,24 +1,24 @@
 includes:
   - configs/tsc/base.yml
-  - configs/tsc/thesis_protocol.yml   # zamrożony protokół — musi być OSTATNI
+  - configs/tsc/thesis_protocol.yml   # frozen protocol, must be LAST
 
 model:
   name: advancedmp
-  t_min: 15   # = Δt; MP-owe metody decydują raz na action_interval
-  # W1 = 1.0 — default referencyjnej implementacji autorów (run_advanced_maxpressure.py: "W": 1).
-  # Optimum sweepu na JiNan w trybie realistycznym (yellow=5): 299,2 s przy W1=1,0.
+  t_min: 15   # = dt; max-pressure methods decide once per action_interval
+  # W1 = 1.0, the default of the authors' reference implementation (run_advanced_maxpressure.py: "W": 1).
+  # Sweep optimum on JiNan in realistic mode (yellow=5): 299.2 s at W1=1.0.
   w1: 1.0
-  # OBS_LENGTH=167 z referencyjnej implementacji (≈ V_max·Δt = 165 m z Def. 8).
-  # WSPÓLNE okno dla kolejki (pressure) i pojazdów jadących (demand) — autorzy liczą oba
-  # z tego samego wycinka pasa, papier tego nie mówi.
+  # OBS_LENGTH=167 from the reference implementation (~ V_max * dt = 165 m, Def. 8).
+  # A SHARED window for the queue (pressure) and moving vehicles (demand): the authors
+  # compute both from the same stretch of lane, the paper does not say so.
   obs_length: 167
-  # Skręty w prawo są dozwolone w KAŻDEJ fazie → nie konkurują o zielone.
-  # W p(s) dają stałą addytywną (argmax bez zmian), ale w d(s) zawyżają demand
-  # i rozstrajają porównanie d·W1 > max p. Autorzy sumują tylko ruchy sterowane.
+  # Right turns are allowed in EVERY phase -> they do not compete for green.
+  # In p(s) they add a constant (argmax unchanged), but in d(s) they inflate demand
+  # and skew the comparison d * W1 > max p. The authors sum controlled movements only.
   drop_always_green: true
 
 trainer:
-  episodes: 1   # metoda bez treningu
+  episodes: 1   # a method without training
   buffer_size: 0
   learning_rate: 0
   learning_start: 0

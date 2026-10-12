@@ -1,15 +1,18 @@
-"""Testy `runlog` — bez silnika, bez `tsc_marl`, bez sieci.
+"""`runlog` tests: no engine, no `tsc_marl`, no networks.
 
-To jest test narzędzia, nie projektu: gdyby `runlog` wylądował kiedyś w osobnym
-repo, ten plik jedzie razem z nim i musi przechodzić bez niczego z tej pracy.
+A test of the tool, not the project: if `runlog` ever moves to its own
+repository, this file goes with it and must pass without anything from the thesis.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 
 import pytest
+import yaml
 
 from runlog import Experiment, RunExists, RunIdCollision, params_hash
 from runlog import store as rstore
@@ -22,10 +25,10 @@ def exp(tmp_path):
     return Experiment("t1", root=tmp_path / "runs")
 
 
-# --------------------------------------------------------------- cykl życia
+# --------------------------------------------------------------- life cycle
 
 
-def test_udany_bieg_konczy_sie_statusem_ok(exp):
+def test_successful_run_ends_with_status_ok(exp):
     with exp.start("r1", PARAMS) as run:
         run.result(att=299.2)
     view = exp.runs()[0]
@@ -34,58 +37,55 @@ def test_udany_bieg_konczy_sie_statusem_ok(exp):
     assert view.meta["duration_s"] >= 0
 
 
-def test_wyjatek_w_bloku_zapisuje_failed_i_nie_polyka_bledu(exp):
-    with pytest.raises(ValueError, match="symulator padł"), exp.start("r1", PARAMS) as run:
+def test_exception_records_failed_and_is_not_swallowed(exp):
+    with pytest.raises(ValueError, match="simulator crashed"), exp.start("r1", PARAMS) as run:
         run.log(step=0, att=1.0)
-        raise ValueError("symulator padł")
+        raise ValueError("simulator crashed")
 
     view = exp.runs()[0]
     assert view.status == "failed"
-    assert "symulator padł" in view.meta["error"]
-    # metryki sprzed awarii muszą przetrwać — inaczej nie da się zdiagnozować, gdzie się wywalił
+    assert "simulator crashed" in view.meta["error"]
+    # metrics from before the failure survive, for diagnosis
     assert (view.path / rstore.METRICS).read_text().count("\n") == 2
 
 
-def test_status_running_widac_w_trakcie(exp):
+def test_running_status_is_visible_meanwhile(exp):
     run = exp.start("r1", PARAMS)
     assert exp.runs()[0].status == "running"
     run.finish()
     assert exp.runs()[0].status == "ok"
 
 
-# ------------------------------------------------------------------ kolizje
+# ------------------------------------------------------------------ collisions
 
 
-def test_ten_sam_id_inne_parametry_to_blad_a_nie_nadpisanie(exp):
+def test_same_id_other_params_is_an_error_not_an_overwrite(exp):
     with exp.start("r1", PARAMS) as run:
         run.result(att=1.0)
 
-    with pytest.raises(RunIdCollision, match="INNYMI parametrami"):
+    with pytest.raises(RunIdCollision, match="DIFFERENT parameters"):
         exp.start("r1", {**PARAMS, "seed": 1})
 
-    # stary bieg nietknięty
+    # the old run is untouched
     assert exp.runs()[0].result["att"] == 1.0
 
 
-def test_policzony_bieg_nie_liczy_sie_drugi_raz(exp):
+def test_a_finished_run_is_not_computed_twice(exp):
     with exp.start("r1", PARAMS):
         pass
     with pytest.raises(RunExists):
         exp.start("r1", PARAMS)
 
 
-def test_zywy_bieg_tez_blokuje(exp):
-    """Status `running` może być procesem, który właśnie liczy — nie wolno go zdeptać."""
+def test_a_live_run_blocks_too(exp):
+    """`running` may be a process computing right now; it must not be trampled."""
     exp.start("r1", PARAMS)
     with pytest.raises(RunExists):
         exp.start("r1", PARAMS)
 
 
 def _dead_pid() -> int:
-    """Pid procesu, który na pewno już nie żyje."""
-    import subprocess
-    import sys
-
+    """The pid of a process that is certainly dead."""
     p = subprocess.Popen([sys.executable, "-c", "pass"])
     p.wait()
     return p.pid
@@ -98,9 +98,9 @@ def _set_meta(exp, run_id, **fields):
     path.write_text(json.dumps(meta))
 
 
-def test_osierocony_bieg_wolno_policzyc_od_nowa(exp):
-    """`running` zapisany na tej maszynie przez proces, którego już nie ma (kill -TERM,
-    restart) nigdy się nie domknie — bez tej reguły blokowałby wznowienie siatki."""
+def test_an_orphaned_run_may_be_recomputed(exp):
+    """`running` written on this machine by a process that is gone never closes;
+    without this rule it would block resuming a suite."""
     exp.start("r1", PARAMS)
     _set_meta(exp, "r1", pid=_dead_pid())
     with exp.start("r1", PARAMS) as run:
@@ -108,10 +108,10 @@ def test_osierocony_bieg_wolno_policzyc_od_nowa(exp):
     assert exp.runs()[0].status == "ok"
 
 
-def test_running_z_innej_maszyny_albo_bez_pid_nadal_blokuje(exp):
-    """Ostrożnie: cudzej maszyny nie sprawdzimy, a stare metadane nie mają pid."""
+def test_running_from_another_machine_or_without_pid_still_blocks(exp):
+    """Conservative: another machine cannot be checked, old metadata has no pid."""
     exp.start("r1", PARAMS)
-    _set_meta(exp, "r1", pid=_dead_pid(), host="inna-maszyna")
+    _set_meta(exp, "r1", pid=_dead_pid(), host="other-machine")
     with pytest.raises(RunExists):
         exp.start("r1", PARAMS)
     _set_meta(exp, "r1", pid=None, host=None)
@@ -119,15 +119,15 @@ def test_running_z_innej_maszyny_albo_bez_pid_nadal_blokuje(exp):
         exp.start("r1", PARAMS)
 
 
-def test_nieudany_bieg_wolno_powtorzyc(exp):
+def test_a_failed_run_may_be_repeated(exp):
     with pytest.raises(RuntimeError), exp.start("r1", PARAMS):
         raise RuntimeError("boom")
-    with exp.start("r1", PARAMS) as run:  # bez replace — wznowienie po awarii jest legalne
+    with exp.start("r1", PARAMS) as run:  # without replace: resuming after a failure is legal
         run.result(att=2.0)
     assert exp.runs()[0].status == "ok"
 
 
-def test_replace_nadpisuje_swiadomie(exp):
+def test_replace_overwrites_deliberately(exp):
     with exp.start("r1", PARAMS) as run:
         run.result(att=1.0)
     with exp.start("r1", {**PARAMS, "seed": 9}, replace=True) as run:
@@ -135,33 +135,33 @@ def test_replace_nadpisuje_swiadomie(exp):
     assert exp.runs()[0].result["att"] == 2.0
 
 
-# ------------------------------------------------------------- wyszukiwanie
+# ------------------------------------------------------------- lookup
 
 
-def test_find_domyslnie_widzi_tylko_skonczone(exp):
+def test_find_sees_only_finished_runs_by_default(exp):
     with exp.start("ok1", PARAMS):
         pass
-    exp.start("wisi", {**PARAMS, "seed": 1})  # zostaje w running
-    with pytest.raises(RuntimeError), exp.start("zly", {**PARAMS, "seed": 2}):
+    exp.start("hanging", {**PARAMS, "seed": 1})  # stays running
+    with pytest.raises(RuntimeError), exp.start("bad", {**PARAMS, "seed": 2}):
         raise RuntimeError
 
     assert [r.id for r in exp.find()] == ["ok1"]
     assert len(exp.find(status=None)) == 3
-    assert [r.id for r in exp.find(seed=1, status=None)] == ["wisi"]
+    assert [r.id for r in exp.find(seed=1, status=None)] == ["hanging"]
 
 
-def test_is_done_reaguje_na_zmiane_parametrow(exp):
+def test_is_done_reacts_to_changed_parameters(exp):
     with exp.start("r1", PARAMS):
         pass
     assert exp.is_done("r1", PARAMS)
-    assert not exp.is_done("r1", {**PARAMS, "lr": 0.001})  # inny config → policz ponownie
-    assert not exp.is_done("innego-nie-ma", PARAMS)
+    assert not exp.is_done("r1", {**PARAMS, "lr": 0.001})  # another config: recompute
+    assert not exp.is_done("does-not-exist", PARAMS)
 
 
-# ----------------------------------------------------------------- metryki
+# ----------------------------------------------------------------- metrics
 
 
-def test_metryki_w_formacie_dlugim_i_sklejane_miedzy_biegami(exp):
+def test_metrics_in_long_format_concatenated_across_runs(exp):
     for seed in (0, 1):
         with exp.start(f"s{seed}", {**PARAMS, "seed": seed}) as run:
             for e in range(3):
@@ -175,25 +175,24 @@ def test_metryki_w_formacie_dlugim_i_sklejane_miedzy_biegami(exp):
     assert set(df["run_id"]) == {"s0", "s1"}
 
 
-def test_none_nie_trafia_do_metryk(exp):
-    """Metody bez treningu nie mają `loss` — brak wartości to brak wiersza,
-    a nie wiersz z pustką psujący agregację."""
+def test_none_does_not_reach_the_metrics(exp):
+    """Methods without training have no `loss`: no value means no row."""
     with exp.start("r1", PARAMS) as run:
         run.log(step=0, att=1.0, loss=None)
     assert list(exp.metrics()["metric"]) == ["att"]
 
 
-def test_metryki_widac_zanim_bieg_sie_skonczy(exp):
+def test_metrics_are_visible_before_the_run_ends(exp):
     run = exp.start("r1", PARAMS)
     run.log(step=0, att=1.0)
-    assert "att" in (run.path / rstore.METRICS).read_text()  # flush, nie bufor
+    assert "att" in (run.path / rstore.METRICS).read_text()  # flushed, not buffered
     run.finish()
 
 
-# --------------------------------------------------------------- agregacja
+# --------------------------------------------------------------- aggregation
 
 
-def test_aggregate_liczy_mean_std_i_unikalne_seedy(exp):
+def test_aggregate_computes_mean_std_and_unique_seeds(exp):
     for seed, att in [(0, 100.0), (1, 110.0), (2, 120.0)]:
         with exp.start(f"c-s{seed}", {"agent": "colight", "seed": seed}) as run:
             run.result(att=att)
@@ -207,64 +206,63 @@ def test_aggregate_liczy_mean_std_i_unikalne_seedy(exp):
     assert out.loc["maxpressure", "n"] == 1
 
 
-def test_aggregate_nie_liczy_powtorzonego_seeda_dwa_razy(exp):
+def test_aggregate_does_not_count_a_repeated_seed_twice(exp):
     for rid in ("a", "b"):
         with exp.start(rid, {"agent": "colight", "seed": 0, "tag": rid}) as run:
             run.result(att=100.0)
     out = exp.aggregate(by=["agent"], over="seed", metrics=["att"])
-    assert out.loc[0, "n"] == 1  # dwa biegi, ale jeden seed
+    assert out.loc[0, "n"] == 1  # two runs, one seed
 
 
-def test_aggregate_odmawia_gdy_over_jest_w_by(exp):
+def test_aggregate_refuses_over_in_by(exp):
     with exp.start("r1", PARAMS):
         pass
-    with pytest.raises(ValueError, match="jednocześnie"):
+    with pytest.raises(ValueError, match="both"):
         exp.aggregate(by=["agent", "seed"], over="seed", metrics=["att"])
 
 
-def test_puste_eksperymenty_nie_wywracaja_odczytu(tmp_path):
-    empty = Experiment("pusty", root=tmp_path / "runs")
+def test_empty_experiments_do_not_break_reading(tmp_path):
+    empty = Experiment("empty", root=tmp_path / "runs")
     assert empty.runs() == []
     assert empty.results().empty
     assert list(empty.metrics().columns) == ["run_id", "step", "split", "metric", "value"]
 
 
-# ------------------------------------------------------- trwałość zapisu
+# ------------------------------------------------------- write durability
 
 
-def test_zapis_jest_atomowy_i_nie_zostawia_smieci(tmp_path, monkeypatch):
-    """Nieudany zapis nie może uszkodzić poprzedniej wersji pliku ani zostawić
-    pliku tymczasowego — inaczej zabity proces psuje cały katalog biegu."""
+def test_writes_are_atomic_and_leave_no_garbage(tmp_path, monkeypatch):
+    """A failed write must not damage the previous file version or leave a
+    temporary file behind."""
     path = tmp_path / "meta.json"
-    rstore.write_json(path, {"wersja": 1})
+    rstore.write_json(path, {"version": 1})
 
     def boom(*args, **kwargs):
-        raise OSError("dysk pełny")
+        raise OSError("disk full")
 
     monkeypatch.setattr(os, "replace", boom)
-    with pytest.raises(OSError, match="dysk pełny"):
-        rstore.write_json(path, {"wersja": 2})
+    with pytest.raises(OSError, match="disk full"):
+        rstore.write_json(path, {"version": 2})
 
-    assert json.loads(path.read_text()) == {"wersja": 1}
+    assert json.loads(path.read_text()) == {"version": 1}
     assert list(tmp_path.glob(".*tmp")) == []
 
 
-def test_uszkodzony_json_nie_wywraca_skanu(exp):
-    """Katalog biegu może zostać uszkodzony z zewnątrz; skan ma go pominąć,
-    a nie wysypać całe odpytanie."""
-    with exp.start("dobry", PARAMS) as run:
+def test_a_broken_json_does_not_break_the_scan(exp):
+    """A run directory damaged from outside is skipped, not fatal to the query."""
+    with exp.start("good", PARAMS) as run:
         run.result(att=1.0)
-    zly = exp.path / "zly"
-    zly.mkdir()
-    (zly / rstore.META).write_text("{ to nie jest json")
+    bad = exp.path / "bad"
+    bad.mkdir()
+    (bad / rstore.META).write_text("{ this is not json")
 
     ids = {r.id for r in exp.runs()}
-    assert ids == {"dobry", "zly"}
-    assert [r.id for r in exp.find()] == ["dobry"]  # uszkodzony ma status "unknown"
+    assert ids == {"good", "bad"}
+    assert [r.id for r in exp.find()] == ["good"]  # the broken one has status "unknown"
 
 
-def test_dwa_biegi_obok_siebie_nie_koliduja(exp):
-    """Brak centralnego indeksu = brak wyścigu o zapis między procesami."""
+def test_two_runs_side_by_side_do_not_collide(exp):
+    """No central index = no write race between processes."""
     a = exp.start("a", {**PARAMS, "seed": 0})
     b = exp.start("b", {**PARAMS, "seed": 1})
     a.log(step=0, att=1.0)
@@ -276,26 +274,24 @@ def test_dwa_biegi_obok_siebie_nie_koliduja(exp):
     assert {r.id: r.result["att"] for r in exp.find()} == {"a": 1.0, "b": 2.0}
 
 
-def test_params_hash_jest_niezalezny_od_kolejnosci_kluczy():
+def test_params_hash_ignores_key_order():
     assert params_hash({"a": 1, "b": 2}) == params_hash({"b": 2, "a": 1})
     assert params_hash({"a": 1}) != params_hash({"a": 2})
 
 
-# ------------------------------------------------------------ proweniencja
+# ------------------------------------------------------------ provenance
 
 
-def test_proweniencja_bez_gita_nie_wywraca_biegu(exp, tmp_path):
-    with exp.start("r1", PARAMS, repos={"nic": tmp_path / "nie-ma-repo"}) as run:
+def test_provenance_without_git_does_not_break_the_run(exp, tmp_path):
+    with exp.start("r1", PARAMS, repos={"none": tmp_path / "no-repo"}) as run:
         pass
-    git = exp.runs()[0].meta["provenance"]["git"]["nic"]
+    git = exp.runs()[0].meta["provenance"]["git"]["none"]
     assert git["sha"] is None and git["dirty"] is None
     assert run.meta["provenance"]["python"]
 
 
-def test_snapshot_configu_zapisuje_sie_obok_biegu(exp):
+def test_config_snapshot_is_saved_next_to_the_run(exp):
     with exp.start("r1", PARAMS, config={"trainer": {"yellow_length": 0}}) as run:
         pass
-    import yaml
-
     saved = yaml.safe_load((run.path / rstore.CONFIG).read_text())
     assert saved["trainer"]["yellow_length"] == 0

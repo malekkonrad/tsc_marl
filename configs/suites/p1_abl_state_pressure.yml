@@ -1,7 +1,7 @@
-# Ablacja 1.6 — reprezentacja stanu: pressure zamiast ats (progresja queue→pressure→ep→ats).
-# Nagroda bez zmian (−Σ queue), architektura bez zmian.
+# Ablation 1.6: state representation: pressure instead of ats (progression queue->pressure->ep->ats).
+# Reward unchanged (-sum queue), architecture unchanged.
 #
-# GPU (entry: core) — do liczenia na gliderze. Sufiks run_id = nazwa pliku.
+# GPU (entry: core), to be computed on the GPU machine. run_id suffix = file name.
 entry: core
 mode: realistic
 timeout: 86400

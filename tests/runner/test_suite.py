@@ -1,36 +1,42 @@
-"""Testy warstwy deklaratywnej — siatka z YAML-a zamiast z historii powłoki.
+"""Declarative grids: the grid comes from YAML, not shell history.
 
-Sedno jest w jednym miejscu: `overrides` suite'a MUSZĄ wejść do configu przed
-policzeniem odcisku biegu. Nałożone później zmieniałyby zachowanie, nie zmieniając
-`config_hash` — a wtedy `skip-if-done` pomija bieg z innymi hiperparametrami jako
-„już policzony". Reszta testów pilnuje granicy procesu: rodzic i dziecko muszą
-policzyć ten sam config, choć są osobnymi interpreterami.
+The core of it: a suite's `overrides` MUST enter the config before the run
+fingerprint is computed; applied later they would change behaviour without
+changing `config_hash`, and skip-if-done would treat a run with other
+hyperparameters as already done. The other tests guard the process boundary:
+parent and child must compute the same config in separate interpreters.
 """
 
 from __future__ import annotations
 
+import subprocess
+import sys
 import textwrap
+import time
 
 import pytest
 
+from runlog import params_hash
 from tsc_marl import libsignal
+from tsc_marl.libsignal import session
+from tsc_marl.libsignal.experiment import parse_args
 from tsc_marl.runner import suite
 
 NETWORK = "cityflow_jinan3x4_4ph"
 
 
-def zapisz(tmp_path, tresc: str, nazwa: str = "probny.yml"):
-    p = tmp_path / nazwa
-    p.write_text(textwrap.dedent(tresc))
+def write(tmp_path, content: str, name: str = "trial.yml"):
+    p = tmp_path / name
+    p.write_text(textwrap.dedent(content))
     return p
 
 
-# ------------------------------------------------------------------- siatka
+# ------------------------------------------------------------------- grid
 
 
-def test_punkty_to_iloczyn_kartezjanski(tmp_path):
+def test_points_are_the_cartesian_product(tmp_path):
     s = suite.load(
-        zapisz(
+        write(
             tmp_path,
             """
             grid:
@@ -40,16 +46,16 @@ def test_punkty_to_iloczyn_kartezjanski(tmp_path):
             """,
         )
     )
-    punkty = s.points()
-    assert len(punkty) == 12
-    assert len({(p.agent, p.network, p.seed) for p in punkty}) == 12
-    # `world` nie jest w siatce — wchodzi z domyślnych
-    assert {p.world for p in punkty} == {"cityflow"}
+    points = s.points()
+    assert len(points) == 12
+    assert len({(p.agent, p.network, p.seed) for p in points}) == 12
+    # `world` is not in the grid: it comes from the defaults
+    assert {p.world for p in points} == {"cityflow"}
 
 
-def test_pole_spoza_siatki_bierze_wartosc_z_defaults(tmp_path):
+def test_a_field_outside_the_grid_comes_from_defaults(tmp_path):
     s = suite.load(
-        zapisz(
+        write(
             tmp_path,
             """
             defaults: {agent: colight, seed: 7}
@@ -57,44 +63,39 @@ def test_pole_spoza_siatki_bierze_wartosc_z_defaults(tmp_path):
             """,
         )
     )
-    (punkt,) = s.points()
-    assert (punkt.agent, punkt.seed) == ("colight", 7)
+    (point,) = s.points()
+    assert (point.agent, point.seed) == ("colight", 7)
 
 
-def test_brak_pola_wszedzie_to_blad_od_razu(tmp_path):
-    """Lepszy komunikat przy planowaniu niż KeyError w podprocesie po pół godzinie."""
-    s = suite.load(zapisz(tmp_path, "grid: {network: [jinan]}\n"))
+def test_a_field_missing_everywhere_fails_at_once(tmp_path):
+    """A clear message while planning beats a KeyError in a subprocess later."""
+    s = suite.load(write(tmp_path, "grid: {network: [jinan]}\n"))
     with pytest.raises(SystemExit, match="agent"):
         s.points()
 
 
-def test_entry_wybiera_modul_wejsciowy(tmp_path):
-    """To jest powód istnienia `entry`: przed nim runner siatki miał zaszyte
-    `tsc_marl.runner.train` i rdzeń Fazy 1 był z niego nieosiągalny."""
-    baseline = suite.load(zapisz(tmp_path, "grid: {agent: [x], network: [y], seed: [0]}\n"))
-    rdzen = suite.load(
-        zapisz(tmp_path, "entry: core\ngrid: {network: [y], seed: [0]}\n", "rdzen.yml")
-    )
+def test_entry_picks_the_entry_module(tmp_path):
+    baseline = suite.load(write(tmp_path, "grid: {agent: [x], network: [y], seed: [0]}\n"))
+    core = suite.load(write(tmp_path, "entry: core\ngrid: {network: [y], seed: [0]}\n", "core.yml"))
     assert baseline.module == "tsc_marl.runner.train"
-    assert rdzen.module == "tsc_marl.runner.train_core"
-    assert rdzen.points()[0].agent == "gatppo", "`entry: core` domyślnie liczy rdzeń"
+    assert core.module == "tsc_marl.runner.train_core"
+    assert core.points()[0].agent == "gatppo", "`entry: core` computes the core by default"
 
 
-def test_mode_ustawia_yellow(tmp_path):
-    wspolne = "grid: {agent: [x], network: [y], seed: [0]}\n"
-    assert suite.load(zapisz(tmp_path, wspolne, "a.yml")).yellow == 5
-    assert suite.load(zapisz(tmp_path, "mode: benchmark\n" + wspolne, "b.yml")).yellow == 0
+def test_mode_sets_yellow(tmp_path):
+    common = "grid: {agent: [x], network: [y], seed: [0]}\n"
+    assert suite.load(write(tmp_path, common, "a.yml")).yellow == 5
+    assert suite.load(write(tmp_path, "mode: benchmark\n" + common, "b.yml")).yellow == 0
 
 
-# --------------------------------------------------------- granica procesu
+# --------------------------------------------------------- process boundary
 
 
-def test_argv_przekazuje_sciezke_a_nie_slownik(tmp_path):
-    """Nadpisania jadą do podprocesu jako `--suite <plik>`, nie jako serializacja
-    słownika. Dzięki temu typy YAML-owe zostają YAML-owe, a komendę z logu da się
-    skopiować i powtórzyć ręcznie."""
+def test_argv_passes_a_path_not_a_dict(tmp_path):
+    """Overrides reach the subprocess as `--suite <file>`, not a serialised dict:
+    YAML types stay YAML and a command from a log can be repeated by hand."""
     s = suite.load(
-        zapisz(
+        write(
             tmp_path,
             """
             grid: {agent: [gatppo], network: [jinan], seed: [0]}
@@ -111,93 +112,86 @@ def test_argv_przekazuje_sciezke_a_nie_slownik(tmp_path):
     assert "--replace" in s.argv(s.points()[0], replace=True)
 
 
-def test_suffix_tylko_dla_suite_ow_z_nadpisaniami(tmp_path):
-    """Suite BEZ nadpisań ma trafiać w te same `run_id`, co uruchomienia ręczne —
-    inaczej nie zobaczyłby wcześniejszych wyników jako gotowych. Suite Z nadpisaniami
-    musi mieć własne, bo inaczej dwa różne configi biją się o jeden katalog."""
-    goly = suite.load(zapisz(tmp_path, "grid: {agent: [x], network: [y], seed: [0]}\n", "g.yml"))
-    zmieniony = suite.load(
-        zapisz(
+def test_suffix_only_for_suites_with_overrides(tmp_path):
+    """A suite WITHOUT overrides hits the run ids of manual runs; one WITH overrides
+    needs its own, or two configs fight over one directory."""
+    plain = suite.load(write(tmp_path, "grid: {agent: [x], network: [y], seed: [0]}\n", "g.yml"))
+    changed = suite.load(
+        write(
             tmp_path,
             "grid: {agent: [x], network: [y], seed: [0]}\noverrides: {model: {a: 1}}\n",
             "z.yml",
         )
     )
-    assert goly.suffix == ""
-    assert zmieniony.suffix == "z"
+    assert plain.suffix == ""
+    assert changed.suffix == "z"
 
 
-def test_overrides_zmieniaja_odcisk_i_run_id(tmp_path):
-    """Test za całą warstwę: `plan()` — czyli to, czym runner sprawdza skip-if-done —
-    musi zobaczyć nadpisania. Gdyby wchodziły dopiero w podprocesie, rodzic uznałby
-    punkt za policzony, a dziecko policzyłoby zupełnie inny eksperyment."""
+def test_overrides_change_fingerprint_and_run_id(tmp_path):
+    """`plan()`, which the runner uses for skip-if-done, must see the overrides;
+    otherwise the parent would treat a point as done and the child compute
+    another experiment."""
     libsignal.bootstrap()
-    wspolne = f"grid: {{agent: [advancedcolight], network: [{NETWORK}], seed: [0]}}\n"
-    goly = suite.load(zapisz(tmp_path, wspolne, "goly.yml"))
-    zmieniony = suite.load(
-        zapisz(tmp_path, wspolne + "overrides:\n  model: {NUM_HEADS: [8, 8]}\n", "zmiana.yml")
+    common = f"grid: {{agent: [advancedcolight], network: [{NETWORK}], seed: [0]}}\n"
+    plain = suite.load(write(tmp_path, common, "plain.yml"))
+    changed = suite.load(
+        write(tmp_path, common + "overrides:\n  model: {NUM_HEADS: [8, 8]}\n", "change.yml")
     )
 
-    _, params_goly, rid_goly = suite.plan(goly, goly.points()[0])
-    _, params_zm, rid_zm = suite.plan(zmieniony, zmieniony.points()[0])
+    _, params_plain, rid_plain = suite.plan(plain, plain.points()[0])
+    _, params_changed, rid_changed = suite.plan(changed, changed.points()[0])
 
-    assert params_goly["config_hash"] != params_zm["config_hash"]
-    assert rid_goly != rid_zm and rid_zm.endswith("__zmiana")
+    assert params_plain["config_hash"] != params_changed["config_hash"]
+    assert rid_plain != rid_changed and rid_changed.endswith("__change")
 
 
-def test_plan_i_proces_liczacy_ida_ta_sama_droga(tmp_path):
-    """`plan()` (rodzic) i `session.resolve()` (dziecko) muszą dać ten sam config.
-    Dwie osobne ścieżki to gwarancja cichego rozjazdu przy pierwszej zmianie."""
-    from tsc_marl.libsignal import session
-    from tsc_marl.runner.train import parse_args
-
+def test_plan_and_the_computing_process_take_the_same_path(tmp_path):
+    """`plan()` (parent) and `session.resolve()` (child) give the same config."""
     libsignal.bootstrap()
     s = suite.load(
-        zapisz(
+        write(
             tmp_path,
             f"grid: {{agent: [advancedcolight], network: [{NETWORK}], seed: [0]}}\n"
             "overrides:\n  trainer: {episodes: 3}\n",
         )
     )
-    punkt = s.points()[0]
-    args_rodzica, params, _ = suite.plan(s, punkt)
-    config_dziecka, suffix = session.resolve(parse_args(s.argv(punkt)))
+    point = s.points()[0]
+    parent_args, params, _ = suite.plan(s, point)
+    child_config, suffix = session.resolve(parse_args(s.argv(point)))
 
-    assert config_dziecka["trainer"]["episodes"] == 3
+    assert child_config["trainer"]["episodes"] == 3
     assert params["episodes"] == 3
     assert suffix == s.suffix
-    assert args_rodzica.suite == str(s.path)
+    assert parent_args.suite == str(s.path)
 
 
-# ------------------------------------------------------------------- walidacja
+# ------------------------------------------------------------------- validation
 
 
-def test_literowka_w_polu_pada_zamiast_byc_ignorowana(tmp_path):
-    """Ciche zignorowanie `overides:` znaczyłoby bieg policzony bez nadpisań —
-    i tabelę, w której nie widać, że eksperymentu nie było."""
+def test_a_typo_in_a_field_fails_instead_of_being_ignored(tmp_path):
+    """Silently ignoring `overides:` would mean a run computed without overrides."""
     with pytest.raises(SystemExit, match="overides"):
-        suite.load(zapisz(tmp_path, "overides: {model: {a: 1}}\ngrid: {network: [y]}\n"))
+        suite.load(write(tmp_path, "overides: {model: {a: 1}}\ngrid: {network: [y]}\n"))
 
 
-def test_nieznany_tryb_i_nieznane_wejscie_padaja(tmp_path):
+def test_unknown_mode_and_entry_fail(tmp_path):
     with pytest.raises(SystemExit, match="mode"):
-        suite.load(zapisz(tmp_path, "mode: papierowy\ngrid: {network: [y]}\n", "m.yml"))
+        suite.load(write(tmp_path, "mode: paper\ngrid: {network: [y]}\n", "m.yml"))
     with pytest.raises(SystemExit, match="entry"):
-        suite.load(zapisz(tmp_path, "entry: rakieta\ngrid: {network: [y]}\n", "e.yml"))
+        suite.load(write(tmp_path, "entry: rocket\ngrid: {network: [y]}\n", "e.yml"))
 
 
-def test_nieistniejacy_suite_wypisuje_dostepne():
-    with pytest.raises(SystemExit, match="Dostępne"):
-        suite.load("nie_ma_takiego")
+def test_a_missing_suite_lists_the_available_ones():
+    with pytest.raises(SystemExit, match="Available"):
+        suite.load("no_such_suite")
 
 
-# ----------------------------------------------------------------- urządzenie
+# ----------------------------------------------------------------- device
 
 
-def test_ngpu_leci_flaga_do_dziecka(tmp_path):
-    """`ngpu` z YAML-a musi trafić do argv podprocesu — inaczej suite liczyłby
-    na CPU niezależnie od tego, co deklaruje siatka (tak było do Fazy 1)."""
-    p = zapisz(
+def test_ngpu_reaches_the_child_as_a_flag(tmp_path):
+    """`ngpu` from YAML reaches the subprocess argv."""
+    p = write(
         tmp_path,
         """
         entry: core
@@ -212,10 +206,8 @@ def test_ngpu_leci_flaga_do_dziecka(tmp_path):
     assert argv[argv.index("--ngpu") + 1] == "2"
 
 
-def test_domyslnie_cpu(tmp_path):
-    """Brak `ngpu` w YAML-u = CPU. Maszyna deweloperska nie ma karty, a siatka
-    bez tego pola ma działać tak jak przed dodaniem obsługi GPU."""
-    p = zapisz(
+def test_cpu_by_default(tmp_path):
+    p = write(
         tmp_path,
         """
         grid:
@@ -229,57 +221,51 @@ def test_domyslnie_cpu(tmp_path):
     assert argv[argv.index("--ngpu") + 1] == "-1"
 
 
-# ------------------------------------------------------------------ równolegle
+# ------------------------------------------------------------------ parallel
 
 
-def _launcher(tmp_path, kody: dict, czasy: dict | None = None):
-    """`launch` dla `schedule` na zwykłych procesach Pythona: punkt -> kod wyjścia
-    (lista = kolejne próby). Zapisuje, ile razy punkt wystartował."""
-    import subprocess
-    import sys
-
-    starty: dict = {}
-    czasy = czasy or {}
+def _launcher(tmp_path, codes: dict, durations: dict | None = None):
+    """`launch` for `schedule` on plain Python processes: point -> exit code (a list
+    = successive attempts). Records how often each point started."""
+    starts: dict = {}
+    durations = durations or {}
 
     def launch(point):
-        n = starty.get(point, 0)
-        starty[point] = n + 1
-        kod = kody[point][min(n, len(kody[point]) - 1)]
-        sen = czasy.get(point, 0.05)
+        n = starts.get(point, 0)
+        starts[point] = n + 1
+        code = codes[point][min(n, len(codes[point]) - 1)]
+        sleep = durations.get(point, 0.05)
         log = open(tmp_path / f"{point}.log", "a")  # noqa: SIM115
-        cmd = [sys.executable, "-c", f"import time,sys; time.sleep({sen}); sys.exit({kod})"]
+        cmd = [sys.executable, "-c", f"import time,sys; time.sleep({sleep}); sys.exit({code})"]
         return subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT), log
 
-    return launch, starty
+    return launch, starts
 
 
-def test_schedule_liczy_wszystko_i_zwraca_statusy(tmp_path):
-    launch, starty = _launcher(tmp_path, {"a": [0], "b": [0], "c": [0]})
-    wynik = suite.schedule(["a", "b", "c"], launch, jobs=2, timeout=30, stagger=0)
-    assert wynik == {"a": "ok", "b": "ok", "c": "ok"}
-    assert starty == {"a": 1, "b": 1, "c": 1}
+def test_schedule_computes_everything_and_returns_statuses(tmp_path):
+    launch, starts = _launcher(tmp_path, {"a": [0], "b": [0], "c": [0]})
+    result = suite.schedule(["a", "b", "c"], launch, jobs=2, timeout=30, stagger=0)
+    assert result == {"a": "ok", "b": "ok", "c": "ok"}
+    assert starts == {"a": 1, "b": 1, "c": 1}
 
 
-def test_wczesny_pad_ponawiany_raz(tmp_path):
-    """Pad w pierwszych sekundach to najpewniej wyścig o `configs/sim/*.cfg`
-    (patrz STAGGER_S) — ponawiamy RAZ. Drugi pad z rzędu to prawdziwy błąd:
-    pętla ponowień bez końca zjadłaby noc liczenia na jednym zepsutym punkcie."""
-    launch, starty = _launcher(tmp_path, {"chwilowy": [1, 0], "zepsuty": [1]})
-    wynik = suite.schedule(["chwilowy", "zepsuty"], launch, jobs=2, timeout=30, stagger=0)
-    assert wynik == {"chwilowy": "ok", "zepsuty": "failed"}
-    assert starty == {"chwilowy": 2, "zepsuty": 2}
+def test_an_early_failure_is_retried_once(tmp_path):
+    """A failure in the first seconds is most likely the `configs/sim/*.cfg` race
+    (see STAGGER_S): retried ONCE. A second failure is a real error."""
+    launch, starts = _launcher(tmp_path, {"transient": [1, 0], "broken": [1]})
+    result = suite.schedule(["transient", "broken"], launch, jobs=2, timeout=30, stagger=0)
+    assert result == {"transient": "ok", "broken": "failed"}
+    assert starts == {"transient": 2, "broken": 2}
 
 
-def test_timeout_zabija_proces(tmp_path):
-    launch, _ = _launcher(tmp_path, {"wolny": [0]}, {"wolny": 30})
-    wynik = suite.schedule(["wolny"], launch, jobs=1, timeout=0.5, stagger=0)
-    assert wynik == {"wolny": "timeout"}
+def test_timeout_kills_the_process(tmp_path):
+    launch, _ = _launcher(tmp_path, {"slow": [0]}, {"slow": 30})
+    result = suite.schedule(["slow"], launch, jobs=1, timeout=0.5, stagger=0)
+    assert result == {"slow": "timeout"}
 
 
-def test_stagger_rozsuwa_starty(tmp_path):
-    """Starty co najmniej `stagger` od siebie, nawet przy wolnych slotach."""
-    import time
-
+def test_stagger_spaces_the_starts(tmp_path):
+    """Starts at least `stagger` apart, even with free slots."""
     launch, _ = _launcher(tmp_path, {"a": [0], "b": [0]})
     t0 = time.time()
     suite.schedule(["a", "b"], launch, jobs=2, timeout=30, stagger=0.6)
@@ -287,19 +273,12 @@ def test_stagger_rozsuwa_starty(tmp_path):
 
 
 @pytest.mark.slow
-def test_ngpu_nie_wchodzi_do_odcisku(tmp_path):
-    """NAJWAŻNIEJSZY test tej sekcji: ten sam bieg na CPU i na GPU to JEDEN
-    eksperyment, nie dwa.
-
-    `ngpu` opisuje maszynę, nie treść naukową biegu, więc ląduje w sekcji
-    `command` — jedynej, której `build_params` nie bierze do odcisku. Gdyby
-    wpadło do `model`/`trainer`, przeniesienie siatki na mocniejszą maszynę
-    unieważniłoby wszystko, co już policzone, i kazało liczyć od zera.
-    """
-    from runlog import params_hash
-
+def test_ngpu_is_not_part_of_the_fingerprint(tmp_path):
+    """The same run on CPU and GPU is ONE experiment: `ngpu` describes the machine
+    and lands in the `command` section, outside the fingerprint. Otherwise moving a
+    grid to a stronger machine would invalidate everything computed so far."""
     libsignal.bootstrap()
-    p = zapisz(
+    p = write(
         tmp_path,
         """
         entry: core
@@ -309,14 +288,14 @@ def test_ngpu_nie_wchodzi_do_odcisku(tmp_path):
         """,
     )
     s = suite.load(p)
-    punkt = s.points()[0]
+    point = s.points()[0]
 
-    odciski, identyfikatory = set(), set()
+    hashes, ids = set(), set()
     for ngpu in ("-1", "0", "3"):
         s.ngpu = ngpu
-        _, params, rid = suite.plan(s, punkt)
-        odciski.add(params_hash(params))
-        identyfikatory.add(rid)
+        _, params, rid = suite.plan(s, point)
+        hashes.add(params_hash(params))
+        ids.add(rid)
 
-    assert len(odciski) == 1, f"ngpu zmienia odcisk parametrów: {odciski}"
-    assert len(identyfikatory) == 1, f"ngpu zmienia run_id: {identyfikatory}"
+    assert len(hashes) == 1, f"ngpu changes the params fingerprint: {hashes}"
+    assert len(ids) == 1, f"ngpu changes the run_id: {ids}"

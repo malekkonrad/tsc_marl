@@ -1,16 +1,17 @@
-# T2 BEZ MECHANIZMU — jak bardzo zamrożone sterowniki degradują się pod awarią,
-# zanim dołożymy jakąkolwiek niepewność. Oś X figury głównej i test wykonalności
-# fallbacku: FixedTime (507 s na JiNan, 569 s na HangZhou, tryb realistyczny) ma
-# sens jako dolna warstwa TYLKO tam, gdzie polityka pod awarią spada poniżej niego.
+# T2 WITHOUT A MECHANISM: how much frozen controllers degrade under failure before
+# any uncertainty is added. The X axis of the main figure and the feasibility test of
+# the fallback: FixedTime (507 s on JiNan, 569 s on HangZhou, realistic mode) makes
+# sense as the lower layer ONLY where the policy under failure falls below it.
 #
-# Wszystkie sterowniki czytają TĘ SAMĄ warstwę detektorów (`robustness/controllers.py`):
-# MaxPressure liczy decyzję z popsutego wektora stanu, nie z silnika.
+# All controllers read THE SAME detector layer (`robustness/controllers.py`):
+# MaxPressure computes its decision from the broken state vector, not the engine.
 #
-# Uczone: checkpoint z runs/t1/<agent>__<sieć>__s<seed>_y5 (wagi końcowe).
-# Na maszynie bez tych wag punkt jest POMIJANY z komunikatem, nie wywala planu.
+# Learned: checkpoint from runs/t1/<agent>__<network>__s<seed>_y5 (final weights).
+# On a machine without these weights the point is SKIPPED with a message; the plan
+# does not fail.
 name: t2_nomech
 mode: realistic
-draws: 5          # losowania awarii na scenariusz; czysty liczony raz (deterministyczny)
+draws: 5          # failure draws per scenario; clean computed once (deterministic)
 timeout: 7200
 
 networks: [cityflow_jinan3x4_4ph, cityflow_hangzhou4x4_4ph]
@@ -22,10 +23,10 @@ controllers:
   advancedmp: {}
   fixedtime: {}
 
-# Poziomy DETEKTORA (patrz results/sensor_severity.md — przelicznik na cechę ~0,8–0,9
-# dla gauss). Rodziny ułożone wg skali obserwowalności z implementacja.md 2.0a.
+# DETECTOR levels (see results/sensor_severity.md: conversion to the feature ~0.8-0.9
+# for gauss). Families ordered by the observability scale of implementacja.md 2.0a.
 scenarios:
-  # szum pomiarowy (chwilowy) — w tym 3,5/4,0 z protokołu RobustLight
+  # measurement noise (instantaneous), including 3.5/4.0 from the RobustLight protocol
   - {kind: gauss, level: 0.5}
   - {kind: gauss, level: 1.0}
   - {kind: gauss, level: 2.0}
@@ -33,18 +34,18 @@ scenarios:
   - {kind: gauss, level: 4.0}
   - {kind: urand, level: 2.0}
   - {kind: urand, level: 4.0}
-  # martwe detektory, podstawienie `zero` (protokół RobustLight — porównywalność)
+  # dead detectors, `zero` substitution (RobustLight protocol, for comparability)
   - {kind: mask, level: 0.1}
   - {kind: mask, level: 0.25}
   - {kind: mask, level: 0.5}
   - {kind: mask, level: 0.75}
-  # całe skrzyżowania bez sensorów (kriging z DiffLight)
+  # whole intersections without sensors (kriging as in DiffLight)
   - {kind: mask, level: 0.25, unit: intersection}
   - {kind: mask, level: 0.5, unit: intersection}
-  # martwe detektory BEZ ŚLADU: `hold` zamraża ostatnią wartość od decyzji 60 (15 min)
+  # dead detectors WITHOUT A TRACE: `hold` freezes the last value from decision 60 (15 min)
   - {kind: mask, level: 0.25, substitution: hold, onset: 60}
   - {kind: mask, level: 0.5, substitution: hold, onset: 60}
-  # rozkalibrowanie (nieobserwowalne) — multiplikatywny błąd wzmocnienia per pas
+  # miscalibration (unobservable): a multiplicative gain error per lane
   - {kind: drift, level: 0.1}
   - {kind: drift, level: 0.2}
   - {kind: drift, level: 0.3}

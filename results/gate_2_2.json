@@ -48,15 +48,15 @@
   "e_auroc_drift_max": 0.5359957616653862,
   "f_edge_max_vs_mean": -0.011360153968399145,
   "sep": {
-   "trening|clean": {
+   "training|clean": {
     "u_obs": 0.4921349585056305,
     "u_ep": 0.3527059555053711
    },
-   "trening|gauss2": {
+   "training|gauss2": {
     "u_obs": 1.3742797374725342,
     "u_ep": 0.45058655738830566
    },
-   "trening|mask0p5": {
+   "training|mask0p5": {
     "u_obs": 0.7485973834991455,
     "u_ep": 0.30828914046287537
    },

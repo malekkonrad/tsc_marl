@@ -1,11 +1,12 @@
-# T1 — uczone baseline'y klasy DQN z LibSignala, TRYB REALISTYCZNY (yellow=5).
-# Liczby CoLighta z sandboxa (287,3) powstały przy zepsutym `att_last10` i przed
-# patchem `save_model`, więc NIE są wynikiem tego repo — tu liczymy je od nowa.
-# Bez CoLighta tabela T1 nie ma klasycznego baseline'u GAT+DQN obok rdzenia.
+# T1: learned DQN-class baselines from LibSignal, REALISTIC MODE (yellow=5).
+# The CoLight numbers from the sandbox (287.3) were produced with the broken
+# `att_last10` and before the `save_model` patch, so they are NOT a result of this
+# repo; here they are computed again. Without CoLight the T1 table has no classic
+# GAT+DQN baseline next to the core.
 #
-# CPU z konieczności: `agent/colight.py` i `presslight.py` w submodule nie mają
-# obsługi urządzenia (patrz komentarz w p1_reference.yml). Ta siatka jest więc
-# DOBRA DO LICZENIA NA MASZYNIE BEZ KARTY — tam, gdzie GPU i tak by stało.
+# CPU by necessity: `agent/colight.py` and `presslight.py` in the submodule have no
+# device handling (see the comment in p1_reference.yml). This grid is therefore
+# GOOD FOR A MACHINE WITHOUT A CARD, where a GPU would idle anyway.
 entry: tsc
 mode: realistic
 timeout: 86400

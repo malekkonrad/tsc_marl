@@ -1,8 +1,8 @@
-"""runlog — przechowywanie i odpytywanie wyników eksperymentów.
+"""runlog: storing and querying experiment results.
 
-Niezależne od dziedziny: nie wie nic o symulatorach, uczeniu ani o projekcie,
-w którym akurat stoi. Zależy tylko od stdlib (zapis) oraz pandas i pyyaml
-(odczyt/agregacja, importowane leniwie).
+Domain-independent: knows nothing about simulators, learning or the project it
+lives in. Depends only on the standard library (writing) plus pandas and pyyaml
+(reading and aggregation, imported lazily).
 
     from runlog import Experiment
 
@@ -13,10 +13,10 @@ w którym akurat stoi. Zależy tylko od stdlib (zapis) oraz pandas i pyyaml
                 run.log(step=e, split="train", att=..., loss=...)
             run.result(att=..., att_last10=...)
 
-    exp.results()                                        # DataFrame do tabel
+    exp.results()                                        # DataFrame for tables
     exp.aggregate(by=["agent"], over="seed", metrics=["att"])
 
-Kontrakt i uzasadnienie decyzji projektowych: `src/runlog/README.md`.
+Contract and design rationale: `src/runlog/README.md`.
 """
 
 from runlog.experiment import Experiment

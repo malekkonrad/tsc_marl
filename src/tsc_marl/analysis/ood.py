@@ -1,16 +1,13 @@
-"""Raport testu gałęzi epistemic (plan `t2_ood`) -> `results/t2_ood_epistemic.md`.
+"""Report of the epistemic branch test (plan `t2_ood`) -> `results/t2_ood_epistemic.md`.
 
-Dwupoziomowy fallback z planu kieruje „epistemic↑ przy czystym wejściu” do MaxPressure.
-Bramka 2.0 pokazała, że na naszych zbiorach tej sytuacji nie widać: na lżejszym ruchu
-model nie traci trafności, więc nie ma czego ratować. Ten raport odpowiada wprost na
-dwa pytania, które rozstrzygają los tej gałęzi:
+The two-level fallback sends "epistemic up on clean input" to MaxPressure. Two
+questions decide that branch:
 
-1. Czy ZAMROŻONA polityka przegrywa z MaxPressure na ruchu spoza treningu —
-   szczególnie CIĘŻSZYM (HangZhou ×1,5 i plik 5816)? Jeśli nigdzie nie przegrywa,
-   gałąź nie ma roboty, niezależnie od jakości sygnału epistemic.
-2. Czy rozbieżność 5 actorów (epistemic w samej polityce RL, sterownik `gatppo_ens`)
-   rośnie tam, gdzie polityka przegrywa — i czy rośnie tam MOCNIEJ niż na awarii
-   sensora? Tylko wtedy da się ją odróżnić od kanału obserwacyjnego.
+1. Does the FROZEN policy lose to MaxPressure on traffic outside training,
+   especially HEAVIER traffic? If it never loses, the branch has nothing to do.
+2. Does the disagreement of 5 actors (`gatppo_ens`) grow where the policy loses,
+   and MORE than under sensor failure? Only then can it be told apart from the
+   observation channel.
 """
 
 from __future__ import annotations
@@ -24,14 +21,14 @@ from tsc_marl.robustness.degrade import Plan, base_network
 
 RULES = ("efficientmp", "advancedmp")
 ALPHA = 0.05
-#: Wzrost MI na czystym wejściu (względem ruchu treningowego), od którego uznajemy, że
-#: rozbieżność polityk REAGUJE na nowy ruch. Niżej to rząd różnic między seedami.
+#: Relative MI rise on clean input (vs training traffic) from which the ensemble is
+#: taken to REACT to new traffic; below it is the size of between-seed differences.
 MI_RISE = 0.25
 
 
 def _p_worse(vals, reference: float) -> float:
-    """p jednostronnego testu t: czy średnia seedów polityki jest WIĘKSZA (gorsza) od reguły."""
-    from scipy.stats import ttest_1samp  # noqa: PLC0415
+    """One-sided t-test p: is the policy's seed mean GREATER (worse) than the rule."""
+    from scipy.stats import ttest_1samp
 
     if len(vals) < 2 or np.std(vals) == 0:
         return float("nan")
@@ -42,13 +39,13 @@ METRICS = ("att", "throughput", "ens_mi", "ens_disagree")
 
 
 def traffic_label(network: str) -> str:
-    """Czytelna nazwa wariantu ruchu z sufiksu sieci."""
+    """Readable name of a traffic variant from the network suffix."""
     suffix = network[len(base_network(network)) :]
     if not suffix:
-        return "ruch treningowy"
+        return "training traffic"
     if suffix.startswith("_d"):
-        return f"popyt ×{suffix[2:].replace('p', ',')}"
-    return f"inny plik ruchu ({suffix[2:]})"
+        return f"demand x{suffix[2:].replace('p', '.')}"
+    return f"another traffic file ({suffix[2:]})"
 
 
 def _per_seed(df):
@@ -59,38 +56,39 @@ def _per_seed(df):
 def _cell(vals) -> str:
     vals = [v for v in vals if v == v]
     if not vals:
-        return "—"
-    sd = f" ± {np.std(vals, ddof=1):.1f}" if len(vals) > 1 else ""
+        return "-"
+    sd = f" +- {np.std(vals, ddof=1):.1f}" if len(vals) > 1 else ""
     return f"{np.mean(vals):.1f}{sd}"
 
 
 def main(plan: Plan) -> Path:
-    from tsc_marl.analysis import degradation  # noqa: PLC0415
+    from tsc_marl.analysis import degradation
 
     df = degradation.load(plan, metrics=METRICS)
     out = [
-        f"# Test gałęzi epistemic — plan `{plan.name}`",
+        f"# Epistemic branch test: plan `{plan.name}`",
         "",
-        "Zamrożone sterowniki na ruchu spoza treningu. Polityki uczone biorą wagi z sieci "
-        "TRENINGOWEJ (`{base}` w szablonie rodzica), ruch jest z innego pliku. Czysty "
-        "scenariusz = czyste odczyty; `gauss2` = ten sam ruch z szumem detektorów, żeby "
-        "porównać reakcję ensemble na nowy ruch z reakcją na awarię sensora.",
+        "Frozen controllers on traffic outside training. Learned policies take weights from "
+        "the TRAINING network (`{base}` in the parent template), traffic comes from another "
+        "file. The clean scenario = clean readings; `gauss2` = the same traffic with "
+        "detector noise, to compare the ensemble's reaction to new traffic with its "
+        "reaction to sensor failure.",
         "",
     ]
     if df.empty:
-        out.append("_Brak policzonych biegów — `tsc degrade run " + plan.name + "`._")
+        out.append("_No computed runs; `tsc degrade run " + plan.name + "`._")
         return _write(plan, out)
 
     per = _per_seed(df)
-    lose: list[tuple[str, float, float]] = []  # (sieć, Δ, p) — przegrana ISTOTNA
-    ties: list[tuple[str, float, float]] = []  # Δ > 0, ale w granicach rozrzutu seedów
+    lose: list[tuple[str, float, float]] = []  # (network, delta, p): a SIGNIFICANT loss
+    ties: list[tuple[str, float, float]] = []  # delta > 0 but within the seed spread
     mi_rows: dict[str, dict[str, float]] = {}
     for base in dict.fromkeys(base_network(n) for n in plan.networks):
         nets = [n for n in plan.networks if base_network(n) == base]
-        out += [f"## Polityki uczone na `{base}`", "", "### ATT na czystych odczytach", ""]
+        out += [f"## Policies trained on `{base}`", "", "### ATT on clean readings", ""]
         ctrls = [c for c in ("fixedtime", *RULES, "advancedcolight", "gatppo")
                  if (per["controller"] == c).any()]  # fmt: skip
-        out += ["| ruch | " + " | ".join(ctrls) + " | rdzeń vs lepsza reguła |",
+        out += ["| traffic | " + " | ".join(ctrls) + " | core vs better rule |",
                 "|---|" + "---:|" * (len(ctrls) + 1)]  # fmt: skip
         for net in nets:
             clean = per[(per["network"] == net) & (per["scenario"] == "clean")]
@@ -98,20 +96,21 @@ def main(plan: Plan) -> Path:
             core_vals = clean[clean["controller"] == "gatppo"]["att"].dropna().to_numpy()
             rules = [clean[clean["controller"] == r]["att"].mean() for r in RULES]
             rules = [r for r in rules if r == r]
-            delta = "—"
+            delta = "-"
             if len(core_vals) and rules:
-                best = min(rules)  # reguły są deterministyczne — jedna liczba
+                best = min(rules)  # rules are deterministic: one number
                 d = core_vals.mean() / best - 1
                 p = _p_worse(core_vals, best)
                 sig = d > 0 and p < ALPHA
-                delta = f"{d:+.1%} (p {p:.2f})" + (" ▲" if sig else "")
+                delta = f"{d:+.1%} (p {p:.2f})" + (" (!)" if sig else "")
                 if d > 0 and net != base:
                     (lose if sig else ties).append((net, d, p))
             out.append(f"| {traffic_label(net)} | " + " | ".join(cells) + f" | {delta} |")
         out += [
             "",
-            f"▲ = rdzeń ISTOTNIE gorszy od lepszego z MaxPressure (jednostronny t, p < {ALPHA}, "
-            "seedy polityki vs deterministyczna reguła) — tylko tam gałąź (a) miałaby robotę.",
+            f"(!) = the core SIGNIFICANTLY worse than the better MaxPressure (one-sided t, "
+            f"p < {ALPHA}, policy seeds vs the deterministic rule); only there would branch "
+            "(a) have work.",
             "",
         ]
 
@@ -119,10 +118,10 @@ def main(plan: Plan) -> Path:
         if not ens.empty:
             k = max((len(v.get("ensemble", [])) for v in plan.controllers.values()), default=0)
             out += [
-                f"### Rozbieżność {k} actorów (epistemic w polityce)",
+                f"### Disagreement of {k} actors (epistemic in the policy)",
                 "",
-                "| ruch | MI czyste | MI szum σ=2 | niezgodne głosy czyste "
-                "| niezgodne głosy szum |",
+                "| traffic | MI clean | MI noise sigma=2 | disagreeing votes clean "
+                "| disagreeing votes noise |",
                 "|---|---:|---:|---:|---:|",
             ]
             for net in nets:
@@ -143,38 +142,40 @@ def main(plan: Plan) -> Path:
 
 
 def _verdict(plan: Plan, lose, ties, mi_rows, has_core: bool = True) -> list[str]:
-    """Wnioski z liczb. Logika bramki z planu: kanał OBSERWACYJNY rozstrzyga pierwszy
-    (awaria sensora → FixedTime), więc gałąź (a) potrzebuje tylko, żeby MI rosło na
-    CZYSTYM wejściu przy nowym ruchu — nie musi przebijać reakcji na szum. Musi za to
-    istnieć coś do ratowania: istotna przegrana polityki z MaxPressure."""
-    out = ["## Werdykt", ""]
+    """Conclusions from the numbers. The OBSERVATION channel decides first (sensor
+    failure -> FixedTime), so branch (a) only needs MI to rise on CLEAN input under new
+    traffic, and something to rescue: a significant loss of the policy to MaxPressure."""
+    out = ["## Verdict", ""]
     if not has_core:
-        out.append("1. **Brak wyników rdzenia (`gatppo`)** — pytanie 1 bez odpowiedzi.")
+        out.append("1. **No core results (`gatppo`)**: question 1 unanswered.")
     elif lose:
         worst = max(lose, key=lambda x: x[1])
         out.append(
-            f"1. **Rdzeń przegrywa ISTOTNIE z MaxPressure na {len(lose)} wariantach ruchu**, "
-            f"najmocniej na „{traffic_label(worst[0])}” ({worst[1]:+.1%}, p {worst[2]:.3f}). "
-            "Gałąź (a) ma tam robotę."
+            f"1. **The core loses SIGNIFICANTLY to MaxPressure on {len(lose)} traffic "
+            f'variants**, most on "{traffic_label(worst[0])}" ({worst[1]:+.1%}, '
+            f"p {worst[2]:.3f}). Branch (a) has work there."
         )
     else:
-        text = "1. **Rdzeń nie przegrywa istotnie z MaxPressure na żadnym ruchu spoza treningu.**"
+        text = (
+            "1. **The core does not lose significantly to MaxPressure on any traffic "
+            "outside training.**"
+        )
         if ties:
             text += (
-                " Remis w granicach rozrzutu seedów: "
-                + ", ".join(f"„{traffic_label(n)}” {d:+.1%} (p {p:.2f})" for n, d, p in ties)
+                " A tie within the seed spread: "
+                + ", ".join(f'"{traffic_label(n)}" {d:+.1%} (p {p:.2f})' for n, d, p in ties)
                 + "."
             )
         text += (
-            " Przełączenie na MaxPressure nie ma tu nic do zyskania, więc gałąź (a) "
-            "dwupoziomowego fallbacku nie ma roboty — fallback jednopoziomowy do FixedTime."
+            " Switching to MaxPressure has nothing to gain here, so branch (a) of the "
+            "two-level fallback has no work: a single-level fallback to FixedTime."
         )
         out.append(text)
     rising: list[str] = []
     if mi_rows:
         out += [
             "",
-            "Rozbieżność 5 actorów (MI) na CZYSTYM wejściu, względem ruchu treningowego:",
+            "Disagreement of 5 actors (MI) on CLEAN input, relative to training traffic:",
             "",
         ]
         for base in dict.fromkeys(base_network(n) for n in mi_rows):
@@ -189,28 +190,29 @@ def _verdict(plan: Plan, lose, ties, mi_rows, has_core: bool = True) -> list[str
                 if up:
                     rising.append(net)
                 out.append(
-                    f"* `{traffic_label(net)}`: MI {shift:+.4f} ({rel:+.0%}); dla porównania szum "
-                    f"σ=2 na ruchu treningowym {noise:+.4f} → "
-                    + ("**rośnie** — sygnał nowego ruchu istnieje" if up else "nie rośnie")
+                    f"* `{traffic_label(net)}`: MI {shift:+.4f} ({rel:+.0%}); for comparison, "
+                    f"noise sigma=2 on training traffic {noise:+.4f} -> "
+                    + ("**rises**: a new-traffic signal exists" if up else "does not rise")
                     + (
                         ""
                         if not up or shift > noise
-                        else " (słabiej niż pod szumem: bez kanału obserwacyjnego nieodróżnialny)"
+                        else " (weaker than under noise: indistinguishable without the "
+                        "observation channel)"
                     )
                     + "."
                 )
         both = [n for n, _, _ in lose if n in rising]
         out += [
             "",
-            "2. **Gałąź (a) broni się tylko tam, gdzie OBA warunki zachodzą na tym samym ruchu:** "
-            "istotna przegrana z MaxPressure i wzrost MI na czystym wejściu. "
+            "2. **Branch (a) holds only where BOTH conditions hold on the same traffic:** "
+            "a significant loss to MaxPressure and an MI rise on clean input. "
             + (
-                f"Zachodzą na: {', '.join(traffic_label(n) for n in both)}."
+                f"They hold on: {', '.join(traffic_label(n) for n in both)}."
                 if both
-                else "Nie zachodzą nigdzie"
+                else "They hold nowhere"
                 + (
-                    f" — MI rośnie na „{', '.join(traffic_label(n) for n in rising)}”, "
-                    "ale tam polityka nie przegrywa, więc nie ma czego ratować."
+                    f'; MI rises on "{", ".join(traffic_label(n) for n in rising)}", '
+                    "but there the policy does not lose, so there is nothing to rescue."
                     if rising
                     else "."
                 )
@@ -220,8 +222,7 @@ def _verdict(plan: Plan, lose, ties, mi_rows, has_core: bool = True) -> list[str
 
 
 def _write(plan: Plan, lines: list[str]) -> Path:
-    # osobny plik: `tsc degrade report <plan>` pisze `<plan>.md` (tabela degradacji)
-    # i bez sufiksu jeden raport nadpisywałby drugi
+    # a separate file: `tsc degrade report <plan>` writes `<plan>.md`
     path = RESULTS / f"{plan.name}_epistemic.md"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path

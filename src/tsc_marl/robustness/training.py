@@ -1,196 +1,70 @@
-"""Trening polityki Z mechanizmem — awarie w treningu (domain randomization) + log ρ.
+"""Training a policy WITH a mechanism: failure randomization plus UW-attention.
 
-Odpowiedź na pytanie otwarte z `tsc_marl_research/faza3-po-t2.md` §3: T2 pokazało,
-że UW-attention DOKLEJONE do gotowej polityki jest wobec ATT neutralne. To NIE jest
-to samo, co „architektura trenowana z nim nic by nie dała" — i tego dotyczy ten
-moduł.
+UW-attention attached to an already trained policy is not the same as an
+architecture trained with it, so the core can also be trained with log_rho in
+the loop. Two things must come together:
 
-DWIE RZECZY, KTÓRE MUSZĄ WEJŚĆ RAZEM (i dlaczego osobno nie mają sensu):
+1. Failures in training (`domain.sensors.FailureMix`): on clean traffic the
+   modulation is almost silent, so the policy would have nothing to learn from.
+2. A control arm: "trained with failures, without UW" next to "with failures,
+   with UW", on the same failure schedule, so their difference is the mechanism.
 
-1. AWARIE W TRENINGU. Rdzeń Fazy 1 uczy się na CZYSTYM ruchu, gdzie zmierzone
-   `uw_active` ≈ 3%, a `uw_spread` ≈ 0,39 nata. Polityka przez cały trening prawie
-   nie zobaczyłaby modulacji — eksperyment wyszedłby pusty z powodu trywialnego
-   i nie dałoby się go odróżnić od wyniku merytorycznego. Żeby mechanizm miał się
-   czego nauczyć, awarie muszą być w rozkładzie treningowym.
-
-2. TRZY RAMIONA, NIE DWA. Sam punkt (1) rodzi natychmiastowy zarzut „poprawa jest
-   od treningu z awariami, nie od mechanizmu". Uczciwy układ to:
-
-       rdzeń na czystym (jest — `p1_gate`)  ·  rdzeń z awariami BEZ UW (`p1_fail`)
-                                            ·  rdzeń z awariami Z UW  (`p1_uw`)
-
-   Ramiona 2 i 3 MUSZĄ widzieć ten sam harmonogram awarii, inaczej różnica między
-   nimi miesza mechanizm z innym losowaniem. Stąd `FailureMix` losuje scenariusz
-   ze strumienia zależnego WYŁĄCZNIE od (`seed` mixu, numer epizodu) — nie od
-   `--seed` polityki. To ta sama zasada, co w `domain/sensors.py`: gdyby wzorzec
-   awarii szedł z ziarna polityki, seedy różniłyby się jednocześnie inicjalizacją
-   sieci I tym, które detektory padły, i rozrzutu nie dałoby się rozdzielić.
-
-OGRANICZENIE DO NAZWANIA WPROST W ROZDZIALE 4. `u_ref` jest skalibrowane na zrzucie
-BC z Advanced-MP (ATT ≈ 270 s), a w trakcie treningu rozkład stanów dryfuje wraz
-z polityką, więc punkt odniesienia przestaje pasować. Obrona: głowa i `u_ref` zostają
-ZAMROŻONE (liczą się pod `no_grad`, nie są w `parameters()`, nie ma ich
-w checkpoincie). Przeliczanie `u_ref` w trakcie treningu wprowadziłoby sprzężenie
-polityka↔odniesienie, którego potem nie da się rozplątać — i to jest powód, nie wygoda.
-
-JAK TO WYGLĄDA W LICZBACH, bo to widać od pierwszego epizodu. Nieuczona polityka
-korkuje sieć (ATT ≈ 615 s wobec 270 s w zrzucie), kolejki rosną poza zakres zrzutu,
-σ głowy idzie w górę WSZĘDZIE i `relu(u − u_ref)` przestaje selekcjonować: na
-`mask0p25` zmierzone `uw_spread` = 6,85 i `uw_active` = 47%, wobec 0,83 / kilku
-procent na tym samym scenariuszu przy polityce wytrenowanej (`results/t2_uw.md`).
-Na starcie treningu mechanizm jest więc NASYCONY, a nie precyzyjny. Dlatego
-`uw_spread` i `uw_active` lecą do `metrics.csv` per epizod: ich opadanie wraz z ATT
-jest jedyną obserwacją, która odróżnia „mechanizm stopniowo zaczyna coś znaczyć"
-od „mechanizm przez cały trening był szumem".
+The uncertainty source is FROZEN during training (computed under `no_grad`, not
+in `parameters()`, not in the checkpoint) and calibrated beforehand. Recomputing
+its reference during training would couple policy and reference in a way that
+cannot be untangled later. `uw_spread` and `uw_active` are logged per episode to
+tell "the mechanism gradually matters" from "it was noise all along".
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-
-from tsc_marl.domain.sensors import FailureSpec
 
 if TYPE_CHECKING:
     import torch
     from torch import Tensor
 
-CLEAN = FailureSpec()
-
-#: Skąd UW-attention bierze u: z głowy obserwacyjnej, z prawdy warstwy awarii
-#: (wyrocznia modulacji — górne ograniczenie, `controllers.OracleUncertainty`) albo
-#: z licznika zamrożonych detektorów (`controllers.RuleUncertainty`, wdrażalny).
+#: Where UW-attention takes u from: the observation head, the failure layer's truth
+#: (modulation oracle, an upper bound, `controllers.OracleUncertainty`) or the
+#: frozen-detector counter (`controllers.RuleUncertainty`, deployable).
 UW_SOURCES = ("head", "oracle", "rule")
-#: Kanały modulacji po stronie źródła — opis przy `controllers.source_log_rho`.
+#: Source-side modulation channels, see `controllers.source_log_rho`.
 UW_CHANNELS = ("all", "self", "edges")
 
 
 def check_uw(uw: dict[str, Any]) -> str | None:
-    """Błąd w spec `uw` albo None. JEDEN walidator dla planu T2 i suite'a treningowego.
-
-    Każda literówka ma tu być błędem, a nie wartością domyślną: kolumna podpisana
-    „reguła" liczona po cichu głową (albo trening „z regułą" uczony na głowie po
-    stronie celu) powtarzałaby stary pomiar pod nową nazwą — i nic by tego nie zgłosiło.
+    """Error in a `uw` spec, or None. ONE validator for evaluation plans and
+    training suites. Every typo is an error rather than a default: a column
+    labelled "rule" silently computed by the head would repeat an old measurement
+    under a new name.
     """
-    from tsc_marl.uncertainty.obs_head import EDGE_SIDES  # noqa: PLC0415 - ciągnie torcha
+    from tsc_marl.uncertainty.obs_head import EDGE_SIDES  # pulls in torch
 
-    nieznane = set(uw) - {"tau", "side", "u", "channels", "threshold"}
-    if nieznane:
-        return f"nieznane klucze {sorted(nieznane)}"
+    unknown = set(uw) - {"tau", "side", "u", "channels", "threshold"}
+    if unknown:
+        return f"unknown keys {sorted(unknown)}"
     if "side" in uw and uw["side"] not in EDGE_SIDES:
-        return f"side={uw['side']!r}, dozwolone: {EDGE_SIDES}"
-    zrodlo = uw.get("u", "head")
-    if zrodlo not in UW_SOURCES:
-        return f"u={zrodlo!r}, dozwolone: {UW_SOURCES}"
-    # wyrocznia i reguła istnieją tylko po stronie źródła (`source_log_rho`) —
-    # wymagamy tego JAWNIE, żeby w planie nie stało coś, czego sterownik nie liczy
-    if zrodlo in ("oracle", "rule") and uw.get("side") != "source":
-        return f"modulacja u={zrodlo} wymaga side: source"
+        return f"side={uw['side']!r}, allowed: {EDGE_SIDES}"
+    source = uw.get("u", "head")
+    if source not in UW_SOURCES:
+        return f"u={source!r}, allowed: {UW_SOURCES}"
+    # oracle and rule exist only on the source side (`source_log_rho`); required
+    # EXPLICITLY so the plan never states something the controller does not compute
+    if source in ("oracle", "rule") and uw.get("side") != "source":
+        return f"modulation u={source} requires side: source"
     if "channels" in uw:
         if uw["channels"] not in UW_CHANNELS:
-            return f"channels={uw['channels']!r}, dozwolone: {UW_CHANNELS}"
-        if zrodlo == "head":
-            return "channels tylko z u: oracle albo u: rule (głowa nie rozdziela kanałów)"
-    if "threshold" in uw and zrodlo != "rule":
-        return "threshold tylko z u: rule (próg licznika zamrożeń)"
+            return f"channels={uw['channels']!r}, allowed: {UW_CHANNELS}"
+        if source == "head":
+            return "channels only with u: oracle or u: rule (the head has no channels)"
+    if "threshold" in uw and source != "rule":
+        return "threshold only with u: rule (frozen-counter threshold)"
     return None
 
 
-# ------------------------------------------------------------------ mieszanka awarii
-
-
-@dataclass(frozen=True)
-class FailureMix:
-    """Rozkład scenariuszy awarii na epizody treningowe.
-
-    `sample(episode)` losuje z WŁASNEGO strumienia kluczowanego numerem epizodu,
-    a nie z globalnego generatora: dzięki temu harmonogram nie zależy ani od
-    `--seed`, ani od tego, ile epizodów już poleciało (wznowiony trening od epizodu
-    137 dostaje ten sam scenariusz co bieg ciągły). Ten sam wzorzec, co
-    `SensorModel.reset`, i z tego samego powodu.
-
-    KTÓRE detektory padną, wybiera już `SensorModel` z (`spec.seed`, `episode`) —
-    więc dwa epizody z tym samym scenariuszem i tak psują inne pasy.
-    """
-
-    specs: tuple[FailureSpec, ...]
-    weights: tuple[float, ...]
-    seed: int = 0
-
-    def __post_init__(self) -> None:
-        if not self.specs:
-            raise ValueError("pusta mieszanka awarii — podaj co najmniej jeden scenariusz")
-        if len(self.specs) != len(self.weights):
-            raise ValueError(f"{len(self.specs)} scenariuszy, {len(self.weights)} wag")
-        if any(w < 0 for w in self.weights):
-            raise ValueError(f"wagi muszą być nieujemne, są {self.weights}")
-        if sum(self.weights) <= 0:
-            raise ValueError("suma wag musi być dodatnia")
-
-    @property
-    def probabilities(self) -> np.ndarray:
-        w = np.asarray(self.weights, dtype=np.float64)
-        return w / w.sum()
-
-    def sample(self, episode: int) -> FailureSpec:
-        rng = np.random.default_rng([self.seed, int(episode)])
-        return self.specs[int(rng.choice(len(self.specs), p=self.probabilities))]
-
-    def as_dict(self) -> dict[str, Any]:
-        """Do parametrów biegu — bez tego z `runs/` nie wynika, na czym uczyła się
-        polityka, a dwa ramiona z różnymi mieszankami wyglądałyby tak samo."""
-        return {
-            "seed": self.seed,
-            "scenarios": [
-                {"weight": float(w), **s.as_dict()}
-                for s, w in zip(self.specs, self.weights, strict=True)
-            ],
-        }
-
-    def describe(self) -> str:
-        from tsc_marl.robustness.degrade import slug  # noqa: PLC0415 - cykl importu
-
-        return ", ".join(
-            f"{slug(s)}={p:.0%}" for s, p in zip(self.specs, self.probabilities, strict=True)
-        )
-
-    @classmethod
-    def from_config(cls, raw: Any) -> FailureMix | None:
-        """`model.failure_mix` z YAML-a -> mieszanka albo None (bieg bez awarii).
-
-        Format (patrz `configs/suites/p1_fail.yml`):
-
-            failure_mix:
-              seed: 0
-              scenarios:
-                - {weight: 3, kind: none}
-                - {weight: 1, kind: gauss, level: 2.0}
-
-        Nieznane pola scenariusza wywalają się w `FailureSpec.__post_init__` —
-        literówka w YAML-u ma paść przy budowie, nie po 200 epizodach.
-        """
-        if not raw:
-            return None
-        if not isinstance(raw, dict) or "scenarios" not in raw:
-            raise ValueError("failure_mix musi być mapą z kluczem `scenarios`")
-        specs, weights = [], []
-        for entry in raw["scenarios"]:
-            item = dict(entry)
-            weights.append(float(item.pop("weight", 1.0)))
-            specs.append(FailureSpec(**item))
-        return cls(tuple(specs), tuple(weights), seed=int(raw.get("seed", 0)))
-
-    @classmethod
-    def from_registry(cls) -> FailureMix | None:
-        from common.registry import Registry  # noqa: PLC0415 - dopiero po bootstrapie
-
-        param = Registry.mapping["model_mapping"]["setting"].param
-        return cls.from_config(param.get("failure_mix"))
-
-
-# --------------------------------------------------------- głowa w pętli treningowej
+# --------------------------------------------------------- uncertainty in the loop
 
 
 def online_uncertainty(
@@ -201,42 +75,35 @@ def online_uncertainty(
     tau: float | None = None,
     side: str = "target",
 ) -> Any:
-    """`OnlineUncertainty` z ZAMROŻONYCH artefaktów `runs/heads/` dla tej sieci.
+    """`OnlineUncertainty` from the FROZEN artefacts in `runs/heads/` for this network.
 
-    Wspólne dla ewaluacji (`runner/degrade.build_uncertainty`) i dla treningu:
-    dwie kopie tego ładowania rozjechałyby się przy pierwszej zmianie nazw plików,
-    a rozjazd „u_ref z innej głowy niż wagi" jest cichy — to liczby w innych
-    jednostkach, nie błąd. `load_reference` sprawdza odcisk pliku głowy i odmawia.
-
-    `network` ma być siecią BAZOWĄ (bez sufiksu wariantu popytu): artefakty są
-    związane z siecią, głowa z JiNan na HangZhou ma AUROC 0,53
-    (`results/gate_2_2.md`).
-
-    `side` wybiera PLIK odniesienia (`oh.reference_path`), a strona zapisana w nim
-    musi się z nim zgadzać — plik przemianowany ręcznie dałby u po jednej stronie
-    krawędzi i próg po drugiej, bez żadnego wyjątku.
+    Shared by evaluation and training: a "u_ref from another head than the
+    weights" mismatch is silent (numbers in other units), so `load_reference`
+    checks the head file's hash. `network` is the BASE network (no demand-variant
+    suffix): the artefacts belong to a network. `side` picks the reference FILE,
+    and the side recorded inside must match it.
     """
-    from tsc_marl.uncertainty import obs_head as oh  # noqa: PLC0415
+    from tsc_marl.uncertainty import obs_head as oh
 
     head, ref = oh.head_path(network), oh.reference_path(network, side)
     if not head.is_file():
         raise SystemExit(
-            f"brak głowy obserwacyjnej dla '{network}' ({head.name}) — "
-            f"policz ją: tsc obshead -n {network} --save --window 12 --persistence"
+            f"no observation head for '{network}' ({head.name}); "
+            f"compute it: tsc obshead -n {network} --save --window 12 --persistence"
         )
     if not ref.is_file():
         raise SystemExit(
-            f"brak odniesienia '{ref.name}' dla '{network}' — "
+            f"no reference '{ref.name}' for '{network}'; "
             + (
-                f"policz je: tsc obshead -n {network} --save --window 12 --persistence"
+                f"compute it: tsc obshead -n {network} --save --window 12 --persistence"
                 if side == "target"
-                else f"policz je dla istniejącej głowy: tsc obshead -n {network} --reference {side}"
+                else f"compute it for the head: tsc obshead -n {network} --reference {side}"
             )
         )
     fitted = oh.load_head(head, network=network)
     reference = oh.load_reference(ref, network=network, head=head)
     if reference.side != side:
-        raise SystemExit(f"{ref.name} ma side={reference.side!r}, a plan chce {side!r}")
+        raise SystemExit(f"{ref.name} has side={reference.side!r}, the plan wants {side!r}")
     sources = oh.movement_sources(network, n_mov)
     return oh.OnlineUncertainty(
         fitted, reference, sources, edge_index, tau=oh.DEFAULT_TAU if tau is None else float(tau)
@@ -244,58 +111,54 @@ def online_uncertainty(
 
 
 def gate_reference(network: str) -> Any:
-    """Progi bramek realnych dla sieci BAZOWEJ (`runs/heads/gate_ref__<sieć>.npz`).
+    """Real-gate thresholds for the BASE network (`runs/heads/gate_ref__<net>.npz`).
 
-    Wspólne dla bramki-reguły w ewaluacji, modulacji z reguły w ewaluacji i modulacji
-    z reguły w TRENINGU — jedno ładowanie, żeby polityka nie uczyła się na innym
-    oknie albo progu, niż potem mierzy ją `tsc degrade`."""
-    from tsc_marl.robustness import rule_ref  # noqa: PLC0415
-    from tsc_marl.uncertainty import obs_head as oh  # noqa: PLC0415
+    Shared by the rule gate and rule modulation, in evaluation and in training,
+    so the policy never learns with another window or threshold than
+    `tsc degrade` measures it with."""
+    from tsc_marl.robustness import rule_ref
+    from tsc_marl.uncertainty import obs_head as oh
 
-    sciezka = oh.gate_path(network)
-    if sciezka.is_file():
-        return oh.load_gates(sciezka, network=network, head=oh.head_path(network))
-    # Sieć bez głowy (Kraków, SUMO): sam próg reguły, tym samym przepisem — patrz
-    # `robustness/rule_ref.py`. `uq` jest wtedy None i bramka UQ się nie zbuduje.
-    regula = rule_ref.rule_path(network)
-    if regula.is_file():
-        return rule_ref.load_rule(regula, network=network)
+    path = oh.gate_path(network)
+    if path.is_file():
+        return oh.load_gates(path, network=network, head=oh.head_path(network))
+    # A network without a head (Krakow, SUMO): the rule threshold alone, same recipe
+    # (`robustness/rule_ref.py`); `uq` is None and no UQ gate can be built.
+    rule = rule_ref.rule_path(network)
+    if rule.is_file():
+        return rule_ref.load_rule(rule, network=network)
     raise SystemExit(
-        f"brak progów bramki dla '{network}' — policz je: "
-        f"tsc obshead -n {network} --save --window 12 --persistence (CityFlow, z głową) "
-        f"albo tsc rulecal -n {network} (sama reguła, także SUMO)"
+        f"no gate thresholds for '{network}'; compute them: "
+        f"tsc obshead -n {network} --save --window 12 --persistence (CityFlow, with a head) "
+        f"or tsc rulecal -n {network} (rule only, also SUMO)"
     )
 
 
 def uw_signal(uw: dict[str, Any], network: str, env: Any) -> Any:
-    """Źródło log ρ dla UW-attention ze spec `uw` — JEDNO dla treningu i ewaluacji.
+    """log_rho source for UW-attention from a `uw` spec, ONE for training and evaluation.
 
-    `u: head` (domyślnie) — zamrożona głowa obserwacyjna po stronie `side`;
-    `u: oracle` — prawda z warstwy awarii (sufit, `controllers.OracleUncertainty`);
-    `u: rule` — licznik zamrożonych detektorów z oknem i progiem bramki-reguły
-    (`controllers.RuleUncertainty`). `channels` dotyczy tylko oracle/rule (strona
-    źródła). `network` = sieć BAZOWA, `env` = `TrafficEnv` (czytany na bieżąco:
-    `env.features` podmienia się per scenariusz i per epizod mieszanki awarii).
-
-    Przed tą funkcją trening znał wyłącznie głowę po stronie celu (`p1_uw`), a
-    ewaluacja wszystkie trzy źródła — więc sygnał z reguły dało się mierzyć, ale
-    nie dało się z nim uczyć."""
-    from tsc_marl.robustness import controllers as c  # noqa: PLC0415
+    `u: head` (default): the frozen observation head on `side`; `u: oracle`: the
+    failure layer's truth (`controllers.OracleUncertainty`); `u: rule`: the
+    frozen-detector counter with the rule gate's window and threshold
+    (`controllers.RuleUncertainty`). `channels` applies to oracle and rule only.
+    `network` is the BASE network; `env` is read live, since `env.features`
+    changes per scenario and per failure-mix episode."""
+    from tsc_marl.robustness import controllers as c
 
     tau = uw.get("tau")
-    zrodlo = uw.get("u", "head")
+    source = uw.get("u", "head")
     channels = uw.get("channels", "all")
     edge_index = env.graph.edge_index
-    if zrodlo == "oracle":
+    if source == "oracle":
         return c.OracleUncertainty(
             env, edge_index, tau=float(0.25 if tau is None else tau), channels=channels
         )
-    if zrodlo == "rule":
-        progi = gate_reference(network)
+    if source == "rule":
+        thresholds = gate_reference(network)
         return c.RuleUncertainty(
             edge_index,
-            window=progi.window,
-            threshold=float(uw.get("threshold", progi.rule)),
+            window=thresholds.window,
+            threshold=float(uw.get("threshold", thresholds.rule)),
             n_mov=env.features.n_mov,
             tau=float(0.25 if tau is None else tau),
             channels=channels,
@@ -307,17 +170,12 @@ def uw_signal(uw: dict[str, Any], network: str, env: Any) -> Any:
 
 
 class UWStream:
-    """log ρ krok po kroku + diagnostyka epizodu — to samo, co robi `UWPolicyController`.
+    """log_rho step by step plus episode diagnostics, as in `UWPolicyController`.
 
-    Wydzielone, bo trening potrzebuje DOKŁADNIE tej samej ścieżki co ewaluacja:
-    ten sam bufor okna, ten sam `reset()` na starcie epizodu, ten sam `uw_spread`.
-    Gdyby trening liczył log ρ inaczej niż `tsc degrade`, polityka uczyłaby się
-    jednego sygnału, a była mierzona drugim — i nic by tego nie zgłosiło.
-
-    URZĄDZENIE. Głowa liczy na CPU (jeden mały MLP na 12 wierszach, `no_grad`),
-    bo `OnlineUncertainty` trzyma bufor w numpy, a `group_spread` i tak wraca na
-    CPU. Na urządzenie polityki jedzie dopiero gotowy wektor [E+N] — raz na
-    decyzję, 240 razy na epizod, więc transfer jest szumem wobec kroku symulatora.
+    Training needs EXACTLY the evaluation path (same window buffer, same reset at
+    episode start, same `uw_spread`), or the policy would learn one signal and be
+    measured with another. The source runs on the CPU; only the final [E+N]
+    vector moves to the policy's device, once per decision.
     """
 
     def __init__(
@@ -328,26 +186,25 @@ class UWStream:
         *,
         n_nodes: int | None = None,
     ) -> None:
-        import torch  # noqa: PLC0415
+        import torch
 
         self.uncertainty = uncertainty
-        self.edge_index = edge_index  # CPU — kolejność krawędzi, nie obliczenia
+        self.edge_index = edge_index  # CPU: edge order, not computation
         self.device = torch.device(device)
         self.n_nodes = int(n_nodes if n_nodes is not None else int(edge_index.max()) + 1)
         self.reset()
 
     def reset(self) -> None:
-        """Czyszczenie bufora okna to POPRAWNOŚĆ, nie higiena: odczyt sprzed
-        `world.reset()` opisuje zupełnie inny stan ruchu, a głowa policzyłaby
-        z niego wysokie σ i mechanizm zaczynałby epizod od wygaszania losowych
-        sąsiadów."""
+        """Clearing the window is correctness, not hygiene: a reading from before
+        `world.reset()` describes other traffic and would start the episode by
+        muting random neighbours."""
         self.uncertainty.reset()
         self._spread: list[float] = []
         self._active: list[float] = []
 
     def log_rho(self, obs: np.ndarray) -> Tensor:
-        """[E+N] na urządzeniu polityki; przy okazji zbiera diagnostykę epizodu."""
-        from tsc_marl.uncertainty.obs_head import group_spread  # noqa: PLC0415
+        """[E+N] on the policy's device; also collects episode diagnostics."""
+        from tsc_marl.uncertainty.obs_head import group_spread
 
         lr = self.uncertainty.log_rho(obs)  # CPU
         self._spread.append(group_spread(lr, self.edge_index, self.n_nodes))
@@ -355,10 +212,9 @@ class UWStream:
         return lr.to(self.device)
 
     def episode_stats(self) -> dict[str, float]:
-        """`uw_spread` = średni rozstęp log ρ w GRUPIE SOFTMAXU węzła, czyli jedyna
-        część sygnału, którą attention widzi (na stałą wspólną dla grupy jest
-        niezmienniczy). Bez tej liczby krzywa uczenia ramienia 3 jest nieodróżnialna
-        od ramienia 2, które po prostu nie ma mechanizmu."""
+        """`uw_spread` = mean spread of log_rho within a node's softmax group, the
+        only part of the signal attention sees. Without it a training curve with
+        the mechanism cannot be told apart from one without."""
         if not self._spread:
             return {}
         return {
@@ -368,18 +224,15 @@ class UWStream:
 
 
 def uw_config_from_registry() -> dict[str, Any] | None:
-    """`model.uw` z YAML-a -> {'tau': ...} albo None (bieg bez mechanizmu).
-
-    `uw: True` też działa i znaczy „domyślne τ" — τ jest dobrane raz, na tabeli
-    rozstępu log ρ (`obs_head.DEFAULT_TAU`), a nie strojone per bieg.
-    """
-    from common.registry import Registry  # noqa: PLC0415 - dopiero po bootstrapie
+    """`model.uw` from YAML -> {'tau': ...} or None (a run without the mechanism).
+    `uw: True` means the default tau (`obs_head.DEFAULT_TAU`), chosen once."""
+    from common.registry import Registry
 
     raw = Registry.mapping["model_mapping"]["setting"].param.get("uw")
     if not raw:
         return None
     uw = {} if raw is True else dict(raw)
-    blad = check_uw(uw)
-    if blad:
-        raise SystemExit(f"model.uw w suite: {blad}")
+    error = check_uw(uw)
+    if error:
+        raise SystemExit(f"model.uw in the suite: {error}")
     return uw

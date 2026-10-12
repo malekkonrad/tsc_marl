@@ -1,21 +1,15 @@
-"""Raport T2 bez mechanizmu: tabela i krzywe degradacji zamrożonych sterowników.
+"""Degradation report of frozen controllers: tables and curves for one plan.
 
-Czyta biegi `runs/t2/*__<plan>` (nic nie uruchamia). Dwie decyzje, które zmieniają
-liczby, więc są tu jawnie:
+Reads runs `runs/t2/*__<plan>` and runs nothing. Two choices change the numbers:
 
-* UŚREDNIANIE DWUSTOPNIOWE — najpierw po LOSOWANIACH awarii w obrębie seeda, potem
-  mean±std po SEEDACH polityki. Std w tabeli to więc rozrzut między politykami, nie
-  między losowaniami; płaska średnia po wszystkich wierszach mieszałaby oba źródła
-  (patrz `domain/sensors.py`: RNG awarii jest celowo niezależny od `--seed`).
-* ODNIESIENIE — degradacja Δ liczona względem CZYSTEGO wyniku TEGO SAMEGO sterownika
-  w tym samym ewaluatorze, nie względem T1. Na czystym ewaluator zgadza się z T1
-  co do decyzji poza remisami (`robustness/controllers.py`), ale remisy potrafią
-  przesunąć ATT o ~1%, a to jest rząd małych degradacji.
+* TWO-STAGE AVERAGING: first over failure DRAWS within a seed, then mean +- std over
+  policy SEEDS, so the std is the spread between policies, not between draws.
+* REFERENCE: degradation is relative to the CLEAN result of THE SAME controller in the
+  same evaluator, not to T1 (ties can move ATT by ~1%, the size of small degradations).
 
-Kontrola spójności: czysty wynik uczonego sterownika MUSI równać się ostatniemu
-testowi z jego treningu (te same wagi, argmax, deterministyczny CityFlow). Raport
-liczy tę różnicę — niezerowa znaczy, że ewaluator nie mierzy tej polityki, którą
-mierzy tabela T1.
+Consistency check: the clean result of a learned controller MUST equal the last test
+of its training (same weights, argmax, deterministic CityFlow); the report shows the
+difference.
 """
 
 from __future__ import annotations
@@ -27,103 +21,89 @@ import numpy as np
 
 from tsc_marl.domain.sensors import FailureSpec
 from tsc_marl.paths import RESULTS, RUNS
-from tsc_marl.robustness.degrade import EXPERIMENT, LEARNED, Plan, slug
+from tsc_marl.robustness.degrade import EXPERIMENT, LEARNED, Plan
 
-# Kolory: sloty 1–4 palety kategorycznej (walidacja: CVD ΔE ≥ 9,1, normal ≥ 22,9).
-# Kolor idzie za STEROWNIKIEM, nie za pozycją — brakujący sterownik nie przemalowuje
-# pozostałych.
+# Colours follow the CONTROLLER, not the position, so a missing one does not repaint
+# the rest. Slots of one categorical palette (checked for colour blindness); ramps of a
+# single hue for sweeps of ONE parameter (threshold, tau), where darker = stronger.
 COLORS = {
     "gatppo": "#2a78d6",
     "advancedcolight": "#eb6834",
     "efficientmp": "#1baf7a",
     "advancedmp": "#eda100",
-    # warianty actora z ablacji 1.6 (plan t2_ablations): sloty 5 i 7 palety, żeby
-    # nie pożyczać koloru Advanced-CoLighta ani reguł z t2_nomech (walidacja
-    # z rdzeniem: CVD ΔE ≥ 13,0, normal ≥ 27,5)
+    # ablation actor variants (t2_ablations)
     "gatppo_mean": "#e87ba4",
     "gatppo_nognn": "#4a3aa7",
-    # mechanizmy Fazy 3 (plany t2_uw, t2_gate). Kolejne sloty tej samej palety;
-    # ΔE nie przeliczane, bo te kolumny nie pojawiają się na jednym wykresie
-    # z wariantami ablacyjnymi — w swoich planach sąsiadują tylko z rdzeniem.
+    # mechanisms (t2_uw, t2_gate)
     "gatppo_uw": "#d63f6e",
     "gatppo_gate": "#7a4fd6",
-    # SWEEP PROGU bramki (t2_gate) to dane UPORZĄDKOWANE — jeden parametr rosnący —
-    # więc rampa jednej barwy od jasnej do ciemnej, a nie cztery kolory kategorialne.
-    # Kategorialne sugerowałyby cztery różne mechanizmy zamiast czterech nastawień
-    # jednego; kolejność progów przestałaby być czytelna z samego wykresu.
+    # gate threshold sweep (t2_gate): a ramp, light to dark
     "gatppo_gate_t0p25": "#b49ae8",
     "gatppo_gate_t0p50": "#8f66dd",
     "gatppo_gate_t0p75": "#6a3fc4",
     "gatppo_gate_t1p00": "#452a8a",
-    # bramki realne (t2_gate_real): wyrocznia zostaje fioletowa jak sweep, a dwa
-    # sygnały wdrażalne dostają własne barwy — tu to SĄ różne mechanizmy, nie
-    # nastawienia jednego, więc kategorialnie, a nie rampą.
+    # real gates (t2_gate_real): different mechanisms, so categorical
     "gatppo_gate_oracle": "#7a4fd6",
     "gatppo_gate_rule": "#1baf7a",
     "gatppo_gate_uq": "#eda100",
-    # sweep τ (t2_uw_tau): znowu JEDEN parametr rosnący, więc rampa — od słabej
-    # modulacji (jasna) do najsilniejszej (ciemna). Uwaga na kierunek: NIŻSZE τ
-    # znaczy SILNIEJSZA modulacja, więc ciemny = mała liczba.
+    # tau sweep (t2_uw_tau): a ramp; LOWER tau = STRONGER modulation = darker
     "gatppo_uw_t0p25": "#f3a6bd",
     "gatppo_uw_t0p10": "#d63f6e",
     "gatppo_uw_t0p05": "#8c1c40",
-    # ramiona 2 i 3 z planu `t2_train_uw` — sloty 6 i 8 palety, dobrane tak, żeby
-    # odróżniały się od rdzenia (slot 1) także w symulacji CVD
+    # arms 2 and 3 of `t2_train_uw`
     "gatppo_fail": "#00a3a3",
     "gatppo_fail_uw": "#a8442c",
-    # t2_uw_src: strona celu zostaje w kolorze `gatppo_uw`, strona źródła dostaje
-    # ciemniejszy odcień tej samej barwy — to jeden mechanizm w dwóch mapowaniach,
-    # nie dwa różne mechanizmy
+    # t2_uw_src: the source side is a darker shade of the same mechanism
     "gatppo_uw_src": "#8c1c40",
-    # wyrocznia modulacji: fiolet wyroczni bramki — ta sama rola (sufit), inny mechanizm
+    # modulation oracle: the gate oracle's violet, the same role (ceiling)
     "gatppo_uw_oracle": "#7a4fd6",
 }
 LABELS = {
-    "gatppo": "rdzeń GAT+PPO+CTDE",
+    "gatppo": "core GAT+PPO+CTDE",
     "advancedcolight": "Advanced-CoLight",
     "efficientmp": "Efficient-MP",
     "advancedmp": "Advanced-MP",
     "fixedtime": "FixedTime",
     "gatppo_mean": "actor mean-pool",
-    "gatppo_nognn": "actor bez GNN",
-    "gatppo_ens": "ensemble 5 actorów (decyduje seed 0)",
-    "gatppo_uw": "rdzeń + UW-attention",
-    "gatppo_gate": "rdzeń + bramka (wyrocznia)",
-    "gatppo_gate_t0p25": "bramka, próg 0,25",
-    "gatppo_gate_t0p50": "bramka, próg 0,50",
-    "gatppo_gate_t0p75": "bramka, próg 0,75",
-    "gatppo_gate_t1p00": "bramka, próg 1,00",
-    "gatppo_gate_oracle": "bramka: wyrocznia (sufit)",
-    "gatppo_gate_rule": "bramka: reguła (trwałość)",
-    "gatppo_gate_uq": "bramka: UQ (głowa)",
-    "gatppo_uw_t0p25": "UW-attention, τ = 0,25",
-    "gatppo_uw_t0p10": "UW-attention, τ = 0,10",
-    "gatppo_uw_t0p05": "UW-attention, τ = 0,05",
-    "gatppo_fail": "rdzeń trenowany z awariami",
-    "gatppo_fail_uw": "rdzeń z awariami + UW-attention",
-    "gatppo_fail_gate_rule": "rdzeń z awariami + bramka: reguła",
-    "gatppo_uw_src": "rdzeń + UW-attention (strona źródła)",
-    "gatppo_uw_oracle": "UW-attention: wyrocznia (sufit)",
+    "gatppo_nognn": "actor without GNN",
+    "gatppo_ens": "ensemble of 5 actors (seed 0 decides)",
+    "gatppo_uw": "core + UW-attention",
+    "gatppo_gate": "core + gate (oracle)",
+    "gatppo_gate_t0p25": "gate, threshold 0.25",
+    "gatppo_gate_t0p50": "gate, threshold 0.50",
+    "gatppo_gate_t0p75": "gate, threshold 0.75",
+    "gatppo_gate_t1p00": "gate, threshold 1.00",
+    "gatppo_gate_oracle": "gate: oracle (ceiling)",
+    "gatppo_gate_rule": "gate: rule (persistence)",
+    "gatppo_gate_uq": "gate: UQ (head)",
+    "gatppo_uw_t0p25": "UW-attention, tau = 0.25",
+    "gatppo_uw_t0p10": "UW-attention, tau = 0.10",
+    "gatppo_uw_t0p05": "UW-attention, tau = 0.05",
+    "gatppo_fail": "core trained with failures",
+    "gatppo_fail_uw": "core with failures + UW-attention",
+    "gatppo_fail_gate_rule": "core with failures + gate: rule",
+    "gatppo_uw_src": "core + UW-attention (source side)",
+    "gatppo_uw_oracle": "UW-attention: oracle (ceiling)",
 }
 INK, INK2, MUTED = "#0b0b0b", "#52514e", "#898781"
 GRID, AXIS, SURFACE = "#e1e0d9", "#c3c2b7", "#fcfcfb"
 
-#: Panele wykresu = rodziny awarii, w kolejności skali obserwowalności (2.0a).
+#: Plot panels = failure families, in order of observability.
 FAMILIES = (
-    ("szum gaussowski σ", lambda s: s.kind == "gauss"),
-    ("martwe detektory, zero", lambda s: s.kind == "mask" and s.unit == "lane"
+    ("Gaussian noise sigma", lambda s: s.kind == "gauss"),
+    ("dead detectors, zero", lambda s: s.kind == "mask" and s.unit == "lane"
      and s.substitution == "zero"),
-    ("martwe skrzyżowania", lambda s: s.kind == "mask" and s.unit == "intersection"),
-    ("martwe bez śladu, hold", lambda s: s.kind == "mask" and s.substitution == "hold"),
-    ("rozkalibrowanie", lambda s: s.kind == "drift"),
+    ("dead intersections", lambda s: s.kind == "mask" and s.unit == "intersection"),
+    ("dead without a trace, hold", lambda s: s.kind == "mask" and s.substitution == "hold"),
+    ("miscalibration", lambda s: s.kind == "drift"),
 )  # fmt: skip
 
 
 def load(plan: Plan, metrics: tuple[str, ...] = ("att", "throughput")):
-    """Długa ramka: controller, network, seed, scenario, draw + kolumny `metrics`."""
-    import pandas as pd  # noqa: PLC0415
+    """Long frame: controller, network, seed, scenario, draw + the `metrics` columns."""
+    import pandas as pd
 
-    from runlog import Experiment  # noqa: PLC0415
+    from runlog import Experiment
 
     exp = Experiment(EXPERIMENT, root=RUNS)
     frames = []
@@ -138,11 +118,8 @@ def load(plan: Plan, metrics: tuple[str, ...] = ("att", "throughput")):
         wide = m.pivot_table(index=["split", "step"], columns="metric", values="value")
         wide = wide.reset_index().rename(columns={"split": "scenario", "step": "draw"})
         p = run.params
-        # Tylko kolumny TEGO planu. Filtr po sufiksie `__<plan>` nie wystarcza:
-        # przemianowanie kolumny (np. `gatppo_gate` -> `gatppo_gate_t0p50` przy
-        # sweepie progu) zostawia w `runs/t2` biegi ze starą nazwą i pasującym
-        # sufiksem. Wchodziły do ramki jako widmowa kolumna i wywalały wykres na
-        # `plan.kind()` — a w tabelach były niewidoczne, bo te iterują po planie.
+        # only columns of THIS plan: a renamed column leaves old runs with a matching
+        # suffix in `runs/t2`, which would enter as a ghost column
         if p["controller"] not in plan.controllers:
             continue
         wide["controller"], wide["network"], wide["seed"] = p["controller"], p["network"], p["seed"]
@@ -156,7 +133,7 @@ def load(plan: Plan, metrics: tuple[str, ...] = ("att", "throughput")):
 
 
 def aggregate(df):
-    """(controller, network, scenario) -> att_mean, att_std (po seedach), n_seeds, n_draws."""
+    """(controller, network, scenario) -> att_mean, att_std (over seeds), n_seeds, n_draws."""
     if df.empty:
         return df
     per_seed = (
@@ -182,132 +159,115 @@ def aggregate(df):
     return out
 
 
-#: Tytuł raportu zależy od planu — „T2 bez mechanizmu" było zaszyte na sztywno i
-#: kłamało w raportach `t2_ablations` (ablacje agregacji) oraz `t2_uw` (plan istnieje
-#: WYŁĄCZNIE po to, żeby zmierzyć mechanizm).
+#: Report titles per plan.
 TITLES = {
-    "t2_nomech": "T2 bez mechanizmu",
-    "t2_ablations": "T2 dla ablacji agregacji",
-    "t2_uw": "T2 z UW-attention",
-    "t2_ood": "T2 na ruchu spoza treningu",
-    "t2_gate": "T2 z bramką fallbacku",
-    "t2_gate_real": "T2 z bramką realną (reguła vs UQ)",
-    "t2_uw_tau": "T2 — sweep τ dla UW-attention",
-    "t2_train_uw": "T2 dla polityki trenowanej z mechanizmem",
+    "t2_nomech": "T2 without a mechanism",
+    "t2_ablations": "T2 for the aggregation ablations",
+    "t2_uw": "T2 with UW-attention",
+    "t2_ood": "T2 on traffic outside training",
+    "t2_gate": "T2 with the fallback gate",
+    "t2_gate_real": "T2 with a real gate (rule vs UQ)",
+    "t2_uw_tau": "T2: tau sweep for UW-attention",
+    "t2_train_uw": "T2 for the policy trained with the mechanism",
 }
 
-#: Próg |t| dla różnicy parowanej. 2,8 ≈ poprawka Bonferroniego na ~26 porównań
-#: (13 scenariuszy × 2 sieci) przy α = 0,05 — bo tabelę czyta się CAŁĄ i wybranie
-#: z niej najładniejszego wiersza po fakcie jest testowaniem wielokrotnym.
+#: |t| threshold for a paired difference: 2.8 ~ Bonferroni over ~26 comparisons
+#: (13 scenarios x 2 networks) at alpha = 0.05, since the table is read WHOLE.
 T_THRESHOLD = 2.8
 
 
-#: Podpisy kolumn z planu (`label:` w spec sterownika) — wypełniane w `main`, mają
-#: pierwszeństwo przed `LABELS`. Nazwa kolumny jest częścią `run_id`, więc jej zmiana
-#: oznacza przeliczenie; podpis nie wchodzi do odcisku biegu i można go poprawić bez
-#: liczenia. Potrzebne od `t2_krakow`: `gatppo_gate` jest tam bramką-REGUŁĄ, a w `LABELS`
-#: ta nazwa niesie podpis wyroczni ze starego `t2_gate` (stare biegi zostają w `runs/t2`).
+#: Column labels from the plan (`label:` in a controller spec), filled in `main`, taking
+#: precedence over `LABELS`. A label is not part of the run fingerprint, so it can be
+#: fixed without recomputing (in `t2_krakow` `gatppo_gate` is a RULE gate).
 _PLAN_LABELS: dict[str, str] = {}
 
 
-def podpis(kolumna: str) -> str:
-    return _PLAN_LABELS.get(kolumna) or LABELS.get(kolumna, kolumna)
+def label_of(column: str) -> str:
+    return _PLAN_LABELS.get(column) or LABELS.get(column, column)
 
 
 def mechanism_pairs(plan: Plan) -> list[tuple[str, str]]:
-    """[(kolumna porównywana, kolumna odniesienia)] — pary do tabeli Δ.
+    """[(assessed column, reference column)]: the pairs for delta tables.
 
-    Dwa źródła pary. (a) Kolumna z MECHANIZMEM inferencyjnym (`policy_uw`,
-    `policy_gate`) — liczona z tego samego checkpointu co odniesienie, więc różni je
-    wyłącznie mechanizm. (b) Kolumna z JAWNYM `baseline:` w planie, niezależnie od
-    rodzaju — bo jawne odniesienie jest deklaracją „to porównanie jest wynikiem".
-
-    Gałąź (b) dopisana po `t2_train_uw`: ramię `gatppo_fail` (trening z awariami)
-    jest gołym `policy`, więc mimo `baseline:` nie trafiało do żadnej tabeli i
-    najmocniejsza liczba planu — −140 s przy `mask0p5`, t = −10,8, lepszy w 15/15 —
-    musiała być doliczona ręcznie z `metrics.csv`. Raport milczał, bo nie miał
-    o czym mówić, a nie dlatego, że nie było wyniku. Patrz `Plan.baseline`.
+    Two sources: (a) a column with an inference MECHANISM (`policy_uw`, `policy_gate`,
+    `policy_mask`), computed from the same checkpoint as its reference; (b) a column with
+    an EXPLICIT `baseline:` of any kind, since an explicit reference declares "this
+    comparison is a result" (a plain failure-trained arm used to reach no table).
     """
     out = []
     for label in plan.controllers:
-        mechanizmy = ("policy_uw", "policy_gate", "policy_mask")
-        if plan.kind(label) not in mechanizmy and not plan.baseline(label):
+        mechanisms = ("policy_uw", "policy_gate", "policy_mask")
+        if plan.kind(label) not in mechanisms and not plan.baseline(label):
             continue
-        # `baseline:` z planu wygrywa z domyślem. Domyśl („pierwsza kolumna `policy`
-        # tego samego agenta") jest dobry tam, gdzie kolumna bez mechanizmu jest
-        # jedna (`t2_uw`), i zły tam, gdzie są dwie (`t2_train_uw`: trening na
-        # czystym i trening z awariami). Patrz `Plan.baseline`.
-        jawna = plan.baseline(label)
-        if jawna:
-            out.append((label, jawna))
+        # an explicit `baseline:` wins over the default (the first `policy` column of
+        # the same agent), which is wrong when there are two such columns
+        explicit = plan.baseline(label)
+        if explicit:
+            out.append((label, explicit))
             continue
-        baza = [
+        bases = [
             c
             for c in plan.controllers
             if plan.kind(c) == "policy" and plan.agent(c) == plan.agent(label)
         ]
-        if baza:
-            out.append((label, baza[0]))
+        if bases:
+            out.append((label, bases[0]))
     return out
 
 
-def wspolny_checkpoint(plan: Plan, mechanizm: str, baza: str) -> bool:
-    """Czy para jedzie TYM SAMYM checkpointem — rozstrzyga szablon rodzica, a nie to,
-    czy odniesienie jest jawne. Jawne `baseline:` wskazuje bowiem raz osobny trening
-    (`t2_train_uw`), a raz tę samą politykę z innym mechanizmem (złożenie bramka + UW
-    w `t2_uw_rule`) — i opis pod nagłówkiem pary mylił drugi przypadek z pierwszym.
-    Liczby to nie zmienia: parowanie po (sieć, scenariusz, seed, losowanie) jest jedno."""
-    from tsc_marl.robustness.degrade import Unit  # noqa: PLC0415
+def shared_checkpoint(plan: Plan, mechanism: str, base: str) -> bool:
+    """Does the pair use THE SAME checkpoint? Decided by the parent template, not by
+    whether the reference is explicit. Only the pair description depends on it; the
+    pairing by (network, scenario, seed, draw) is the same."""
+    from tsc_marl.robustness.degrade import Unit
 
     net = plan.networks[0]
-    seed = int(plan.controllers[mechanizm].get("seeds", [0])[0])
-    ten_sam_plik = plan.controllers[mechanizm].get("checkpoint", "last") == plan.controllers[
-        baza
-    ].get("checkpoint", "last")  # najlepszy vs końcowy z tego samego biegu to INNE wagi
-    return ten_sam_plik and plan.parent_id(Unit(mechanizm, net, seed)) == plan.parent_id(
-        Unit(baza, net, seed)
+    seed = int(plan.controllers[mechanism].get("seeds", [0])[0])
+    same_file = plan.controllers[mechanism].get("checkpoint", "last") == plan.controllers[base].get(
+        "checkpoint", "last"
+    )  # best vs final of the same run are DIFFERENT weights
+    return same_file and plan.parent_id(Unit(mechanism, net, seed)) == plan.parent_id(
+        Unit(base, net, seed)
     )
 
 
-#: rodzaj mechanizmu -> (metryki z `result.json`, zdanie tłumaczące je w raporcie).
-#: Każdy mechanizm musi mieć diagnostykę „czy w ogóle zadziałał", bo bez niej pusty
-#: wynik jest nieodróżnialny od mechanizmu, który przez cały epizod milczał.
+#: mechanism kind -> (metrics from `result.json`, the sentence explaining them). Every
+#: mechanism needs a "did it act at all" diagnostic, or an empty result cannot be told
+#: from a mechanism that stayed silent.
 DIAGNOSTICS = {
     "policy_uw": (
         ("uw_spread", "uw_active"),
-        "`uw_spread` = średni rozstęp log ρ w GRUPIE SOFTMAXU węzła, czyli jedyna część "
-        "sygnału, którą attention widzi (na stałą wspólną dla grupy jest niezmienniczy). "
-        "0 = warstwa nie widzi różnicy między sąsiadami, ln 10 ≈ 2,3 = różnią się 10×. "
-        "`uw_active` = odsetek krawędzi z niezerowym log ρ.",
+        "`uw_spread` = mean log rho spread within a node's SOFTMAX GROUP, the only part of "
+        "the signal attention sees (it is invariant to a constant shared by the group). "
+        "0 = the layer sees no difference between neighbours, ln 10 ~ 2.3 = they differ "
+        "10x. `uw_active` = share of edges with a nonzero log rho.",
     ),
     "policy_gate": (
         ("gate_share", "gate_switches", "gate_precision", "gate_recall"),
-        "`gate_share` = odsetek par (decyzja, węzeł), w których sterowanie przejęła "
-        "reguła. `gate_switches` = liczba ZMIAN trybu na węzłach w epizodzie — to one "
-        "psują ruch (przełączenie resetuje fazę), a nie sam udział. `gate_precision` "
-        "i `gate_recall` liczą się względem WYROCZNI (prawda z warstwy awarii, "
-        "wyłącznie diagnostycznie) i rozdzielają „detektor jest słaby” od "
-        "„przełączanie mało daje” — dwie rzeczy, które samo ATT skleja.",
+        "`gate_share` = share of (decision, node) pairs where the rule took control. "
+        "`gate_switches` = number of mode CHANGES at nodes per episode; these hurt traffic "
+        "(a switch resets the phase), not the share itself. `gate_precision` and "
+        "`gate_recall` are relative to the ORACLE (the truth from the failure layer, "
+        'diagnostic only) and separate "the detector is weak" from "switching gains '
+        'little", two things ATT alone merges.',
     ),
     "policy_mask": (
         ("mask_share", "mask_forced"),
-        "`mask_share` = odsetek par (decyzja, węzeł), w których maska ZMIENIŁA akcję "
-        "polityki (nie tych, w których była aktywna i zgodziła się z nią). `mask_forced` "
-        "= liczba takich nadpisań w epizodzie. Maska celuje w GŁODZENIE, nie w przejazd, "
-        "więc jej efekt czyta się w kolumnach `wait_max` / `wait_max_demand`, a nie "
-        "w `att` — mierzenie jej samym ATT daje zero z powodu niezgodności metryki "
-        "z celem (patrz `faza3-po-t2.md` §8.7).",
+        "`mask_share` = share of (decision, node) pairs where the mask CHANGED the policy's "
+        "action (not those where it was active and agreed). `mask_forced` = number of such "
+        "overrides per episode. The mask targets STARVATION, not travel time, so its effect "
+        "is read in the `wait_max` / `wait_max_demand` columns, not in `att`.",
     ),
-    # Goła kolumna `policy` z jawnym `baseline:` — kolumny różni TRENING, nie mechanizm
-    # działający w inferencji, więc nie ma czego diagnozować per krok. `_mechanism_section`
-    # indeksuje ten słownik po `plan.kind()`, więc brak wpisu = KeyError w środku raportu.
+    # a plain `policy` column with an explicit `baseline:`: the columns differ in
+    # TRAINING, so there is nothing to diagnose per step (and a missing entry here
+    # would be a KeyError mid-report)
     "policy": (
         (),
-        "Kolumny różni SPOSÓB TRENOWANIA, nie mechanizm włączany w inferencji, więc nie "
-        "ma diagnostyki „czy mechanizm wystartował” — jest albo go nie ma już na poziomie "
-        "wag. Rozrzut między seedami wchodzi tu do różnicy w całości (patrz zdanie o "
-        "parowaniu wyżej), a liczba NIEZALEŻNYCH replikacji to liczba seedów, nie liczba "
-        "par: losowania awarii dzielą checkpoint, więc |t| jest wobec nich optymistyczne.",
+        "The columns differ in HOW THEY WERE TRAINED, not in a mechanism switched on at "
+        'inference, so there is no "did the mechanism start" diagnostic. The spread '
+        "between seeds enters the difference in full, and the number of INDEPENDENT "
+        "replications is the number of seeds, not of pairs: failure draws share a "
+        "checkpoint, so |t| is optimistic with respect to them.",
     ),
 }
 
@@ -315,15 +275,11 @@ DIAGNOSTICS = {
 def mechanism_diagnostics(
     plan: Plan, controller: str, metrics: tuple[str, ...]
 ) -> dict[tuple[str, str], dict[str, float]]:
-    """(sieć, scenariusz) -> średnie `metrics` po seedach.
+    """(network, scenario) -> means of `metrics` over seeds, from `result.json`. Without
+    them the report cannot tell "the mechanism did not help" from "it did not start"."""
+    from runlog import Experiment
 
-    Te liczby siedzą w `result.json` (metryki epizodu sterownika), nie w `metrics.csv`,
-    i bez nich raport NIE ODRÓŻNIA „mechanizm nie pomógł" od „mechanizm nie wystartował".
-    To jest różnica między wynikiem a brakiem wyniku.
-    """
-    from runlog import Experiment  # noqa: PLC0415
-
-    zebrane: dict[tuple[str, str], dict[str, list[float]]] = {}
+    collected: dict[tuple[str, str], dict[str, list[float]]] = {}
     exp = Experiment(EXPERIMENT, root=RUNS)
     for run in exp.runs():
         if run.status != "ok" or not run.id.endswith(f"__{plan.name}"):
@@ -335,59 +291,54 @@ def mechanism_diagnostics(
             for metric in metrics:
                 if key.startswith(f"{metric}__"):
                     scen = key[len(metric) + 2 :]
-                    zebrane.setdefault((net, scen), {}).setdefault(metric, []).append(float(value))
-    return {k: {m: float(np.mean(v)) for m, v in d.items()} for k, d in zebrane.items()}
+                    collected.setdefault((net, scen), {}).setdefault(metric, []).append(
+                        float(value)
+                    )
+    return {k: {m: float(np.mean(v)) for m, v in d.items()} for k, d in collected.items()}
 
 
-def paired_delta(df, mechanizm: str, baza: str):
-    """Różnica ATT sparowana po (sieć, scenariusz, seed, losowanie).
+def paired_delta(df, mechanism: str, base: str):
+    """ATT difference paired by (network, scenario, seed, draw).
 
-    Dlaczego parowanie, a nie ±std z tabeli: obie kolumny jadą TYM SAMYM checkpointem
-    i TYMI SAMYMI losowaniami awarii (`draw` wybiera, które detektory padły), więc
-    rozrzut między seedami i między losowaniami jest WSPÓLNY dla obu i w różnicy się
-    skraca. Porównanie nieparowane topi efekt rzędu 1 s w odchyleniu rzędu 30 s —
-    i odwrotnie, potrafi pokazać różnicę 3%, która po sparowaniu jest szumem.
+    Both columns share the failure draws (and often the checkpoint), so the common
+    spread cancels in the difference; an unpaired comparison drowns a 1 s effect in a
+    30 s deviation, or shows a 3% difference that is noise once paired.
     """
-    import pandas as pd  # noqa: PLC0415
-    from scipy.stats import ttest_1samp  # noqa: PLC0415
+    import pandas as pd
+    from scipy.stats import ttest_1samp
 
-    sub = df[df["controller"].isin([mechanizm, baza])]
+    sub = df[df["controller"].isin([mechanism, base])]
     wide = sub.pivot_table(
         index=["network", "scenario", "seed", "draw"], columns="controller", values="att"
     ).dropna()
     if wide.empty:
         return pd.DataFrame()
-    wide["delta"] = wide[mechanizm] - wide[baza]
+    wide["delta"] = wide[mechanism] - wide[base]
     out = []
     for (net, scen), g in wide.groupby(["network", "scenario"]):
         d = g["delta"].to_numpy()
         t, pval = (
             ttest_1samp(d, 0.0) if len(d) > 1 and d.std() > 0 else (float("nan"), float("nan"))
         )
-        # REMISY liczone osobno i WYŁĄCZONE z „lepszy w". Przy bramce fallbacku remis
-        # to najczęstszy wynik — mechanizm nie strzelił, epizod poszedł identycznie —
-        # a wliczony do mianownika udawałby przegraną: wiersz z Δ = +0,0 pokazywał
-        # „lepszy w 0/15", co czyta się jak porażkę zamiast jak brak zmiany.
+        # TIES counted separately and EXCLUDED from "better in": for a gate a tie (it did
+        # not fire, the episode went identically) is the most common outcome
         out.append({
-            "network": net, "scenario": scen, "n": len(d), "remis": int((d == 0).sum()),
+            "network": net, "scenario": scen, "n": len(d), "ties": int((d == 0).sum()),
             "delta": float(d.mean()), "sd": float(d.std(ddof=1)) if len(d) > 1 else 0.0,
-            "t": float(t), "p": float(pval), "lepszy": int((d < 0).sum()),
+            "t": float(t), "p": float(pval), "better": int((d < 0).sum()),
         })  # fmt: skip
     return pd.DataFrame(out)
 
 
 def parent_consistency(df, skip: frozenset[str] = frozenset()) -> list[dict[str, Any]]:
-    """Czysty wynik ewaluatora vs ostatni test treningu — dla każdego uczonego biegu.
+    """The evaluator's clean result vs the last training test, for every learned run.
 
-    `skip` = etykiety sterowników, dla których różnica jest OCZEKIWANA i nie jest
-    rozjazdem: kolumna UW-attention jedzie tym samym checkpointem, ale z modulacją
-    attention, więc na czystym z definicji NIE MUSI dać liczby z T1 co do setnej.
-    To, jak bardzo się różni, jest wynikiem (A3a) i stoi w tabeli wyżej — kontrola
-    „ewaluator mierzy tę samą politykę" dotyczy sterowników bez mechanizmu.
+    `skip` = controllers whose difference is EXPECTED (a mechanism or another checkpoint
+    changes the clean result by design); the check concerns controllers without one.
     """
-    import pandas as pd  # noqa: PLC0415
+    import pandas as pd
 
-    from tsc_marl.libsignal import experiment as t1  # noqa: PLC0415
+    from tsc_marl.libsignal import experiment as t1
 
     out = []
     runs = {r.id: r for r in t1.experiment().runs()}
@@ -399,8 +350,8 @@ def parent_consistency(df, skip: frozenset[str] = frozenset()) -> list[dict[str,
         path = parent.path / "metrics.csv" if parent else None
         if path is None or not path.is_file():
             continue
-        # tylko gdy ewaluacja jedzie po ruchu TRENINGOWYM rodzica — na innym pliku ruchu
-        # (plan t2_ood) różnica z ostatnim testem treningu jest oczekiwana, nie jest błędem
+        # only on the parent's TRAINING traffic; on another traffic file (t2_ood) a
+        # difference is expected
         if parent.params.get("network") != r.network:
             continue
         m = pd.read_csv(path)
@@ -417,106 +368,103 @@ def parent_consistency(df, skip: frozenset[str] = frozenset()) -> list[dict[str,
 
 
 def _spec_by_slug(plan: Plan) -> dict[str, FailureSpec]:
-    return {slug(s): s for s in plan.scenarios}
+    return {s.slug(): s for s in plan.scenarios}
 
 
-def _mechanism_section(plan: Plan, df, mechanizm: str, baza: str) -> list[str]:
-    """Dwie tabele, które rozstrzygają o wyniku planu z mechanizmem: CZY zadziałał
-    i CZY zmienił ATT. Bez pierwszej druga jest nieinterpretowalna."""
-    metryki, wyjasnienie = DIAGNOSTICS[plan.kind(mechanizm)]
-    if plan.kind(mechanizm) == "policy_gate" and plan.controllers[mechanizm].get("uw"):
-        # złożenie bramka + UW: obie diagnostyki, inaczej milcząca modulacja
-        # byłaby nieodróżnialna od modulacji, która nie pomogła
-        metryki = metryki + DIAGNOSTICS["policy_uw"][0]
-        wyjasnienie = wyjasnienie + " " + DIAGNOSTICS["policy_uw"][1]
-    diag = mechanism_diagnostics(plan, mechanizm, metryki)
-    pary = paired_delta(df, mechanizm, baza) if df is not None and not df.empty else None
-    if not diag and (pary is None or pary.empty):
+def _mechanism_section(plan: Plan, df, mechanism: str, base: str) -> list[str]:
+    """The two tables that decide a plan with a mechanism: DID it act and DID it change
+    ATT. Without the first the second cannot be interpreted."""
+    metrics, explanation = DIAGNOSTICS[plan.kind(mechanism)]
+    if plan.kind(mechanism) == "policy_gate" and plan.controllers[mechanism].get("uw"):
+        # gate + UW composition: both diagnostics
+        metrics = metrics + DIAGNOSTICS["policy_uw"][0]
+        explanation = explanation + " " + DIAGNOSTICS["policy_uw"][1]
+    diag = mechanism_diagnostics(plan, mechanism, metrics)
+    pairs = paired_delta(df, mechanism, base) if df is not None and not df.empty else None
+    if not diag and (pairs is None or pairs.empty):
         return []
 
-    etykieta = podpis(mechanizm)
-    # Goła kolumna `policy` nie jest MECHANIZMEM — różni ją od odniesienia trening.
-    # Nazwanie jej mechanizmem w nagłówku byłoby przekłamaniem wyniku, nie kosmetyką.
-    ramie = plan.kind(mechanizm) == "policy"
-    czym = "Ramię" if ramie else "Mechanizm"
-    lepszy = "ramię lepsze" if ramie else "mechanizm lepszy"
-    neutralny = (
-        "ramię jest wobec ATT **neutralne**" if ramie else "mechanizm jest wobec ATT **neutralny**"
-    )
+    label = label_of(mechanism)
+    # a plain `policy` column is not a MECHANISM; training separates it from the reference
+    arm = plan.kind(mechanism) == "policy"
+    what = "Arm" if arm else "Mechanism"
+    better = "the arm is better" if arm else "the mechanism is better"
+    neutral = "the arm is **neutral** for ATT" if arm else "the mechanism is **neutral** for ATT"
     lines = [
-        f"## {czym}: {etykieta} vs {podpis(baza)}",
+        f"## {what}: {label} vs {label_of(base)}",
         "",
         (
-            "Obie kolumny liczą się z TEGO SAMEGO checkpointu i tych samych losowań awarii "
-            "(`draw` wybiera, które detektory padły), więc porównujemy je **parami**, nie "
-            "przez ±std z tabeli wyżej: wspólny rozrzut między seedami i losowaniami skraca "
-            "się w różnicy."
-            if wspolny_checkpoint(plan, mechanizm, baza)
-            else "Kolumny mają RÓŻNE checkpointy (osobne treningi), więc parujemy po "
-            "(sieć, scenariusz, seed, losowanie): wspólne zostają ruch i wzorzec awarii, "
-            "rozrzut między seedami wchodzi do różnicy. Kolumna odniesienia jest wskazana "
-            f"w planie (`baseline: {plan.baseline(mechanizm)}`), a nie domyślona."
+            "Both columns are computed from THE SAME checkpoint and the same failure draws "
+            "(`draw` chooses which detectors failed), so they are compared **in pairs**, not "
+            "through the +-std of the table above: the shared spread between seeds and draws "
+            "cancels in the difference."
+            if shared_checkpoint(plan, mechanism, base)
+            else "The columns have DIFFERENT checkpoints (separate trainings), so pairing is by "
+            "(network, scenario, seed, draw): traffic and failure pattern stay shared, the "
+            "spread between seeds enters the difference. The reference column is set in the "
+            f"plan (`baseline: {plan.baseline(mechanism)}`), not assumed."
         )
-        + f" `Δ` < 0 = {lepszy}. `|t| ≥ "
-        + f"{T_THRESHOLD}` to próg po poprawce na tyle porównań, ile ma ta tabela.",
+        + f" `delta` < 0 = {better}. `|t| >= "
+        + f"{T_THRESHOLD}` is the threshold corrected for as many comparisons as this table has.",
         "",
-        wyjasnienie,
+        explanation,
         "",
     ]
     for net in plan.networks:
-        wiersze = pary[pary["network"] == net] if pary is not None and not pary.empty else None
-        if wiersze is None or wiersze.empty:
+        rows = pairs[pairs["network"] == net] if pairs is not None and not pairs.empty else None
+        if rows is None or rows.empty:
             continue
-        kolejnosc = [s for s in (slug(x) for x in plan.scenarios) if s in set(wiersze["scenario"])]
+        order = [s for s in (x.slug() for x in plan.scenarios) if s in set(rows["scenario"])]
         lines += [
             f"### {net}",
             "",
-            "| " + " | ".join(("scenariusz", *metryki, "Δ ATT [s]", "sd", "t", "lepszy w")) + " |",
-            "|---|" + "---:|" * (len(metryki) + 4),
+            "| "
+            + " | ".join(("scenario", *metrics, "delta ATT [s]", "sd", "t", "better in"))
+            + " |",
+            "|---|" + "---:|" * (len(metrics) + 4),
         ]
-        for scen in kolejnosc:
-            r = wiersze[wiersze["scenario"] == scen].iloc[0]
+        for scen in order:
+            r = rows[rows["scenario"] == scen].iloc[0]
             d = diag.get((net, scen), {})
-            # udziały procentowo, reszta (rozstęp log ρ, liczba przełączeń) liczbowo
-            komorki = [
+            # shares as percentages, the rest (log rho spread, switch counts) as numbers
+            cells = [
                 (
-                    "—"
+                    "-"
                     if m not in d
                     else f"{d[m]:.1%}"
                     if m.endswith(("_active", "_share"))
                     else f"{d[m]:.2f}"
                 )
-                for m in metryki
+                for m in metrics
             ]
-            mocny = "**" if abs(r["t"]) >= T_THRESHOLD else ""
-            # sd = 0 (scenariusz deterministyczny, np. `clean`) -> t nieokreślone.
-            # „—" zamiast `nan`: brak rozrzutu to nie jest brak wyniku.
-            t = "—" if not np.isfinite(r["t"]) else f"{r['t']:+.2f}"
+            bold = "**" if abs(r["t"]) >= T_THRESHOLD else ""
+            # sd = 0 (a deterministic scenario, e.g. `clean`) -> t undefined; "-", not nan
+            t = "-" if not np.isfinite(r["t"]) else f"{r['t']:+.2f}"
             lines.append(
                 "| "
                 + " | ".join(
                     (
                         f"`{scen}`",
-                        *komorki,
-                        f"{mocny}{r['delta']:+.2f}{mocny}",
+                        *cells,
+                        f"{bold}{r['delta']:+.2f}{bold}",
                         f"{r['sd']:.1f}",
                         t,
-                        f"{int(r['lepszy'])}/{int(r['n'] - r['remis'])}",
+                        f"{int(r['better'])}/{int(r['n'] - r['ties'])}",
                     )
                 )
                 + " |"
             )
-        istotne = wiersze[wiersze["t"].abs() >= T_THRESHOLD]
+        significant = rows[rows["t"].abs() >= T_THRESHOLD]
         lines += [
             "",
             (
-                f"* Żaden scenariusz nie przekracza progu — {neutralny}."
-                if istotne.empty
-                else "* Powyżej progu: "
+                f"* No scenario crosses the threshold: {neutral}."
+                if significant.empty
+                else "* Above the threshold: "
                 + ", ".join(
-                    f"`{r.scenario}` ({r.delta:+.2f} s, t = {r.t:+.2f}, lepszy w "
-                    f"{int(r.lepszy)}/{int(r.n)} parach)"
-                    for r in istotne.itertuples()
+                    f"`{r.scenario}` ({r.delta:+.2f} s, t = {r.t:+.2f}, better in "
+                    f"{int(r.better)}/{int(r.n)} pairs)"
+                    for r in significant.itertuples()
                 )
             ),
             "",
@@ -524,111 +472,98 @@ def _mechanism_section(plan: Plan, df, mechanizm: str, baza: str) -> list[str]:
     return lines
 
 
-def _sweep_section(plan: Plan, df, pary: list[tuple[str, str]]) -> list[str]:
-    """KRZYWA ZAPASU: próg bramki × scenariusz -> Δ ATT (i `gate_share`).
-
-    Zastępuje osobne sekcje per kolumna, gdy plan jest sweepem jednego parametru —
-    cztery prawie identyczne tabele nie są czytelne, a to właśnie ta jedna jest
-    wynikiem do rozdziału 4: mówi, jak agresywna ma być realna bramka.
-
-    Czytać po KIERUNKU, nie po pojedynczym `t`: przy kilkunastu komórkach jedna
-    przekroczy próg przypadkiem, a spójność znaku w kolumnie „lepszy w" nie.
-    """
-    # Wiersze po KOLUMNIE, nie po progu. Plan bywa sweepem jednego parametru
-    # (`t2_gate`: cztery progi) albo zestawem RÓŻNYCH mechanizmów (`t2_gate_real`:
-    # reguła, UQ, wyrocznia). Klucz po progu sklejał te drugie w jeden wiersz —
-    # `rule` i `uq` nie mają progu w planie, więc obie lądowały pod 0,5 i jedna
-    # nadpisywała drugą, znikając z raportu bez śladu.
-    mechanizmy = [m for m, _ in pary]
-    bazy = {b for _, b in pary}
-    if len(bazy) != 1:
+def _sweep_section(plan: Plan, df, pairs: list[tuple[str, str]]) -> list[str]:
+    """HEADROOM CURVE: column x scenario -> delta ATT (and `gate_share`), one table
+    instead of a section per column when all share ONE reference. Read by DIRECTION,
+    not single `t`s: with a dozen cells one crosses the threshold by chance."""
+    # rows per COLUMN, not per threshold: real gates (`rule`, `uq`) have no threshold in
+    # the plan and would overwrite each other under one key
+    mechanisms = [m for m, _ in pairs]
+    bases = {b for _, b in pairs}
+    if len(bases) != 1:
         raise ValueError(
-            f"_sweep_section: jedna tabela = jedno odniesienie, a plan ma {sorted(bazy)}. "
-            "Taki plan idzie w osobne sekcje (patrz warunek w `build_report`)."
+            f"_sweep_section: one table = one reference, but the plan has {sorted(bases)}. "
+            "Such a plan goes into separate sections (see the condition in `to_markdown`)."
         )
-    baza = pary[0][1]
+    base = pairs[0][1]
 
-    # Zdanie wstępne było pisane pod bramki („w nawiasie gate_share", „Δ < 0 = bramka
-    # lepsza") i po wpuszczeniu tu ablacji agregacji kłamało w obie strony: ablacje nie
-    # mają udziału, a kolumną ocenianą jest wariant architektury, nie bramka.
-    z_udzialem = any(
+    with_share = any(
         any("gate_share" in v for v in mechanism_diagnostics(plan, m, ("gate_share",)).values())
-        for m in mechanizmy
+        for m in mechanisms
     )
     lines = [
-        "## Mechanizmy × scenariusz",
+        "## Mechanisms x scenario",
         "",
-        f"Δ ATT [s] KOLUMNY OCENIANEJ względem `{podpis(baza)}`, sparowana po "
-        "(seed, losowanie)"
+        f"delta ATT [s] of the ASSESSED COLUMN relative to `{label_of(base)}`, paired by "
+        "(seed, draw)"
         + (
-            ". W nawiasie odsetek par (decyzja, węzeł) przejętych przez regułę"
-            if z_udzialem
+            ". In brackets the share of (decision, node) pairs taken over by the rule"
+            if with_share
             else ""
         )
-        + f". **pogrubienie** = |t| ≥ {T_THRESHOLD}. Δ < 0 = kolumna oceniana lepsza od "
-        "odniesienia.",
+        + f". **bold** = |t| >= {T_THRESHOLD}. delta < 0 = the assessed column is better than "
+        "the reference.",
         "",
         "",
     ]
     for net in plan.networks:
-        kolejnosc, wiersze = None, []
-        for mechanizm in mechanizmy:
-            pary_df = paired_delta(df, mechanizm, baza)
-            if pary_df.empty:
+        order, rows = None, []
+        for mechanism in mechanisms:
+            pairs_df = paired_delta(df, mechanism, base)
+            if pairs_df.empty:
                 continue
-            sub = pary_df[pary_df["network"] == net]
+            sub = pairs_df[pairs_df["network"] == net]
             if sub.empty:
                 continue
             diag = mechanism_diagnostics(
-                plan, mechanizm, ("gate_share", "gate_precision", "gate_recall")
+                plan, mechanism, ("gate_share", "gate_precision", "gate_recall")
             )
-            wiersze.append((mechanizm, sub.set_index("scenario"), diag))
-            if kolejnosc is None:
-                kolejnosc = [
-                    s for s in (slug(x) for x in plan.scenarios) if s in sub["scenario"].values
+            rows.append((mechanism, sub.set_index("scenario"), diag))
+            if order is None:
+                order = [
+                    s for s in (x.slug() for x in plan.scenarios) if s in sub["scenario"].values
                 ]
-        if not wiersze:
+        if not rows:
             continue
         lines += [
             f"### {net}",
             "",
-            "| mechanizm | " + " | ".join(f"`{s}`" for s in kolejnosc) + " |",
-            "|---|" + "---:|" * len(kolejnosc),
+            "| mechanism | " + " | ".join(f"`{s}`" for s in order) + " |",
+            "|---|" + "---:|" * len(order),
         ]
-        for mechanizm, sub, diag in wiersze:
-            komorki = []
-            for scen in kolejnosc:
+        for mechanism, sub, diag in rows:
+            cells = []
+            for scen in order:
                 r = sub.loc[scen]
-                mocny = "**" if abs(r["t"]) >= T_THRESHOLD else ""
+                bold = "**" if abs(r["t"]) >= T_THRESHOLD else ""
                 share = diag.get((net, scen), {}).get("gate_share")
-                udzial = "" if share is None else f" ({share:.0%})"
-                komorki.append(f"{mocny}{r['delta']:+.1f}{mocny}{udzial}")
-            lines.append(f"| {podpis(mechanizm)} | " + " | ".join(komorki) + " |")
+                share_txt = "" if share is None else f" ({share:.0%})"
+                cells.append(f"{bold}{r['delta']:+.1f}{bold}{share_txt}")
+            lines.append(f"| {label_of(mechanism)} | " + " | ".join(cells) + " |")
 
-        # Jakość detekcji — tylko dla bramek, które mają odniesienie (wyrocznia jako
-        # diagnostyka). Rozdziela „detektor jest słaby" od „przełączanie mało daje".
-        detekcja = [(m, d) for m, _, d in wiersze if any("gate_recall" in v for v in d.values())]
-        if detekcja:
+        # detection quality, only for gates with an oracle diagnostic
+        detection = [(m, d) for m, _, d in rows if any("gate_recall" in v for v in d.values())]
+        if detection:
             lines += [
                 "",
-                "Jakość detekcji względem wyroczni (precyzja / czułość; „—” = nie było "
-                "czego wykrywać albo bramka nie strzeliła):",
+                'Detection quality relative to the oracle (precision / recall; "-" = nothing '
+                "to detect or the gate did not fire):",
                 "",
-                "| mechanizm | " + " | ".join(f"`{s}`" for s in kolejnosc) + " |",
-                "|---|" + "---:|" * len(kolejnosc),
+                "| mechanism | " + " | ".join(f"`{s}`" for s in order) + " |",
+                "|---|" + "---:|" * len(order),
             ]
-            for mechanizm, diag in detekcja:
-                komorki = []
-                for scen in kolejnosc:
+            for mechanism, diag in detection:
+                cells = []
+                for scen in order:
                     d = diag.get((net, scen), {})
                     p_, r_ = d.get("gate_precision"), d.get("gate_recall")
-                    komorki.append(
-                        "—"
+                    cells.append(
+                        "-"
                         if p_ is None and r_ is None
-                        else f"{'—' if p_ is None else f'{p_:.2f}'} / "
-                        f"{'—' if r_ is None else f'{r_:.2f}'}"
+                        else f"{'-' if p_ is None else f'{p_:.2f}'} / "
+                        f"{'-' if r_ is None else f'{r_:.2f}'}"
                     )
-                lines.append(f"| {podpis(mechanizm)} | " + " | ".join(komorki) + " |")
+                lines.append(f"| {label_of(mechanism)} | " + " | ".join(cells) + " |")
         lines.append("")
     return lines
 
@@ -637,32 +572,33 @@ def to_markdown(
     plan: Plan, agg, checks: list[dict[str, Any]], figures: dict[str, Path], df=None
 ) -> str:
     specs = _spec_by_slug(plan)
-    order = [slug(s) for s in plan.scenarios]
+    order = [s.slug() for s in plan.scenarios]
     ctrls = [c for c in plan.controllers if c != "fixedtime"]
     lines = [
-        f"# {TITLES.get(plan.name, 'T2')} — plan `{plan.name}`",
+        f"# {TITLES.get(plan.name, 'T2')}: plan `{plan.name}`",
         "",
-        f"Tryb {plan.mode} (yellow={plan.yellow}), {plan.draws} losowań awarii na scenariusz, "
-        "ewaluacja ZAMROŻONYCH sterowników (`tsc degrade`). Wszystkie czytają tę samą warstwę "
-        "detektorów: MaxPressure liczy decyzję z popsutego wektora stanu, nie z silnika.",
+        f"Mode {plan.mode} (yellow={plan.yellow}), {plan.draws} failure draws per scenario, "
+        "evaluation of FROZEN controllers (`tsc degrade`). All read the same detector "
+        "layer: MaxPressure computes its decision from the broken state vector, not the engine.",
         "",
-        "Komórka = ATT [s], średnia po losowaniach, potem po seedach polityki (± std po "
-        "seedach); w nawiasie Δ względem czystego wyniku tego samego sterownika. "
-        "**▲ = gorzej niż FixedTime** — tylko tam dolna warstwa fallbacku ma pole do zysku.",
+        "Cell = ATT [s], the mean over draws, then over policy seeds (+- std over seeds); in "
+        "brackets delta relative to the same controller's clean result. "
+        "**(!) = worse than FixedTime**, the only place the fallback's lower layer can gain.",
         "",
     ]
     for net in plan.networks:
         sub = agg[agg["network"] == net] if not agg.empty else agg
         ft = sub[(sub["controller"] == "fixedtime") & (sub["scenario"] == "clean")]
         ft_att = float(ft["att_mean"].iloc[0]) if len(ft) else np.nan
-        lines += [f"## {net}", "", f"FixedTime (niezależny od odczytów): **{ft_att:.1f} s**.", ""]
+        lines += [f"## {net}", "", f"FixedTime (independent of readings): **{ft_att:.1f} s**.", ""]
         present = [c for c in ctrls if len(sub) and (sub["controller"] == c).any()]
         missing = [c for c in ctrls if c not in present]
         if not present:
-            lines += ["_Brak policzonych sterowników dla tej sieci._", ""]
+            lines += ["_No computed controllers for this network._", ""]
             continue
-        head = "| scenariusz | " + " | ".join(
-            f"{podpis(c)} (n={int(sub[sub['controller'] == c]['n_seeds'].max())})" for c in present
+        head = "| scenario | " + " | ".join(
+            f"{label_of(c)} (n={int(sub[sub['controller'] == c]['n_seeds'].max())})"
+            for c in present
         )
         lines += [head + " |", "|---|" + "---:|" * len(present)]
         for name in order:
@@ -670,66 +606,66 @@ def to_markdown(
             for c in present:
                 row = sub[(sub["controller"] == c) & (sub["scenario"] == name)]
                 if row.empty:
-                    cells.append("—")
+                    cells.append("-")
                     continue
                 r = row.iloc[0]
-                std = f" ± {r.att_std:.1f}" if r.n_seeds > 1 else ""
-                mark = " ▲" if r.att_mean > ft_att else ""
+                std = f" +- {r.att_std:.1f}" if r.n_seeds > 1 else ""
+                mark = " (!)" if r.att_mean > ft_att else ""
                 delta = "" if name == "clean" else f" ({r.delta:+.1%})"
                 cells.append(f"{r.att_mean:.1f}{std}{delta}{mark}")
             lines.append(f"| `{name}` | " + " | ".join(cells) + " |")
         lines.append("")
         if missing:
             lines += [
-                f"_Niepoliczone na tej maszynie: {', '.join(podpis(c) for c in missing)} "
-                "(brak checkpointów rodzica — patrz `tsc degrade status`)._",
+                f"_Not computed on this machine: {', '.join(label_of(c) for c in missing)} "
+                "(parent checkpoints missing, see `tsc degrade status`)._",
                 "",
             ]
         lines += _findings(sub, present, ft_att, specs)
         if net in figures:
-            lines += ["", f"![krzywe degradacji {net}](figures/{figures[net].name})", ""]
+            lines += ["", f"![degradation curves {net}](figures/{figures[net].name})", ""]
 
-    pary = mechanism_pairs(plan)
-    # Sweep (jedna zbiorcza tabela zamiast N sekcji) wolno złożyć TYLKO wtedy, gdy
-    # wszystkie kolumny mierzą się względem TEGO SAMEGO odniesienia — `_sweep_section`
-    # ma jedną kolumnę bazową na tabelę. Plan z kilkoma odniesieniami (`t2_gate_dr`:
-    # bramka vs rdzeń czysty, DR vs rdzeń czysty, bramka+DR vs DR) dostaje osobne
-    # sekcje. Bez tego warunku wiersz „bramka na rdzeniu DR" liczyłby się przeciw
-    # rdzeniowi CZYSTEMU i mierzył bramkę razem z treningiem z awariami — dokładnie
-    # ten cichy błąd, przed którym powstało `Plan.baseline`, tylko piętro wyżej.
-    if len(pary) > 1 and len({baza for _, baza in pary}) == 1:
-        lines += _sweep_section(plan, df, pary)
+    pairs = mechanism_pairs(plan)
+    # one combined sweep table ONLY when all columns share ONE reference; a plan with
+    # several (`t2_gate_dr`) gets separate sections, or the gate on the DR core would be
+    # measured against the CLEAN core
+    if len(pairs) > 1 and len({base for _, base in pairs}) == 1:
+        lines += _sweep_section(plan, df, pairs)
     else:
-        for mechanizm, baza in pary:
-            lines += _mechanism_section(plan, df, mechanizm, baza)
+        for mechanism, base in pairs:
+            lines += _mechanism_section(plan, df, mechanism, base)
 
     if checks:
         worst = max(abs(c["diff"]) for c in checks)
         lines += [
-            "## Kontrola: ewaluator mierzy tę samą politykę co T1",
+            "## Check: the evaluator measures the same policy as T1",
             "",
-            f"Czysty wynik ewaluatora vs ostatni test treningu, {len(checks)} biegów uczonych: "
-            f"największa różnica **{worst:.3f} s**"
-            + (" — zgodne co do precyzji logu." if worst < 0.05 else " — ROZJAZD, sprawdzić!"),
+            f"The evaluator's clean result vs the last training test, {len(checks)} learned "
+            f"runs: largest difference **{worst:.3f} s**"
+            + (
+                ", consistent to the log's precision."
+                if worst < 0.05
+                else ", a MISMATCH, investigate!"
+            ),
             "",
         ]
     lines += [
-        "## Czego ta tabela NIE mówi",
+        "## What this table does NOT say",
         "",
-        "* Poziomy są poziomami DETEKTORA. Na cechę `gauss` przenosi się ze współczynnikiem "
-        "~0,8–0,9, `urand` jest ~1,6× słabszy przy tym samym `level` "
+        "* Levels are DETECTOR levels. For `gauss` they transfer to the feature with a factor "
+        "of ~0.8-0.9, `urand` is ~1.6x weaker at the same `level` "
         "(`results/sensor_severity.md`).",
-        "* Maska z podstawieniem `zero` zmienia znacznie mniej komórek cech, niż wynosi ułamek "
-        "martwych pasów (zero jest wartością modalną) — ta sama liczba nie znaczy tego samego "
-        "na sieciach o różnym obciążeniu.",
-        "* Scenariusze `hold` zaczynają się w decyzji 60 (15. minuta), więc pierwsza ćwiartka "
-        "epizodu jest czysta — ich Δ nie jest porównywalne wprost z maską od początku.",
+        "* A mask with `zero` substitution changes far fewer feature cells than the fraction "
+        "of dead lanes (zero is the modal value); the same number does not mean the same "
+        "thing on networks with different loads.",
+        "* `hold` scenarios start at decision 60 (minute 15), so the first quarter of the "
+        "episode is clean; their delta is not directly comparable with a mask from the start.",
     ]
     return "\n".join(lines) + "\n"
 
 
 def _findings(sub, present, ft_att, specs) -> list[str]:
-    """Wnioski liczone z tabeli, nie pisane z góry."""
+    """Conclusions computed from the table, not written in advance."""
     out = []
     for c in present:
         rows = sub[(sub["controller"] == c) & (sub["scenario"] != "clean")]
@@ -738,38 +674,37 @@ def _findings(sub, present, ft_att, specs) -> list[str]:
         worst = rows.loc[rows["att_mean"].idxmax()]
         above = rows[rows["att_mean"] > ft_att]["scenario"].tolist()
         text = (
-            f"* **{podpis(c)}** — najgorszy scenariusz `{worst.scenario}`: "
+            f"* **{label_of(c)}**: worst scenario `{worst.scenario}`: "
             f"{worst.att_mean:.1f} s ({worst.delta:+.1%}). "
         )
         if above:
             text += (
-                f"Gorzej niż FixedTime w {len(above)} scenariuszach: "
+                f"Worse than FixedTime in {len(above)} scenarios: "
                 + ", ".join(f"`{a}`" for a in above)
                 + "."
             )
         else:
             text += (
-                "Nigdzie nie spada poniżej FixedTime — przy tych poziomach fallback do "
-                "FixedTime nie ma z czego zarobić."
+                "Never falls below FixedTime: at these levels a fallback to FixedTime has "
+                "nothing to gain."
             )
         out.append(text)
     return out + [""]
 
 
-# --------------------------------------------------------------------- wykres
+# --------------------------------------------------------------------- plot
 
 
 def plot(plan: Plan, agg, network: str, path: Path) -> Path | None:
-    """Małe wielokrotności: jeden panel na rodzinę awarii, wspólna oś Y (ATT)."""
-    import matplotlib  # noqa: PLC0415
+    """Small multiples: one panel per failure family, a shared Y axis (ATT)."""
+    import matplotlib
 
     matplotlib.use("Agg")
-    import matplotlib.pyplot as plt  # noqa: PLC0415
+    import matplotlib.pyplot as plt
 
     sub = agg[agg["network"] == network]
     if sub.empty:
         return None
-    specs = _spec_by_slug(plan)
     families = [(t, [s for s in plan.scenarios if f(s)]) for t, f in FAMILIES]
     families = [(t, s) for t, s in families if s]
     if not families:
@@ -792,7 +727,7 @@ def plot(plan: Plan, agg, network: str, path: Path) -> Path | None:
             ys.append(float(clean["att_mean"].iloc[0]))
             sd.append(float(clean["att_std"].iloc[0]))
             for s in sorted(fam, key=lambda s: s.level):
-                row = sub[(sub["controller"] == c) & (sub["scenario"] == slug(s))]
+                row = sub[(sub["controller"] == c) & (sub["scenario"] == s.slug())]
                 if row.empty:
                     continue
                 xs.append(s.level)
@@ -800,13 +735,13 @@ def plot(plan: Plan, agg, network: str, path: Path) -> Path | None:
                 sd.append(float(row["att_std"].iloc[0]))
             xs, ys, sd = np.array(xs), np.array(ys), np.array(sd)
             ax.plot(xs, ys, color=COLORS[c], lw=2, marker="o", ms=5.5, mec=SURFACE, mew=1.5,
-                    solid_capstyle="round", label=podpis(c), zorder=3)  # fmt: skip
+                    solid_capstyle="round", label=label_of(c), zorder=3)  # fmt: skip
             if plan.kind(c) in LEARNED and (sd > 0).any():
                 ax.fill_between(xs, ys - sd, ys + sd, color=COLORS[c], alpha=0.10, lw=0)
         if ft_att is not None:
             ax.axhline(ft_att, color=INK2, lw=1, zorder=2)
         ax.set_title(title, color=INK, fontsize=9, loc="left")
-        ax.set_xlabel("poziom awarii (detektor)", color=INK2)
+        ax.set_xlabel("failure level (detector)", color=INK2)
         ax.grid(True, color=GRID, lw=1)
         ax.set_axisbelow(True)
         for side in ("top", "right"):
@@ -827,7 +762,6 @@ def plot(plan: Plan, agg, network: str, path: Path) -> Path | None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=160, facecolor=SURFACE)
     plt.close(fig)
-    _ = specs
     return path
 
 
@@ -843,14 +777,14 @@ def main(plan: Plan) -> Path:
         p = plot(plan, agg, net, RESULTS / "figures" / f"{plan.name}_{net}.png")
         if p is not None:
             figures[net] = p
-    # pomijane w kontroli: mechanizm (inna polityka niż w teście treningu) albo NAJLEPSZY
-    # checkpoint (`checkpoint: best` — inne wagi niż te z OSTATNIEGO testu treningu)
-    z_mechanizmem = frozenset(
+    # left out of the check: a mechanism (another policy than in the training test) or
+    # the BEST checkpoint (other weights than the LAST training test)
+    with_mechanism = frozenset(
         c
         for c, spec in plan.controllers.items()
         if plan.kind(c) in ("policy_uw", "policy_gate") or spec.get("checkpoint") == "best"
     )
-    checks = parent_consistency(df, z_mechanizmem) if not df.empty else []
+    checks = parent_consistency(df, with_mechanism) if not df.empty else []
     out = RESULTS / f"{plan.name}.md"
     out.write_text(to_markdown(plan, agg, checks, figures, df), encoding="utf-8")
     if not agg.empty:

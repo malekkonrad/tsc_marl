@@ -1,13 +1,10 @@
-"""Testy wspólnego przygotowania procesu (`tsc_marl.libsignal.session`).
+"""Shared process setup (`tsc_marl.libsignal.session`).
 
-Sekwencja interfejsów Registry jest wrażliwa na kolejność i już raz kosztowała
-cichy błąd: `root_dir` ustawiony PO `Logger_path_Interface` był ignorowany,
-przez co `att_last10` przyjmowało wartość `att` (27% różnicy). Dopóki sekwencja
-stała w trzech kopiach wejść CLI, chronił ją wyłącznie komentarz. Tutaj jest
-przypięta asercjami — to jest właściwy powód, dla którego została wyciągnięta.
-
-Testy nie stawiają silnika: `interface` i `Registry` są podmienione atrapami,
-więc sprawdzamy KOLEJNOŚĆ i MOMENT, a nie CityFlow.
+The Registry interface sequence is order-sensitive and has already caused a
+silent bug (a `root_dir` set AFTER `Logger_path_Interface` was ignored, so
+`att_last10` took the value of `att`). Here the order is pinned by assertions.
+No engine: `interface` and `Registry` are replaced by stubs, so the tests check
+ORDER and TIMING, not CityFlow.
 """
 
 from __future__ import annotations
@@ -18,7 +15,7 @@ import pytest
 
 from tsc_marl import libsignal
 from tsc_marl.libsignal import experiment, session
-from tsc_marl.runner.train import parse_args
+from tsc_marl.libsignal.experiment import parse_args
 
 NETWORK = "cityflow_jinan3x4_4ph"
 
@@ -29,7 +26,7 @@ class _Param:
 
 
 class _FakeInterfaceModule(types.SimpleNamespace):
-    """Zapisuje nazwy wywołanych interfejsów zamiast dotykać globalnego Registry."""
+    """Records called interface names instead of touching the global Registry."""
 
     def __init__(self, calls):
         super().__init__()
@@ -46,9 +43,9 @@ class _FakeInterfaceModule(types.SimpleNamespace):
 
 
 @pytest.fixture
-def atrapy_interfejsow(monkeypatch, tmp_path):
-    """Atrapy `common.interface` i `common.registry` w sys.modules — `build_interfaces`
-    da się wtedy przejść bez stawiania CityFlow, a przedmiotem testu jest kolejność."""
+def interface_stubs(monkeypatch, tmp_path):
+    """Stubs of `common.interface` and `common.registry` in sys.modules, so
+    `build_interfaces` runs without CityFlow and the test is about the order."""
     import sys
 
     libsignal.bootstrap()
@@ -82,44 +79,39 @@ def _config(graphic: bool) -> dict:
     }
 
 
-# --------------------------------------------------------------- kolejność
+# --------------------------------------------------------------- order
 
 
-def test_sekwencja_interfejsow_ma_kanoniczna_kolejnosc(atrapy_interfejsow):
-    """Kolejność jak w `run.py` LibSignala. Zmiana tej listy = zmiana kontraktu
-    z cudzym kodem, więc ma boleć w teście, a nie po 200 epizodach treningu."""
-    wywolane = session.build_interfaces(_config(graphic=True))
-    assert wywolane == list(session.INTERFACE_ORDER)
-    assert wywolane == atrapy_interfejsow.calls
+def test_interface_sequence_has_the_canonical_order(interface_stubs):
+    """The order of LibSignal's `run.py`; changing it changes a contract with
+    foreign code, so it must hurt in a test."""
+    called = session.build_interfaces(_config(graphic=True))
+    assert called == list(session.INTERFACE_ORDER)
+    assert called == interface_stubs.calls
 
 
-def test_bez_graphic_graf_sie_nie_buduje(atrapy_interfejsow):
-    """`Graph_World_Interface` jest warunkowe (`model.graphic`) — baseline'y bez
-    grafu (fixedtime, maxpressure) nie mają go budować."""
-    wywolane = session.build_interfaces(_config(graphic=False))
-    assert "Graph_World_Interface" not in wywolane
-    assert wywolane == [i for i in session.INTERFACE_ORDER if i != "Graph_World_Interface"]
+def test_without_graphic_no_graph_is_built(interface_stubs):
+    """`Graph_World_Interface` is conditional (`model.graphic`)."""
+    called = session.build_interfaces(_config(graphic=False))
+    assert "Graph_World_Interface" not in called
+    assert called == [i for i in session.INTERFACE_ORDER if i != "Graph_World_Interface"]
 
 
-def test_katalog_logow_silnika_powstaje_przed_trenerem(atrapy_interfejsow):
-    """`makedirs` leci między `Logger_path_Interface` a `Trainer_param_Interface` —
-    trener zaczyna pisać od razu, a nieistniejący katalog to wywrotka w połowie biegu."""
+def test_engine_log_directory_exists_before_the_trainer(interface_stubs):
+    """`makedirs` runs between `Logger_path_Interface` and `Trainer_param_Interface`;
+    the trainer writes at once."""
     session.build_interfaces(_config(graphic=True))
-    assert atrapy_interfejsow.logger_path.is_dir()
+    assert interface_stubs.logger_path.is_dir()
 
 
-# ------------------------------------------------------- moment rejestracji
+# ------------------------------------------------------- registration timing
 
 
 @pytest.fixture
-def sesja_bez_silnika(monkeypatch, tmp_path):
-    """`runs/` w tmp_path + podstawiona sekwencja interfejsów.
-
-    Registry zostaje PRAWDZIWE: `register_engine_components()` importuje moduły
-    LibSignala, a te rejestrują się w nim dekoratorami. Atrapa Registry (jak wyżej,
-    dla `build_interfaces`) wywróciłaby już sam import. Symulatora i tak nie ma —
-    stawia go dopiero ciało `with`, którego te testy nie mają.
-    """
+def session_without_engine(monkeypatch, tmp_path):
+    """`runs/` in tmp_path and a stubbed interface sequence. The Registry stays
+    REAL (LibSignal modules register into it at import); there is no simulator,
+    since only the `with` body would build one."""
     from runlog import Experiment
 
     monkeypatch.setattr(
@@ -129,72 +121,65 @@ def sesja_bez_silnika(monkeypatch, tmp_path):
     return tmp_path / experiment.EXPERIMENT
 
 
-def test_root_dir_jest_ustawiony_zanim_libsignal_policzy_sciezki(sesja_bez_silnika, monkeypatch):
-    """TEN test pilnuje błędu, który kosztował 27%: `root_dir` musi wskazywać na
-    `engine/` katalogu biegu ZANIM zadziała `Logger_path_Interface`. Ustawiony
-    później jest po cichu ignorowany, a logi lądują w `data/output_data`."""
-    widziany = {}
+def test_root_dir_is_set_before_libsignal_computes_paths(session_without_engine, monkeypatch):
+    """`root_dir` must point to the run's `engine/` BEFORE `Logger_path_Interface`;
+    set later it is silently ignored and logs land in `data/output_data`."""
+    seen = {}
 
-    def zapamietaj(config):
-        widziany["root_dir"] = config["logger"].get("root_dir")
+    def remember(config):
+        seen["root_dir"] = config["logger"].get("root_dir")
 
-    monkeypatch.setattr(session, "build_interfaces", zapamietaj)
+    monkeypatch.setattr(session, "build_interfaces", remember)
 
-    args = parse_args(["-n", NETWORK, "--run-id", "kolejnosc"])
+    args = parse_args(["-n", NETWORK, "--run-id", "order"])
     with session.session(args) as s:
-        assert widziany["root_dir"] == str(s.run.engine_dir)
+        assert seen["root_dir"] == str(s.run.engine_dir)
 
 
-def test_pad_w_ciele_konczy_bieg_jako_failed(sesja_bez_silnika):
-    """Ciało `with` leci POD otwartym biegiem. Gdyby leciało obok, pad przy budowie
-    świata zostawiałby katalog na wieki w `running` — a `running` blokuje ponowne
-    uruchomienie (`RunExists`) i trzeba go kasować ręcznie."""
+def test_a_failure_in_the_body_ends_the_run_as_failed(session_without_engine):
+    """The `with` body runs UNDER the open run; otherwise a failure while building
+    the world would leave the directory `running` forever (blocking a rerun)."""
     from runlog import RunView
 
-    args = parse_args(["-n", NETWORK, "--run-id", "pada"])
+    args = parse_args(["-n", NETWORK, "--run-id", "fails"])
 
     with pytest.raises(RuntimeError), session.session(args):
-        raise RuntimeError("zły roadnet")
+        raise RuntimeError("bad roadnet")
 
-    assert RunView(sesja_bez_silnika / "pada").status == "failed"
+    assert RunView(session_without_engine / "fails").status == "failed"
 
 
-def test_config_patch_wchodzi_do_odcisku_biegu(sesja_bez_silnika):
-    """Nadpisania muszą być nałożone PRZED `build_params`. Nałożone później
-    zmieniałyby zachowanie biegu, nie zmieniając `config_hash` — czyli
-    `skip-if-done` uznałby bieg z innymi hiperparametrami za już policzony.
-    Na tym mechanizmie stoi ewaluacja (`train_model`) i nadpisania suite'ów.
-
-    Patchujemy `train_model: True`, bo domyślny agent testu (`efficientmp`) niczego
-    nie trenuje i ma w configu `False` — nadpisanie tą samą wartością nie zmieniłoby
-    odcisku i test przechodziłby także przy zepsutej kolejności."""
-    with session.session(parse_args(["-n", NETWORK, "--run-id", "goly"])) as a:
-        goly = a.run.meta["params"]["config_hash"]
+def test_config_patch_enters_the_run_fingerprint(session_without_engine):
+    """Overrides are applied BEFORE `build_params`; later they would change behaviour
+    without changing `config_hash`. `train_model: True` is patched because the test
+    agent (`efficientmp`) has `False`, and the same value would prove nothing."""
+    with session.session(parse_args(["-n", NETWORK, "--run-id", "plain"])) as a:
+        plain = a.run.meta["params"]["config_hash"]
         assert a.config["model"]["train_model"] is False
     with session.session(
-        parse_args(["-n", NETWORK, "--run-id", "zpatchem"]),
+        parse_args(["-n", NETWORK, "--run-id", "patched"]),
         config_patch={"model": {"train_model": True}},
     ) as b:
-        z_patchem = b.run.meta["params"]["config_hash"]
+        patched = b.run.meta["params"]["config_hash"]
         assert b.config["model"]["train_model"] is True
 
-    assert goly != z_patchem, "nadpisanie configu nie zmieniło odcisku biegu"
+    assert plain != patched, "the config override did not change the run fingerprint"
 
 
-def test_params_extra_trafia_do_parametrow(sesja_bez_silnika):
-    """Ewaluacja dokłada `parent_run`/`checkpoint`/`scenario` — bez nich nie da się
-    odtworzyć, KTÓRA polityka dała ten wiersz wyniku."""
+def test_params_extra_reaches_the_parameters(session_without_engine):
+    """Evaluation adds `parent_run`/`checkpoint`/`scenario`; without them one cannot
+    tell WHICH policy produced a result row."""
     with session.session(
         parse_args(["-n", NETWORK, "--run-id", "eval"]),
-        params_extra={"parent_run": "rodzic", "scenario": "drop10"},
+        params_extra={"parent_run": "parent", "scenario": "drop10"},
     ) as s:
-        assert s.run.meta["params"]["parent_run"] == "rodzic"
+        assert s.run.meta["params"]["parent_run"] == "parent"
         assert s.run.meta["params"]["scenario"] == "drop10"
 
 
-def test_require_graph_odmawia_configu_bez_grafu(sesja_bez_silnika, monkeypatch):
-    """`run_core.py` żąda grafu configiem, a nie bezwarunkowym wywołaniem interfejsu.
-    Config bez `graphic: True` ma paść OD RAZU, a nie zbudować rdzeń bez sąsiadów."""
+def test_require_graph_rejects_a_config_without_a_graph(session_without_engine, monkeypatch):
+    """The core asks for the graph through the config; a config without
+    `graphic: True` fails AT ONCE instead of building a core without neighbours."""
     monkeypatch.setattr(
         experiment, "resolve_config", lambda args: _config(graphic=False) | {"logger": {}}
     )
@@ -203,44 +188,37 @@ def test_require_graph_odmawia_configu_bez_grafu(sesja_bez_silnika, monkeypatch)
             pass
 
 
-# ---------------------------------------------------------------- scalanie
+# ---------------------------------------------------------------- merging
 
 
-def test_merge_nie_kasuje_reszty_sekcji():
-    """Płytkie `update` podmieniłoby całą sekcję `model` na jednoelementową —
-    i bieg poleciałby bez `state`, `reward` i architektury."""
+def test_merge_keeps_the_rest_of_a_section():
+    """A shallow `update` would replace the whole `model` section with one field."""
     base = {"model": {"state": "ats", "reward": "queue"}, "trainer": {"episodes": 200}}
     session.merge(base, {"model": {"reward": "delay"}})
     assert base["model"] == {"state": "ats", "reward": "delay"}
     assert base["trainer"] == {"episodes": 200}
 
 
-# ----------------------------------------------------------------- urządzenie
+# ----------------------------------------------------------------- device
 
 
-def test_ngpu_minus_jeden_to_cpu():
-    """`-1` = CPU, niezależnie od tego, czy karta jest w maszynie."""
+def test_ngpu_minus_one_is_the_cpu():
+    """`-1` = CPU, whether or not the machine has a card."""
     assert session.torch_device("-1").type == "cpu"
 
 
-def test_brak_cuda_schodzi_do_cpu(monkeypatch):
-    """Zażądane GPU na maszynie bez CUDA nie może wywalić biegu — 30-godzinna
-    siatka ma się policzyć na CPU. Głośność tej degradacji zapewnia `session()`,
-    które loguje ostrzeżenie; tutaj sprawdzamy samo rozwiązanie urządzenia."""
+def test_no_cuda_falls_back_to_the_cpu(monkeypatch):
+    """A requested GPU without CUDA must not break a run; `session()` logs the
+    warning, this checks the device resolution."""
     import torch
 
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     assert session.torch_device("0").type == "cpu"
 
 
-def test_karta_jest_zawsze_zerem(monkeypatch):
-    """SEDNO: `--ngpu 3` daje `cuda:0`, a NIE `cuda:3`.
-
-    `session()` ustawia `CUDA_VISIBLE_DEVICES=3` przed pierwszym dotknięciem CUDA,
-    więc torch widzi dokładnie jedną kartę i numeruje ją od zera. `cuda:3`
-    wywaliłoby się na „invalid device ordinal" — i to dopiero przy pierwszym
-    tensorze, czyli po zbudowaniu świata, kilkanaście sekund w bieg.
-    """
+def test_the_card_is_always_zero(monkeypatch):
+    """`--ngpu 3` gives `cuda:0`, NOT `cuda:3`: `session()` sets
+    `CUDA_VISIBLE_DEVICES=3` first, so torch sees exactly one card, numbered 0."""
     import torch
 
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)

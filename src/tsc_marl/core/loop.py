@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import numpy as np
 import torch
@@ -28,7 +28,7 @@ from tsc_marl.core.features import StateBuilder
 from tsc_marl.core.graph import RoadNetGraph
 from tsc_marl.core.nets import ActorCritic
 from tsc_marl.core.ppo import PPO, PPOConfig, RolloutBuffer
-from tsc_marl.domain.sensors import FailureSpec
+from tsc_marl.domain.sensors import FailureMix, FailureSpec
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -36,11 +36,21 @@ if TYPE_CHECKING:
     from world.world_cityflow import World
 
     from runlog import Run
-    from tsc_marl.robustness.training import FailureMix, UWStream
 
 # Reporting protocol of Advanced-CoLight: a run's result is the MEAN of the last
 # 10 test episodes, not a single test after training.
 REPORT_WINDOW = 10
+
+
+class UncertaintySignal(Protocol):
+    """What the loop needs from an uncertainty source for UW-attention
+    (implemented by `robustness.training.UWStream`)."""
+
+    def reset(self) -> None: ...
+
+    def log_rho(self, obs: np.ndarray) -> torch.Tensor: ...
+
+    def episode_stats(self) -> dict[str, float]: ...
 
 
 @dataclass(frozen=True)
@@ -280,7 +290,7 @@ class CoreTrainer:
         config: LoopConfig | None = None,
         run: Run | None = None,
         logger: logging.Logger | None = None,
-        uncertainty: UWStream | None = None,
+        uncertainty: UncertaintySignal | None = None,
     ) -> None:
         self.env = env
         self.ppo = ppo
@@ -313,7 +323,7 @@ class CoreTrainer:
         logger: logging.Logger | None = None,
         device: torch.device | str = "cpu",
         failures: FailureMix | None = None,
-        uncertainty: UWStream | None = None,
+        uncertainty: UncertaintySignal | None = None,
         **feature_overrides: Any,
     ) -> CoreTrainer:
         """Builds graph, state, networks and PPO from a live `world` and Registry.
@@ -374,7 +384,7 @@ class CoreTrainer:
         )
         raw = self.env.reset(episode)
         if self.uncertainty is not None:
-            self.uncertainty.reset()  # window buffer, see `UWStream.reset`
+            self.uncertainty.reset()  # window buffer, see `UncertaintySignal.reset`
         obs, log_rho = self._obs(raw), self._log_rho(raw)
         for _ in range(cfg.decisions):
             actions, log_probs, values = self.ppo.act(obs, self.edge_index, log_rho=log_rho)
@@ -423,7 +433,7 @@ class CoreTrainer:
             buffer, train_metrics = self.collect(e)
             stats = self.ppo.update(buffer)
             # Read BEFORE `evaluate`, which switches `env.features` to the clean
-            # builder and resets `UWStream`; afterwards the stats would describe the test.
+            # builder and resets the uncertainty window.
             mech = self._mechanism_metrics()
             self._log(e, "train", {**train_metrics, **stats, **mech})
 
@@ -458,9 +468,7 @@ class CoreTrainer:
         return out
 
     def _failure_slug(self) -> str:
-        from tsc_marl.robustness.degrade import slug  # lazy: robustness imports core
-
-        return slug(self.env.features.failure)
+        return self.env.features.failure.slug()
 
     def _log(self, episode: int, split: str, values: dict[str, float]) -> None:
         if self.run is not None:

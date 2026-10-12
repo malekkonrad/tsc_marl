@@ -1,8 +1,8 @@
-"""Testy głów niepewności — wzory i jedna pułapka, która już raz kosztowała bramkę.
+"""Decision uncertainty heads: formulas, and one trap that already cost a full run.
 
-Wzory sprawdzamy na wartościach GRANICZNYCH, dla których znamy wynik analitycznie
-(α=1 → entropia log K, brak dowodów → vacuity 1), bo błąd w dekompozycji nie
-wywala się: daje tabelę, która wygląda sensownie i mówi nieprawdę.
+Formulas are checked at LIMIT values with a known analytic result (alpha = 1 ->
+entropy log K, no evidence -> vacuity 1), because an error in the decomposition
+raises nothing and produces a plausible, wrong table.
 """
 
 from __future__ import annotations
@@ -24,63 +24,61 @@ from tsc_marl.uncertainty.heads import (
 K = 4
 
 
-def test_kl_od_jednostajnego_zeruje_sie_przy_braku_dowodow():
+def test_kl_from_uniform_is_zero_without_evidence():
     assert float(_kl_uniform(torch.ones(1, K))) == pytest.approx(0.0, abs=1e-6)
 
 
-def test_kl_rosnie_z_dowodami():
-    """Regulator ma karać dowody rozdane klasom błędnym — inaczej model może
-    rozdać evidence wszystkim i nadal mieć małą stratę."""
+def test_kl_grows_with_evidence():
+    """The regulariser penalises evidence given to wrong classes."""
     kl = [float(_kl_uniform(torch.full((1, K), a))) for a in (1.0, 2.0, 5.0, 20.0)]
     assert kl == sorted(kl) and kl[-1] > kl[0]
 
 
-def test_brak_dowodow_to_maksymalna_niepewnosc():
+def test_no_evidence_is_maximal_uncertainty():
     u = dirichlet_uncertainty(torch.ones(1, K))
     assert float(u["total"]) == pytest.approx(math.log(K), abs=1e-5)
     assert float(u["vacuity"]) == pytest.approx(1.0)
 
 
-def test_duzo_dowodow_na_jedna_klase_to_pewnosc():
+def test_much_evidence_for_one_class_is_certainty():
     u = dirichlet_uncertainty(torch.tensor([[100.0, 1.0, 1.0, 1.0]]))
     assert float(u["total"]) < 0.3
     assert float(u["vacuity"]) < 0.05
 
 
-def test_ambiwalencja_jest_ALEATORYCZNA_nie_epistemiczna():
-    """Sedno mechanizmu i powód, dla którego 2.2 NIE bierze sygnału ze spreadu
-    Dirichleta: dwie fazy równie dobre przy mnóstwie dowodów to niepewność
-    DECYZJI (aleatoric), a nie brak wiedzy (epistemic). Gdyby dekompozycja tego
-    nie rozdzielała, `tie_rate` = 14% zrzutu udawałoby awarie sensorów."""
+def test_ambivalence_is_aleatoric_not_epistemic():
+    """Two equally good phases with plenty of evidence are DECISION uncertainty
+    (aleatoric), not missing knowledge (epistemic); otherwise ties would pose as
+    sensor failures."""
     u = dirichlet_uncertainty(torch.tensor([[50.0, 50.0, 1.0, 1.0]]))
     assert float(u["aleatoric"]) > 0.6
     assert float(u["epistemic"]) < 0.05
 
 
-def test_epistemic_wysoki_przy_malej_liczbie_dowodow():
-    slaby = dirichlet_uncertainty(torch.tensor([[2.0, 2.0, 1.0, 1.0]]))
-    mocny = dirichlet_uncertainty(torch.tensor([[50.0, 50.0, 1.0, 1.0]]))
-    assert float(slaby["epistemic"]) > float(mocny["epistemic"])
-    assert float(slaby["vacuity"]) > float(mocny["vacuity"])
+def test_epistemic_is_high_with_little_evidence():
+    weak = dirichlet_uncertainty(torch.tensor([[2.0, 2.0, 1.0, 1.0]]))
+    strong = dirichlet_uncertainty(torch.tensor([[50.0, 50.0, 1.0, 1.0]]))
+    assert float(weak["epistemic"]) > float(strong["epistemic"])
+    assert float(weak["vacuity"]) > float(strong["vacuity"])
 
 
-def test_strata_edl_maleje_gdy_dowody_ida_do_wlasciwej_klasy():
+def test_edl_loss_drops_when_evidence_goes_to_the_right_class():
     target = torch.tensor([0])
-    dobre = torch.tensor([[20.0, 1.0, 1.0, 1.0]])
-    zle = torch.tensor([[1.0, 20.0, 1.0, 1.0]])
-    assert float(edl_loss(dobre, target, 0.0)) < float(edl_loss(zle, target, 0.0))
+    good = torch.tensor([[20.0, 1.0, 1.0, 1.0]])
+    bad = torch.tensor([[1.0, 20.0, 1.0, 1.0]])
+    assert float(edl_loss(good, target, 0.0)) < float(edl_loss(bad, target, 0.0))
 
 
-def test_ece_zeruje_sie_dla_idealnej_kalibracji():
+def test_ece_is_zero_for_perfect_calibration():
     prob = torch.eye(K)
     assert expected_calibration_error(prob, torch.arange(K)) == pytest.approx(0.0, abs=1e-6)
 
 
-def test_ece_wykrywa_nadmierna_pewnosc():
+def test_ece_detects_overconfidence():
     prob = torch.zeros(4, K)
     prob[:, 0] = 1.0
     ece = expected_calibration_error(prob, torch.tensor([0, 1, 1, 1]))
-    assert ece == pytest.approx(0.75, abs=1e-5)  # pewność 1.0, trafność 0.25
+    assert ece == pytest.approx(0.75, abs=1e-5)  # confidence 1.0, accuracy 0.25
 
 
 # ------------------------------------------------------------------- 0-hop
@@ -91,9 +89,8 @@ def loops(n: int) -> torch.Tensor:
     return torch.stack([idx, idx])
 
 
-def test_zerohop_izoluje_wezly():
-    """„Jedno skrzyżowanie" z 2.0 realizujemy pętlami własnymi — wyjście węzła
-    nie może zależeć od cech pozostałych."""
+def test_zero_hop_isolates_nodes():
+    """One intersection via self-loops: a node's output must not depend on others."""
     torch.manual_seed(0)
     model = UncertainPolicy(20, K, dropout=0.0).eval()
     x = torch.randn(5, 20)
@@ -105,27 +102,19 @@ def test_zerohop_izoluje_wezly():
     assert not torch.allclose(a[1:], b[1:], atol=1e-6)
 
 
-def test_PUSTY_edge_index_jest_bledem():
-    """Pułapka, która kosztowała pełny przebieg bramki: `MultiHeadAttModel` woła
-    `add_self_loops` BEZ `num_nodes`, więc z pustego `edge_index` wnioskuje zero
-    węzłów, nie dokłada pętli i agregacja zwraca zera — model przestaje zależeć
-    od wejścia i trenuje sam bias, bez żadnego błędu. Test istnieje po to, żeby
-    nikt nie „uprościł" 0-hopu z powrotem do pustej listy krawędzi.
-
-    Do Kroku 1 UW-attention test asertował samą CISZĘ (dwa różne wejścia, jedno
-    wyjście). Od kiedy `GATEncoder` składa się z `UncertaintyWeightedAttention`,
-    głowa dziedziczy jej strażnika `maybe_num_nodes(edge_index) != x.size(0)`
-    i pusty `edge_index` jest wyjątkiem, a nie cichą stałą. Ta sama intencja,
-    mocniejszy sposób jej pilnowania. 0-hop realizują pętle własne — patrz
-    `_edges` w `uncertainty/prototype.py` i test wyżej."""
+def test_empty_edge_index_is_an_error():
+    """`add_self_loops` without `num_nodes` infers zero nodes from an empty
+    `edge_index`, the aggregation returns zeros and the model trains only its bias,
+    silently. The attention layer turns this into an error; 0-hop uses self-loops
+    (`_edges` in `prototype.py`)."""
     torch.manual_seed(0)
     model = UncertainPolicy(20, K, dropout=0.0).eval()
-    pusty = torch.zeros((2, 0), dtype=torch.long)
-    with pytest.raises(ValueError, match="izolowany"):
-        model(torch.randn(5, 20), pusty)
+    empty = torch.zeros((2, 0), dtype=torch.long)
+    with pytest.raises(ValueError, match="isolated"):
+        model(torch.randn(5, 20), empty)
 
 
-def test_jeden_hop_widzi_sasiada():
+def test_one_hop_sees_the_neighbour():
     torch.manual_seed(0)
     model = UncertainPolicy(20, K, dropout=0.0).eval()
     edges = torch.tensor([[1], [0]])  # 1 -> 0
@@ -136,15 +125,13 @@ def test_jeden_hop_widzi_sasiada():
     assert not torch.allclose(a[0], model(x2, edges)[0], atol=1e-6)
 
 
-def test_mc_dropout_probkuje_i_przywraca_tryb():
-    """K przejść ma się RÓŻNIĆ (inaczej epistemic jest zerem z definicji),
-    a model ma wrócić do trybu, w którym był — inaczej kolejna ewaluacja
-    liczyłaby się z włączonym dropoutem."""
+def test_mc_dropout_samples_and_restores_the_mode():
+    """K passes must DIFFER (otherwise epistemic is zero by definition) and the
+    model must return to its previous mode."""
     torch.manual_seed(0)
     model = UncertainPolicy(20, K, dropout=0.5).eval()
-    # głowa startuje z gain=0.01, czyli praktycznie na rozkładzie jednostajnym —
-    # wtedy dropout niczym nie porusza i epistemic wychodzi zerem Z DEFINICJI.
-    # Skalujemy wagi, żeby test mierzył próbkowanie, a nie inicjalizację.
+    # the head starts with gain 0.01, i.e. almost uniform, where dropout moves
+    # nothing; scale the weights so the test measures sampling, not initialisation
     with torch.no_grad():
         model.head.weight.mul_(50.0)
     out = mc_dropout(model, torch.randn(8, 20), loops(8), k=10)
@@ -153,7 +140,7 @@ def test_mc_dropout_probkuje_i_przywraca_tryb():
     assert torch.allclose(out["prob"].sum(-1), torch.ones(8), atol=1e-5)
 
 
-def test_softmax_i_edl_daja_ten_sam_ksztalt():
+def test_softmax_and_edl_give_the_same_shape():
     torch.manual_seed(0)
     x, ei = torch.randn(3, 20), loops(3)
     for mode in ("edl", "softmax"):
@@ -162,6 +149,6 @@ def test_softmax_i_edl_daja_ten_sam_ksztalt():
     assert (UncertainPolicy(20, K, dropout=0.0).eval()(x, ei) >= 1.0).all()  # alpha = evidence + 1
 
 
-def test_odrzuca_nieznany_tryb():
+def test_rejects_an_unknown_mode():
     with pytest.raises(ValueError, match="mode="):
         UncertainPolicy(20, K, mode="dirichlet")

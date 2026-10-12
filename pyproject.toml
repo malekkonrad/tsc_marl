@@ -11,7 +11,7 @@ dependencies = [
     "libsumo==1.27.1",        # pip's libsumo is 1.27 and the versions must match
     "traci==1.27.1",
     "sumolib==1.27.1",
-    # CityFlow is not on PyPI — built from source (needs cmake + g++):
+    # CityFlow is not on PyPI, built from source (needs cmake + g++):
     "cityflow @ git+https://github.com/cityflow-project/CityFlow.git@81ee0f4",
 
     # --- learning ---
@@ -78,14 +78,14 @@ ignore = ["E402"]
 "src/tsc_marl/libsignal/agents/*" = ["E741"]
 
 [tool.pytest.ini_options]
-# Tests do not need the engine, but conftest puts the submodule on sys.path —
+# Tests do not need the engine, but conftest puts the submodule on sys.path,
 # hence one rootdir and no test collection in external/.
 testpaths = ["tests"]
 # Fast tests only by default; a later `-m` on the command line wins, so
 # `pytest -m slow` runs the slow ones and `pytest -m ""` runs everything.
 addopts = "-q -m 'not slow'"
 markers = [
-  "slow: needs a running CityFlow simulator (~15 s per session instead of ~2 s)",
+  "slow: needs a running simulator, CityFlow or SUMO (~20 s for the whole set)",
 ]
 
 [tool.pyright]
@@ -102,7 +102,7 @@ autoImportCompletions = true
 useLibraryCodeForTypes = true
 
 # Third-party code is analysed only to resolve imports.
-exclude = ["external", ".venv", "runs", "data", "deploy"]
+exclude = ["external", ".venv", "runs", "data"]
 
 [tool.uv]
 # The environment is built by `make setup` (CPU or CUDA torch index), not `uv sync`.

@@ -1,13 +1,13 @@
-# Bramka 2.2 — próba poprawy na martwych detektorach
+# Gate 2.2: attempt to improve on dead detectors
 
-Kryterium ustalone PRZED uruchomieniem: wariant zalicza, jeśli AUROC na błędnych odczytach ≥ 0.7 na OBU niewidzianych maskach (mask0p5, mask0p25_intersection) i ≥ 0.8 na każdym niewidzianym szumie (gauss3p5, gauss4, urand3p5). Trening na clean/gauss1/gauss2/mask0p25, ewaluacja na ogonie epizodu.
+Criterion fixed BEFORE running: a variant passes if AUROC on wrong readings is >= 0.7 on BOTH unseen masks (mask0p5, mask0p25_intersection) and >= 0.8 on every unseen noise (gauss3p5, gauss4, urand3p5). Trained on clean/gauss1/gauss2/mask0p25, evaluated on the episode tail.
 
-| wariant | gauss1 | gauss2 | gauss4 | urand3p5 | mask0p25 | mask0p5 | mask0p25_intersection | drift0p3 | pokrycie 90% (czyste) | zalicza |
+| variant | gauss1 | gauss2 | gauss4 | urand3p5 | mask0p25 | mask0p5 | mask0p25_intersection | drift0p3 | 90% coverage (clean) | passes |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|:-:|
-| okno 4 (bramka 2.2) | 0.797 | 0.866 | 0.906 | 0.872 | 0.700 | 0.630 | 0.603 | 0.534 | 85.3% | NIE |
-| okno 12 | 0.822 | 0.898 | 0.931 | 0.908 | 0.738 | 0.689 | 0.602 | 0.536 | 68.8% | NIE |
-| okno 12 + trwałość | 0.856 | 0.903 | 0.922 | 0.913 | 0.788 | 0.739 | 0.651 | 0.536 | 66.7% | NIE |
+| window 4 (gate 2.2) | 0.797 | 0.866 | 0.906 | 0.872 | 0.700 | 0.630 | 0.603 | 0.534 | 85.3% | NO |
+| window 12 | 0.822 | 0.898 | 0.931 | 0.908 | 0.738 | 0.689 | 0.602 | 0.536 | 68.8% | NO |
+| window 12 + persistence | 0.856 | 0.903 | 0.922 | 0.913 | 0.788 | 0.739 | 0.651 | 0.536 | 66.7% | NO |
 
-## Werdykt
+## Verdict
 
-**Bramka 2.2 ZAMKNIĘTA JAKO ZALICZONA CZĘŚCIOWO.** Żaden wariant nie osiąga 0.7 na obu niewidzianych maskach. Najlepszy na maskach: „okno 12 + trwałość” (min AUROC 0.651). Głowa jest estymatorem niepewności dla awarii SZUMOWYCH, a na awariach CICHYCH (martwe detektory) działa słabo — do opisania wprost; ablacja rule-gate vs UQ na maskach zyskuje na wadze.
+**Gate 2.2 CLOSED AS PARTIALLY PASSED.** No variant reaches 0.7 on both unseen masks. Best on masks: "window 12 + persistence" (min AUROC 0.651). The head estimates uncertainty for NOISE failures and works poorly on SILENT ones (dead detectors).

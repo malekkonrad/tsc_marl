@@ -1,4 +1,4 @@
-"""Repository layout — the only place that knows where things live.
+"""Repository layout, the only place that knows where things live.
 
 Separate from the LibSignal bridge because `analysis/` and `runner/suite.py` need
 only the paths, not the bridge. Imports nothing from the project and has no side

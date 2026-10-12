@@ -1,4 +1,4 @@
-"""Eksperyment = katalog biegów. Rejestracja, wyszukiwanie, agregacja."""
+"""Experiment = a directory of runs: registration, lookup, aggregation."""
 
 from __future__ import annotations
 
@@ -15,13 +15,10 @@ from runlog.run import OK, RUNNING, Run, RunView
 
 
 def is_orphan(meta: dict[str, Any]) -> bool:
-    """Czy bieg w statusie `running` jest martwy: zapisany na TEJ maszynie przez
-    proces, który już nie istnieje.
-
-    Ostrożnie w obie strony: bieg z innej maszyny albo bez zapisanego `pid`
-    (metadane sprzed tej zmiany) uznajemy za żywy — zdeptanie liczącego procesu
-    jest gorsze niż ręczne `replace=True`. Ponowne użycie numeru pid przez inny
-    proces też daje „żywy", czyli znowu błąd po bezpiecznej stronie."""
+    """Whether a `running` run is dead: written on THIS machine by a process that
+    no longer exists. Conservative both ways: a run from another machine or
+    without a recorded `pid` counts as alive (trampling a live process is worse
+    than a manual `replace=True`); a reused pid also reads as alive."""
     pid, host = meta.get("pid"), meta.get("host")
     if not isinstance(pid, int) or host != platform.node():
         return False
@@ -30,7 +27,7 @@ def is_orphan(meta: dict[str, Any]) -> bool:
     except ProcessLookupError:
         return True
     except PermissionError:
-        return False  # proces istnieje, tylko nie nasz
+        return False  # the process exists, it is just not ours
     return False
 
 
@@ -43,7 +40,7 @@ class Experiment:
     def path(self) -> Path:
         return self.root / self.name
 
-    # ---------------------------------------------------------------- zapis
+    # ---------------------------------------------------------------- writing
 
     def start(
         self,
@@ -53,18 +50,16 @@ class Experiment:
         repos: dict[str, Path] | None = None,
         replace: bool = False,
     ) -> Run:
-        """Rejestruje bieg i zwraca uchwyt (context manager).
+        """Register a run and return its handle (a context manager).
 
-        Reguły kolizji — sedno narzędzia:
-        * te same `run_id`, INNE `params` → `RunIdCollision`. Nigdy, przenigdy
-          nie nadpisujemy po cichu: to jest ta pomyłka, po której dwa różne
-          eksperymenty dzielą jeden katalog i nie da się tego wykryć po fakcie.
-        * status `ok` albo `running` → `RunExists` (chyba że `replace=True`).
-          `running` też blokuje, bo może to być ŻYWY bieg w innym procesie —
-          WYJĄTEK: bieg osierocony (`is_orphan`: ta sama maszyna, proces nie żyje),
-          np. po `kill -TERM` albo restarcie maszyny. Taki bieg nigdy się nie
-          domknie, a bez tego wyjątku blokowałby wznowienie siatki na zawsze.
-        * status `failed`/`timeout` → wznowienie dozwolone, katalog czyszczony.
+        Collision rules, the core of the tool:
+        * same `run_id`, DIFFERENT `params` -> `RunIdCollision`. Never overwrite
+          silently: otherwise two experiments share a directory undetectably.
+        * status `ok` or `running` -> `RunExists` (unless `replace=True`);
+          `running` blocks too, since it may be a LIVE run in another process,
+          except an orphan (`is_orphan`: same machine, dead process), which would
+          otherwise block resuming a suite forever.
+        * status `failed`/`timeout` -> resuming allowed, the directory is cleared.
         """
         path = self.path / run_id
         digest = store.params_hash(params)
@@ -73,16 +68,16 @@ class Experiment:
         if existing and not replace:
             if existing.get("params_hash") != digest:
                 raise store.RunIdCollision(
-                    f"run_id '{run_id}' istnieje z INNYMI parametrami "
+                    f"run_id '{run_id}' exists with DIFFERENT parameters "
                     f"({existing.get('params_hash')} vs {digest}). "
-                    "Zmień run_id albo podaj replace=True, jeśli naprawdę chcesz nadpisać."
+                    "Change the run_id or pass replace=True to really overwrite."
                 )
             if existing.get("status") == OK or (
                 existing.get("status") == RUNNING and not is_orphan(existing)
             ):
                 raise store.RunExists(
-                    f"run_id '{run_id}' ma status '{existing.get('status')}' — "
-                    "użyj find() żeby go pominąć, albo replace=True żeby policzyć ponownie."
+                    f"run_id '{run_id}' has status '{existing.get('status')}'; "
+                    "use find() to skip it or replace=True to recompute."
                 )
 
         if path.exists():
@@ -97,7 +92,7 @@ class Experiment:
             "params": params,
             "params_hash": digest,
             "provenance": collect(repos),
-            # kto liczy — bez tego osieroconego `running` nie da się odróżnić od żywego
+            # who computes it: without this an orphaned `running` looks alive
             "pid": os.getpid(),
             "host": platform.node(),
         }
@@ -107,15 +102,14 @@ class Experiment:
             run.attach_config(config)
         return run
 
-    # --------------------------------------------------------------- odczyt
+    # --------------------------------------------------------------- reading
 
     def runs(self) -> list[RunView]:
         return [RunView(d) for d in store.run_dirs(self.root, self.name)]
 
     def find(self, status: str | None = OK, **params: Any) -> list[RunView]:
-        """Biegi pasujące do podanych parametrów. Domyślnie tylko `ok` — bo
-        „czy to już policzone?" ma znaczyć policzone DO KOŃCA. `status=None`
-        wyłącza filtr."""
+        """Runs matching the given parameters; only `ok` by default, since "already
+        computed" means computed TO THE END. `status=None` disables the filter."""
         out = []
         for run in self.runs():
             if status is not None and run.status != status:
@@ -125,8 +119,8 @@ class Experiment:
         return out
 
     def is_done(self, run_id: str, params: dict[str, Any]) -> bool:
-        """Skip-if-done: bieg istnieje, skończył się dobrze i ma TE SAME parametry.
-        Zmiana czegokolwiek w configu daje inny odcisk → policzy się ponownie."""
+        """Skip-if-done: the run exists, finished `ok` and has THE SAME parameters;
+        any config change gives another fingerprint and a recomputation."""
         meta = store.read_json(self.path / run_id / store.META)
         return bool(
             meta
@@ -134,11 +128,11 @@ class Experiment:
             and meta.get("params_hash") == store.params_hash(params)
         )
 
-    # ------------------------------------------------------------- ramki danych
+    # ------------------------------------------------------------- data frames
 
     def results(self, status: str | None = None):
-        """DataFrame: jeden wiersz na bieg, kolumny = params + result + metadane."""
-        import pandas as pd  # noqa: PLC0415 - leniwie, żeby ścieżka zapisu nie płaciła
+        """DataFrame: one row per run, columns = params + result + metadata."""
+        import pandas as pd  # lazy, so the write path does not pay for it
 
         rows = []
         for run in self.runs():
@@ -152,8 +146,8 @@ class Experiment:
         return pd.DataFrame(rows)
 
     def metrics(self, run_ids: list[str] | None = None):
-        """DataFrame długi: run_id, step, split, metric, value — sklejony z biegów."""
-        import pandas as pd  # noqa: PLC0415
+        """Long DataFrame: run_id, step, split, metric, value, over all runs."""
+        import pandas as pd
 
         frames = []
         for run in self.runs():
@@ -179,19 +173,17 @@ class Experiment:
         status: str | None = OK,
         df=None,
     ):
-        """mean/std/n po `over` (zwykle 'seed'), pogrupowane po `by`.
+        """mean/std/n over `over` (usually 'seed'), grouped by `by`.
 
-        `n` liczy UNIKALNE wartości `over`, nie wiersze — powtórzony bieg tego
-        samego seeda nie ma udawać większej próby.
-
-        `df` pozwala podać własną ramkę (np. z kolumnami pochodnymi, po które
-        `results()` nie sięga) zamiast czytać biegi z dysku."""
+        `n` counts UNIQUE values of `over`, not rows: a repeated run of one seed
+        must not pose as a larger sample. `df` lets the caller pass its own frame
+        (e.g. with derived columns) instead of reading runs from disk."""
         if df is None:
             df = self.results(status=status)
         if df.empty:
             return df
         if over in by:
-            raise ValueError(f"'{over}' nie może być jednocześnie w `by` i `over`")
+            raise ValueError(f"'{over}' cannot be in both `by` and `over`")
         present = [m for m in metrics if m in df.columns]
         agg = {m: ["mean", "std"] for m in present}
         agg[over] = ["nunique"]

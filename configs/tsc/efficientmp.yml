@@ -1,14 +1,14 @@
 includes:
   - configs/tsc/base.yml
-  - configs/tsc/thesis_protocol.yml   # zamrożony protokół — musi być OSTATNI
+  - configs/tsc/thesis_protocol.yml   # frozen protocol, must be LAST
 
 model:
   name: efficientmp
   t_min: 15
-  w1: 4.0     # waga demand (Advanced-MP, Alg. 1); papier: "test several simple weights"
+  w1: 4.0     # demand weight (Advanced-MP, Alg. 1); the paper: "test several simple weights"
 
 trainer:
-  episodes: 1   # metoda bez treningu
+  episodes: 1   # a method without training
   buffer_size: 0
   learning_rate: 0
   learning_start: 0

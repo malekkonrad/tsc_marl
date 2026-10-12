@@ -1,63 +1,63 @@
-# T2 — trening Z UW-attention, którego u pochodzi z licznika zamrożeń (`p1_uw_rule`).
+# T2: training WITH UW-attention whose u comes from the freeze counter (`p1_uw_rule`).
 #
-# SKĄD TEN PLAN. Wszystko, co wiemy o UW z sygnałem z reguły, zmierzono na ZAMROŻONEJ
-# polityce, której doklejono modulację w ewaluacji (`t2_uw_rule`). Jedyny trening z UW
-# (`p1_uw` → `t2_train_uw`) uczył się z głowy po stronie CELU, czyli z sygnału ~losowego
-# względem zepsutego źródła. Nie wiemy więc, czy polityka, która WIDZI dobry sygnał
-# w treningu, nauczy się z niego korzystać inaczej — w szczególności kanałem KRAWĘDZI
-# (ochrona sąsiadów), który na zamrożonej polityce jest wart ~0 i przez który UW jest
-# redundantne wobec bramki fallbacku (C5 w `kontrybucje.md`).
+# WHERE THIS PLAN COMES FROM. Everything we know about UW with the rule signal was measured on
+# a FROZEN policy that got the modulation only at evaluation (`t2_uw_rule`). The only training
+# with UW (`p1_uw` -> `t2_train_uw`) learned from the head on the TARGET side, i.e. from a
+# signal ~random with respect to the broken source. So we do not know whether a policy that
+# SEES a good signal in training learns to use it differently, in particular through the EDGE
+# channel (protecting neighbours), which is worth ~0 on a frozen policy and makes UW redundant
+# with the fallback gate (C5 in `kontrybucje.md`).
 #
-# RAMIONA I PARY. Rodzice: `p1_fail` (trening z awariami, bez UW) i `p1_uw_rule` (ta
-# sama mieszanka awarii, z UW z reguły). Każda kolumna ma JAWNE odniesienie, a każda
-# para różni się jedną rzeczą:
+# ARMS AND PAIRS. Parents: `p1_fail` (failure training, no UW) and `p1_uw_rule` (the same
+# failure mix, with UW from the rule). Every column has an EXPLICIT reference, and every pair
+# differs in one thing:
 #
-#   kolumna                  rodzic       mechanizm w ewaluacji   vs                 pytanie
-#   gatppo                   t1 (czysty)  —                       —                  odniesienie T1
-#   gatppo_fail              p1_fail      —                       gatppo             DR (powtórka t2_train_uw)
-#   gatppo_fail_uwinf        p1_fail      UW z reguły             gatppo_fail        UW doklejone do polityki DR
-#   gatppo_fail_uw_rule      p1_uw_rule   UW z reguły             gatppo_fail_uwinf  ★ CO DAJE TRENING z sygnałem
-#   gatppo_fail_gate         p1_fail      bramka-reguła           gatppo_fail        bramka na polityce DR
-#   gatppo_fail_uw_rule_gate p1_uw_rule   UW z reguły + bramka    gatppo_fail_gate   ★ czy wtrenowane UW dokłada do bramki
+#   column                   parent       mechanism at evaluation  vs                 question
+#   gatppo                   t1 (clean)   -                        -                  T1 reference
+#   gatppo_fail              p1_fail      -                        gatppo             DR (repeat of t2_train_uw)
+#   gatppo_fail_uwinf        p1_fail      UW from the rule         gatppo_fail        UW added to the DR policy
+#   gatppo_fail_uw_rule      p1_uw_rule   UW from the rule         gatppo_fail_uwinf  *1 WHAT TRAINING with the signal gives
+#   gatppo_fail_gate         p1_fail      rule gate                gatppo_fail        the gate on the DR policy
+#   gatppo_fail_uw_rule_gate p1_uw_rule   UW from the rule + gate  gatppo_fail_gate   *2 does trained-in UW add to the gate
 #   fixedtime
 #
-# Para ★1 trzyma mechanizm w ewaluacji stały i zmienia tylko to, czy polityka uczyła
-# się z nim — dokładnie „trening vs doklejenie". Para ★2 powtarza rozstrzygnięcie R4
-# z `t2_uw_rule`, ale na polityce, która mogła się nauczyć kanału krawędzi. Pary
-# z różnymi rodzicami parują się po (seed, losowanie) i rozrzut między treningami
-# wchodzi do różnicy — raport mówi to w opisie pary (`wspolny_checkpoint`).
+# Pair *1 keeps the mechanism at evaluation fixed and changes only whether the policy learned
+# with it: exactly "training vs bolting on". Pair *2 repeats the R4 decision of `t2_uw_rule`,
+# but on a policy that could have learned the edge channel. Pairs with different parents are
+# paired by (seed, draw) and the spread between trainings enters the difference; the report
+# says so in the pair description (`shared_checkpoint`).
 #
-# Seedy 0–2 na obu sieciach: tyle mają `p1_fail` (JiNan i HangZhou, policzone)
-# i tyle ma mieć `p1_uw_rule`.
+# Seeds 0-2 on both networks: that is what `p1_fail` has (JiNan and HangZhou, computed) and
+# what `p1_uw_rule` is to have.
 #
-# HIPOTEZY ZAPISANE PRZED POMIAREM:
-#   T1 (czysty, A3a): ★1 bez istotnej różnicy na `clean` — ta sama mieszanka awarii,
-#      a reguła na czystym prawie milczy (`uw_active` ~1%, `t2_uw_rule`).
-#   T2 (★1, główna): BEZ PRZEKONANIA co do znaku. Za zyskiem: polityka widzi w treningu
-#      log ρ trafiające w martwe węzły i może nauczyć się polegać na sąsiadach mocniej
-#      niż przy doklejeniu. Przeciw: `t2_train_uw` (głowa, strona celu) dało znak PRZECIW
-#      przy maskach (+41 s przy `mask0p5`), a DR samo już uczy politykę ignorować zera.
-#      Za istotny wynik uznajemy |t| ≥ 2,8 przy `mask*_intersection` lub `mask0p5`
-#      na OBU sieciach.
-#   T3 (★2): ~0 przy `mask*_intersection`, tak jak na zamrożonej polityce. Zysk
-#      złożenia oznaczałby, że trening otworzył kanał krawędzi — wtedy UW przestaje
-#      być redundantne wobec bramki i wraca do architektury jako składnik UCZONY.
-#   T4 (drift): ★1 ~0. Reguła strzela przy `drift` fałszywie (precyzja 0 w `t2_uw_rule`),
-#      więc polityka uczona z jej sygnałem mogła nauczyć się ignorować modulację
-#      częściej, niż powinna — jeśli tak, wyjdzie to w maskach, nie w drift.
-#   T0 (WARUNEK WAŻNOŚCI, przed czymkolwiek): `uw_active` na czystych epizodach
-#      testowych końca treningu `p1_uw_rule` ≤ 5% (nagłówek suite'a). Sygnał z reguły
-#      zależy od polityki — nienauczona polityka głodzi wloty i reguła strzela na 87%
-#      krawędzi przy czystym ruchu. Bez spełnienia T0 zero w ★1/★2 nie jest wynikiem.
-#   Odczyt:
-#   - T2 i T3 ~0 → „trening z sygnałem nic nie zmienia" — C5 bez zmian, C6 dostaje
-#     zdanie, że druga dźwignia (DR) nie składa się z UW. Domknięcie pytania z §3
-#     `faza3-po-t2.md` na DOBRYM sygnale, a nie na złym.
-#   - T2 zysk, T3 ~0 → trening wzmacnia kanał pętli; redundancja wobec bramki zostaje.
-#   - T3 zysk → trening otwiera kanał krawędzi. Najmocniejszy możliwy wynik dla UW;
-#     przed wpisaniem do pracy POWTÓRZYĆ `t2_uw_channels` na rodzicu `p1_uw_rule`.
+# HYPOTHESES RECORDED BEFORE MEASUREMENT:
+#   T1 (clean, A3a): *1 without a significant difference on `clean`: the same failure mix,
+#      and the rule is almost silent on clean (`uw_active` ~1%, `t2_uw_rule`).
+#   T2 (*1, main): NO CONVICTION about the sign. For a gain: in training the policy sees
+#      log rho hitting dead nodes and may learn to rely on neighbours more than when the
+#      signal is bolted on. Against: `t2_train_uw` (head, target side) gave the sign AGAINST
+#      under masks (+41 s at `mask0p5`), and DR alone already teaches the policy to ignore
+#      zeros. A significant result means |t| >= 2.8 at `mask*_intersection` or `mask0p5` on
+#      BOTH networks.
+#   T3 (*2): ~0 at `mask*_intersection`, as on the frozen policy. A gain of the composition
+#      would mean training opened the edge channel; then UW stops being redundant with the
+#      gate and returns to the architecture as a LEARNED component.
+#   T4 (drift): *1 ~0. The rule fires falsely under `drift` (precision 0 in `t2_uw_rule`), so
+#      a policy trained with its signal may have learned to ignore the modulation more often
+#      than it should; if so, it will show under masks, not under drift.
+#   T0 (VALIDITY CONDITION, before anything else): `uw_active` on the clean test episodes at
+#      the end of `p1_uw_rule` training <= 5% (suite header). The rule signal depends on the
+#      policy: an untrained policy starves approaches and the rule fires on 87% of edges on
+#      clean traffic. Without T0 a zero in *1/*2 is not a result.
+#   Reading:
+#   - T2 and T3 ~0 -> "training with the signal changes nothing": C5 unchanged, C6 gets the
+#     statement that the second lever (DR) does not compose with UW. Closes the question of
+#     section 3 of `faza3-po-t2.md` on a GOOD signal rather than a bad one.
+#   - T2 gain, T3 ~0 -> training strengthens the loop channel; the redundancy with the gate stays.
+#   - T3 gain -> training opens the edge channel. The strongest possible result for UW;
+#     before writing it into the thesis REPEAT `t2_uw_channels` on the `p1_uw_rule` parent.
 #
-# WYMAGA: policzonego suite'a `p1_uw_rule` (glider, ~2,5 h) oraz `gate_ref__*.npz`.
+# REQUIRES: the computed `p1_uw_rule` suite (GPU machine, ~2.5 h) and `gate_ref__*.npz`.
 name: t2_train_uw_rule
 mode: realistic
 draws: 5
@@ -82,7 +82,7 @@ controllers:
     agent: gatppo
     seeds: [0, 1, 2]
     parent: "{agent}__{network}__s{seed}_y{yellow}__p1_uw_rule"
-    # mechanizm MUSI być włączony w ewaluacji: polityka uczyła się z nim
+    # the mechanism MUST be on at evaluation: the policy learned with it
     uw: {tau: 0.25, side: source, u: rule}
     baseline: gatppo_fail_uwinf
   gatppo_fail_gate:

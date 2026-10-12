@@ -1,6 +1,6 @@
 includes:
   - configs/tsc/base.yml
-  - configs/tsc/thesis_protocol.yml   # zamrożony protokół — musi być OSTATNI
+  - configs/tsc/thesis_protocol.yml   # frozen protocol, must be LAST
 
 
 model:
@@ -9,7 +9,7 @@ model:
 
 
 trainer:
-  episodes: 1   # metoda bez treningu — jak fixedtime/sotl (base.yml daje 200 bez sensu)
+  episodes: 1   # a method without training, like fixedtime/sotl (base.yml's 200 is meaningless)
   buffer_size: 0
   learning_rate: 0
   learning_start: 0

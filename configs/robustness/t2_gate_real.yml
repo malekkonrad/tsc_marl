@@ -1,55 +1,56 @@
-# T2 dla BRAMKI REALNEJ — ile z sufitu wyroczni zbiera sygnał policzalny z odczytów.
+# T2 for the REAL GATE: how much of the oracle ceiling a signal computable from readings collects.
 #
-# Wyrocznia (`t2_gate`) pokazała zapas: −120 s przy `mask0p25_intersection`, −242 s
-# przy `mask0p5`, −403 s przy `mask0p75`, przy zerowej szkodzie na czystym. Ale czyta
-# prawdę z warstwy awarii, więc nie jest sterownikiem. Ten plan mierzy dwie bramki
-# WDRAŻALNE przeciwko tamtemu sufitowi:
+# The oracle (`t2_gate`) showed the headroom: -120 s at `mask0p25_intersection`, -242 s at
+# `mask0p5`, -403 s at `mask0p75`, with zero harm on clean. But it reads the truth from the
+# failure layer, so it is not a controller. This plan measures two DEPLOYABLE gates against
+# that ceiling:
 #
-#   rule — ułamek ruchów węzła, których odczyty stoją w miejscu przez całe okno.
-#          Licznik zamrożonych detektorów; łapie `zero` i `hold` jednym kryterium.
-#   uq   — ułamek ruchów, których u przekracza własną normę z czystego okna (głowa
-#          obserwacyjna, artefakty z `runs/heads/`).
+#   rule - the fraction of a node's movements whose readings stand still over the whole
+#          window. A frozen detector counter; it catches `zero` and `hold` with one criterion.
+#   uq   - the fraction of movements whose u exceeds their own norm from the clean window
+#          (the observation head, artefacts from `runs/heads/`).
 #
-# TO JEST ABLACJA, KTÓRA ROZSTRZYGA O GŁOWIE NIEPEWNOŚCI W CAŁEJ PRACY. UW-attention
-# jej istnienia nie obronił (results/t2_uw.md: mechanizm zadziałał, ATT neutralne).
-# Jeśli licznik zamrożeń bramkuje równie dobrze, wniosek brzmi „do wykrycia martwego
-# detektora wystarczy trwałość odczytu" i tak trzeba go napisać.
+# THIS IS THE ABLATION THAT DECIDES ABOUT THE UNCERTAINTY HEAD IN THE WHOLE THESIS.
+# UW-attention did not justify its existence (results/t2_uw.md: the mechanism worked, ATT
+# neutral). If the freeze counter gates equally well, the conclusion reads "reading
+# persistence is enough to detect a dead detector" and it must be written that way.
 #
-# OBA SYGNAŁY MAJĄ TĘ SAMĄ POSTAĆ (ułamek podejrzanych ruchów) i progi skalibrowane
-# TYM SAMYM kryterium na czystym oknie zrzutu BC: ≤0,5% decyzji z fałszywym
-# przełączeniem (`GATE_FALSE_ALARM`). Inaczej porównywalibyśmy gotowość do strzelania,
-# a nie jakość sygnałów. Progi są w artefakcie `runs/heads/gate_ref__<sieć>.npz`,
-# nie w tym pliku — plan ich nie nadpisuje.
+# BOTH SIGNALS HAVE THE SAME FORM (fraction of suspicious movements) and thresholds
+# calibrated by THE SAME criterion on the clean window of the BC dataset: <=0.5% of
+# decisions with a false switch (`GATE_FALSE_ALARM`). Otherwise we would compare readiness
+# to fire rather than signal quality. The thresholds live in the artefact
+# `runs/heads/gate_ref__<network>.npz`, not in this file; the plan does not override them.
 #
-# HIPOTEZY ZAPISANE PRZED POMIAREM (na podstawie zrzutu BC, nie T2):
-#  1. `zero`-maski: reguła blisko wyroczni (odsetek przełączeń 52,6% vs 62% przy
-#     mask0p5, 25,0% vs 27% przy mask0p25_intersection). UQ dużo słabiej (14,8%).
-#  2. `hold`: reguła powinna trzymać (zamrożenie to jej kryterium), ale z OPÓŹNIENIEM
-#     do 12 decyzji — tyle trwa zapełnienie okna. Wyrocznia przełącza natychmiast,
-#     więc różnica ATT zmierzy koszt tego opóźnienia.
-#  3. `gauss`: UQ MA TAM MASOWO MYLIĆ. σ rośnie przy szumie, gdzie detektory żyją,
-#     a polityka bije FixedTime (319 s vs 507 s). Na zrzucie BC: 88% decyzji powyżej
-#     progu przy gauss2, wobec 0% dla reguły. Scenariusze `gauss` są w planie WŁAŚNIE
-#     po to, żeby ten tryb porażki było widać, a nie żeby go ominąć.
+# HYPOTHESES RECORDED BEFORE MEASUREMENT (based on the BC dataset, not T2):
+#  1. `zero` masks: the rule close to the oracle (switch rate 52.6% vs 62% at mask0p5,
+#     25.0% vs 27% at mask0p25_intersection). UQ much weaker (14.8%).
+#  2. `hold`: the rule should hold (freezing is its criterion), but with a DELAY of up to
+#     12 decisions, the time to fill the window. The oracle switches at once, so the ATT
+#     difference measures the cost of that delay.
+#  3. `gauss`: UQ IS EXPECTED TO ERR MASSIVELY THERE. sigma grows under noise, where the
+#     detectors are alive and the policy beats FixedTime (319 s vs 507 s). On the BC dataset:
+#     88% of decisions above threshold at gauss2, against 0% for the rule. The `gauss`
+#     scenarios are in the plan PRECISELY so this failure mode shows, not to avoid it.
 #
-# HISTEREZA (k_on/k_off) dotyczy tylko bramek realnych — sygnał wyroczni jest stały
-# w epizodzie. Wchodzi do odcisku biegu, więc jej zmiana unieważnia wynik.
+# HYSTERESIS (k_on/k_off) applies to real gates only; the oracle's signal is constant
+# within an episode. It enters the run fingerprint, so changing it invalidates the result.
 #
-# DIAGNOSTYKA `gate_precision` / `gate_recall` liczy się względem wyroczni z progiem
-# `oracle_threshold` (domyślnie 0,5 = „połowa wlotów węzła martwa"). To jest DEFINICJA
-# oślepienia przyjęta do oceny detektora i jest niezależna od progu, na którym pracuje
-# kolumna-wyrocznia (0,75). Ostrzejszy próg dawał przy maskach pasowych zbiór pusty
-# i obie metryki stawały się nieokreślone. Prawda z warstwy awarii NIE dotyka decyzji.
+# The `gate_precision` / `gate_recall` DIAGNOSTICS are computed against the oracle with
+# threshold `oracle_threshold` (0.5 by default = "half of the node's approaches dead"). This
+# is the DEFINITION of blinding used to assess the detector and is independent of the
+# threshold the oracle column works at (0.75). A stricter threshold gave an empty set under
+# lane masks and both metrics became undefined. The truth from the failure layer does NOT
+# touch decisions.
 #
-# HANGZHOU — przewidywanie zapisane PRZED biegiem: próg reguły skalibrował się tam
-# na 0,875 (7 z 8 ruchów zamrożonych) wobec 0,25 na JiNan. Powód: na czystym oknie
-# HangZhou wiele ruchów legalnie stoi (mniejszy ruch na ruch), więc kwantyl 99,5%
-# wypada wysoko. Bramka będzie tam ZNACZNIE zachowawczna: powinna łapać martwe
-# skrzyżowania (wszystkie 8 ruchów zamrożonych), a przy maskach pasowych milczeć.
-# Jeśli tak wyjdzie, jest to własność kalibracji „na czystym", nie wada detektora —
-# i pokazuje, ile w tej metodzie zależy od gęstości ruchu w sieci.
+# HANGZHOU, a prediction recorded BEFORE the run: the rule threshold calibrated there to
+# 0.875 (7 of 8 movements frozen) against 0.25 on JiNan. Reason: on HangZhou's clean window
+# many movements legitimately stand still (less traffic per movement), so the 99.5% quantile
+# lands high. The gate will be MUCH more conservative there: it should catch dead
+# intersections (all 8 movements frozen) and stay silent under lane masks. If so, it is a
+# property of calibrating "on clean", not a detector defect, and it shows how much of this
+# method depends on the network's traffic density.
 #
-# WYMAGA: tsc obshead -n <sieć> --save --window 12 --persistence
+# REQUIRES: tsc obshead -n <network> --save --window 12 --persistence
 name: t2_gate_real
 mode: realistic
 draws: 5
