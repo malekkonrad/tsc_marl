@@ -12,6 +12,44 @@ the repository adds robustness mechanisms as wrappers (fallback gates, action ma
 uncertainty-weighted attention) and a sensor failure layer that every controller reads
 through, so all methods are compared on the same corrupted detectors.
 
+![Python](https://img.shields.io/badge/Python-3.10-3776AB?logo=python&logoColor=white)
+![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?logo=pytorch&logoColor=white)
+![CityFlow](https://img.shields.io/badge/sim-CityFlow%20%7C%20SUMO-2E7D32)
+![Status](https://img.shields.io/badge/status-thesis%20in%20progress-orange)
+
+<p align="center">
+  <img src="docs/media/krakow_dead_detectors.gif" alt="SUMO replay of four controllers on the Kraków corridor with dead detectors" width="100%"/>
+</p>
+
+<sub>One hour of SUMO traffic on the al. Trzech Wieszczów corridor in Kraków, with the
+detectors at 11 of 25 intersections dead. All four controllers get the same traffic and the
+same failures. Advanced-MP and the plain GAT-PPO policy act on broken readings and the
+corridor jams (ATT 1153 s and 824 s). The policy trained with failures and a fallback gate
+stays at the level of the fixed-time plan (361 s vs. 348 s). The GIF is generated from
+recorded runs by [`docs/media/make_readme_gif.py`](docs/media/make_readme_gif.py).</sub>
+
+### At a glance
+
+- **Controller:** each intersection is an agent. A **graph attention network (GAT)** actor shares information between neighbouring intersections and is trained with **MAPPO** under CTDE, with a centralised critic.
+- **Benchmarks:** CityFlow JiNan 3×4 and HangZhou 4×4, plus a SUMO case study of the **al. Trzech Wieszczów corridor in Kraków**, built from OpenStreetMap. Baselines are FixedTime, SOTL, MaxPressure, PressLight, CoLight, MPLight, FRAP, and our implementations of Efficient-MP, Advanced-MP and Advanced-CoLight.
+- **Robustness study:** a sensor-failure layer injects Gaussian noise, dead detectors, dead intersections, drift and stale ("hold") readings. Every controller reads through the same corrupted detectors.
+- **Mechanisms evaluated:** fallback gates (rule-based and uncertainty-based), action masking, and attention weighted by edge reliability. Uncertainty comes from an observation head (Gaussian NLL) and from an actor ensemble (epistemic).
+- **Engineering:** a frozen experimental protocol, YAML-defined training grids and evaluation plans, fingerprinted runs with provenance (repo + submodule SHA), and dependency rules between layers enforced by tests.
+
+**Selected results** (JiNan 3×4, realistic 5 s transitions, ATT in seconds, lower is better):
+
+| scenario | GAT+PPO (ours) | + rule fallback gate | Advanced-CoLight | FixedTime |
+|---|---:|---:|---:|---:|
+| clean detectors | 295.9 | 295.7 | 294.4 | 507.0 |
+| 25% intersections dead | 471.1 | **353.1** (−25%) | 744.4 | 507.0 |
+| 50% detectors dead | 732.6 | **525.7** (−28%) | 787.9 | 507.0 |
+
+On clean data the GAT+PPO core matches the state-of-the-art Advanced-CoLight. Under heavy
+detector failure, every learned controller degrades below a fixed-time plan, and a fallback
+gate recovers a large part of that gap. Full tables are in [`results/`](results/).
+
+![ATT under detector failure, JiNan 3x4](results/figures/t2_gate_real_cityflow_jinan3x4_4ph.png)
+
 Day-to-day commands: **[USAGE.md](USAGE.md)**.
 
 ---
